@@ -1,0 +1,31 @@
+# Rust build artifacts
+/target/
+
+# Rustfmt backup files
+**/*.rs.bk
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+
+# Local secrets / credentials
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.jks
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS-generated files
+.DS_Store
+Thumbs.db

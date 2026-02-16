@@ -1,0 +1,12 @@
+[package]
+name = "perspecta"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+dicom-object = "0.7"
+dicom-pixeldata = { version = "0.7", features = ["openjp2"] }
+eframe = "0.30"
+egui = "0.30"
+rfd = "0.15"
