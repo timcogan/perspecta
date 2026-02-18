@@ -413,6 +413,42 @@ impl DicomViewerApp {
         Some(ctx.load_texture(texture_name, thumb, TextureOptions::LINEAR))
     }
 
+    fn build_group_history_thumb(
+        &mut self,
+        group: &[MammoViewport],
+        texture_key_prefix: &str,
+        ctx: &egui::Context,
+    ) -> Option<TextureHandle> {
+        let mut rendered_views = Vec::new();
+        for viewport in group {
+            let frame_count = viewport.image.frame_count();
+            if frame_count == 0 {
+                continue;
+            }
+            let safe_frame = viewport.current_frame.min(frame_count.saturating_sub(1));
+            let rendered = Self::render_image_frame(
+                &viewport.image,
+                safe_frame,
+                viewport.window_center,
+                viewport.window_width,
+            )?;
+            rendered_views.push(rendered);
+        }
+
+        if rendered_views.is_empty() {
+            return None;
+        }
+
+        let thumb = if rendered_views.len() == 1 {
+            downsample_color_image(&rendered_views[0], HISTORY_THUMB_MAX_DIM)
+        } else {
+            compose_grid_thumb(&rendered_views, HISTORY_THUMB_MAX_DIM)
+        };
+
+        let texture_name = self.next_history_texture_name(texture_key_prefix);
+        Some(ctx.load_texture(texture_name, thumb, TextureOptions::LINEAR))
+    }
+
     fn upsert_history_entry(&mut self, entry: HistoryEntry) {
         if let Some(existing_index) = self
             .history_entries
@@ -459,7 +495,6 @@ impl DicomViewerApp {
             return;
         }
 
-        let mut thumbs = Vec::new();
         let mut paths = Vec::new();
         let mut cached_viewports = Vec::new();
         for viewport in group {
@@ -473,21 +508,10 @@ impl DicomViewerApp {
                 window_width: viewport.window_width,
                 current_frame: viewport.current_frame,
             });
-            if let Some(texture) = self.build_history_thumb(
-                &viewport.image,
-                viewport.current_frame,
-                viewport.window_center,
-                viewport.window_width,
-                "group",
-                ctx,
-            ) {
-                thumbs.push(HistoryThumb { texture });
-            }
         }
-
-        if thumbs.is_empty() {
+        let Some(group_thumb) = self.build_group_history_thumb(group, "group", ctx) else {
             return;
-        }
+        };
 
         self.upsert_history_entry(HistoryEntry {
             id: history_id_from_paths(&paths),
@@ -495,7 +519,9 @@ impl DicomViewerApp {
                 viewports: cached_viewports,
                 selected_index: selected_index.min(group.len().saturating_sub(1)),
             }),
-            thumbs,
+            thumbs: vec![HistoryThumb {
+                texture: group_thumb,
+            }],
         });
     }
 
@@ -1189,14 +1215,6 @@ impl DicomViewerApp {
                                         .stroke(egui::Stroke::new(1.0, stroke_color))
                                         .inner_margin(egui::Margin::same(MAMMO_VIEW_INNER_MARGIN));
                                     frame.show(ui, |ui| {
-                                        let label_response = ui.selectable_label(
-                                            index == self.mammo_selected_index,
-                                            &viewport.label,
-                                        );
-                                        if label_response.clicked() {
-                                            clicked_index = Some(index);
-                                        }
-
                                         let remaining = ui.available_size();
                                         let texture_size = viewport.texture.size_vec2();
                                         let scale = (remaining.x / texture_size.x)
@@ -1916,6 +1934,56 @@ fn downsample_color_image(source: &ColorImage, max_dim: usize) -> ColorImage {
             let source_x = ((target_x * source_width) / target_width).min(source_width - 1);
             let source_index = source_y * source_width + source_x;
             pixels.push(source.pixels[source_index]);
+        }
+    }
+
+    ColorImage {
+        size: [target_width, target_height],
+        pixels,
+    }
+}
+
+fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
+    if images.is_empty() || max_dim == 0 {
+        return ColorImage {
+            size: [1, 1],
+            pixels: vec![egui::Color32::BLACK],
+        };
+    }
+    if images.len() == 1 {
+        return downsample_color_image(&images[0], max_dim);
+    }
+
+    let columns = if images.len() >= 4 { 2 } else { images.len() };
+    let rows = images.len().div_ceil(columns);
+    let cell_width = (max_dim / columns).max(1);
+    let cell_height = (max_dim / rows).max(1);
+    let target_width = cell_width * columns;
+    let target_height = cell_height * rows;
+    let mut pixels = vec![egui::Color32::BLACK; target_width * target_height];
+
+    for (index, image) in images.iter().enumerate() {
+        let source_width = image.size[0].max(1);
+        let source_height = image.size[1].max(1);
+
+        let scale = (cell_width as f32 / source_width as f32)
+            .min(cell_height as f32 / source_height as f32);
+        let draw_width = ((source_width as f32 * scale).round() as usize).clamp(1, cell_width);
+        let draw_height = ((source_height as f32 * scale).round() as usize).clamp(1, cell_height);
+
+        let col = index % columns;
+        let row = index / columns;
+        let base_x = col * cell_width + (cell_width - draw_width) / 2;
+        let base_y = row * cell_height + (cell_height - draw_height) / 2;
+
+        for y in 0..draw_height {
+            let source_y = ((y * source_height) / draw_height).min(source_height - 1);
+            for x in 0..draw_width {
+                let source_x = ((x * source_width) / draw_width).min(source_width - 1);
+                let source_index = source_y * source_width + source_x;
+                let target_index = (base_y + y) * target_width + (base_x + x);
+                pixels[target_index] = image.pixels[source_index];
+            }
         }
     }
 
