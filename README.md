@@ -1,4 +1,4 @@
-# Perspecta Viewer
+<h1><img src="assets/perspecta.svg" alt="Perspecta logo" width="24" valign="middle" /> Perspecta Viewer</h1>
 
 Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`eframe`), focused on fast loading, responsive interaction, and simple launch integration from external systems.
 
