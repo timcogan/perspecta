@@ -1365,10 +1365,6 @@ impl eframe::App for DicomViewerApp {
         self.process_pending_history_open(ctx);
         self.process_pending_local_open(ctx);
 
-        if ctx.input(|input| input.key_pressed(egui::Key::C)) {
-            self.toggle_cine_mode();
-        }
-
         if let Some(request) = self.pending_launch_request.take() {
             self.handle_launch_request(request, ctx);
         }
@@ -1378,6 +1374,7 @@ impl eframe::App for DicomViewerApp {
 
         let mut history_cycle_direction = None;
         let mut close_requested = false;
+        let mut c_pressed = false;
         ctx.input_mut(|input| {
             if input.consume_key(egui::Modifiers::COMMAND, egui::Key::W) {
                 close_requested = true;
@@ -1386,6 +1383,7 @@ impl eframe::App for DicomViewerApp {
             } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
                 history_cycle_direction = Some(1);
             }
+            c_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::C);
         });
         if close_requested {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1394,8 +1392,10 @@ impl eframe::App for DicomViewerApp {
         if let Some(direction) = history_cycle_direction {
             self.cycle_history_entry(direction);
         }
-        let history_transition_pending =
-            history_cycle_direction.is_some() || self.pending_history_open_index.is_some();
+        let history_transition_pending = self.pending_history_open_index.is_some();
+        if c_pressed && !history_transition_pending {
+            self.toggle_cine_mode();
+        }
 
         let mut open_dicoms_clicked = false;
 
@@ -1683,8 +1683,7 @@ impl eframe::App for DicomViewerApp {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui
-                                            .add_enabled(
-                                                !history_transition_pending,
+                                            .add(
                                                 egui::Button::new(
                                                     egui::RichText::new("↺").size(14.0),
                                                 )
@@ -1702,8 +1701,7 @@ impl eframe::App for DicomViewerApp {
                                         }
 
                                         if ui
-                                            .add_enabled(
-                                                !history_transition_pending,
+                                            .add(
                                                 egui::Slider::new(&mut self.cine_fps, 1.0..=120.0)
                                                     .text("Cine FPS"),
                                             )
@@ -1720,8 +1718,7 @@ impl eframe::App for DicomViewerApp {
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui
-                                            .add_enabled(
-                                                !history_transition_pending,
+                                            .add(
                                                 egui::Button::new(if self.cine_mode {
                                                     "Stop Cine (C)"
                                                 } else {
@@ -1749,7 +1746,7 @@ impl eframe::App for DicomViewerApp {
         }
 
         // Avoid applying stale W/L UI state while cycling history quickly with Tab.
-        if request_rebuild && !history_transition_pending {
+        if request_rebuild {
             if let Some(state) = active_state.as_ref() {
                 self.apply_active_viewport_state(state, ctx);
             }
