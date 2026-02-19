@@ -2,6 +2,7 @@ mod app;
 mod dicom;
 mod dicomweb;
 mod launch;
+mod mammo;
 mod renderer;
 
 fn main() -> eframe::Result<()> {

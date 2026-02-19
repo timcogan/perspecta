@@ -8,6 +8,7 @@ use reqwest::blocking::Client;
 use reqwest::header::ACCEPT;
 
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest};
+use crate::mammo::{classify_laterality, classify_view};
 
 const TAG_SOP_INSTANCE_UID: &str = "00080018";
 const TAG_SERIES_INSTANCE_UID: &str = "0020000E";
@@ -95,7 +96,7 @@ where
         bail!("DICOMweb grouped launch requested no groups");
     }
 
-    let mut downloaded_groups = Vec::with_capacity(request.groups.len());
+    let mut selected_instances_by_group = Vec::with_capacity(request.groups.len());
 
     for (group_index, group_series_uids) in request.groups.iter().enumerate() {
         if group_series_uids.len() != 1 && group_series_uids.len() != 4 {
@@ -153,33 +154,51 @@ where
             );
         }
 
-        let group_paths = if group_index == request.open_group {
-            download_instances_streaming(
-                &client,
-                &base,
-                &request.study_uid,
-                &cache_dir,
-                auth,
-                &selected_instances,
-                &mut on_active_path,
-            )?
-        } else {
-            download_instances_parallel(
-                &client,
-                &base,
-                &request.study_uid,
-                &cache_dir,
-                auth,
-                &selected_instances,
-            )?
-        };
-
-        downloaded_groups.push(group_paths);
+        selected_instances_by_group.push(selected_instances);
     }
 
     let open_group = request
         .open_group
-        .min(downloaded_groups.len().saturating_sub(1));
+        .min(selected_instances_by_group.len().saturating_sub(1));
+
+    let mut downloaded_groups = (0..selected_instances_by_group.len())
+        .map(|_| None::<Vec<PathBuf>>)
+        .collect::<Vec<_>>();
+
+    downloaded_groups[open_group] = Some(download_instances_streaming(
+        &client,
+        &base,
+        &request.study_uid,
+        &cache_dir,
+        auth,
+        &selected_instances_by_group[open_group],
+        &mut on_active_path,
+    )?);
+
+    for group_index in (0..selected_instances_by_group.len()).filter(|i| *i != open_group) {
+        let group_paths = download_instances_parallel(
+            &client,
+            &base,
+            &request.study_uid,
+            &cache_dir,
+            auth,
+            &selected_instances_by_group[group_index],
+        )?;
+        downloaded_groups[group_index] = Some(group_paths);
+    }
+
+    let downloaded_groups = downloaded_groups
+        .into_iter()
+        .enumerate()
+        .map(|(group_index, group)| {
+            group.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "DICOMweb group {} failed to produce downloaded paths",
+                    group_index
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(DicomWebDownloadResult::Grouped {
         groups: downloaded_groups,
@@ -580,36 +599,6 @@ fn mammo_sort_key(instance: &MetadataInstance) -> (u8, u8, i32, String) {
         instance_number,
         instance.instance_uid.clone(),
     )
-}
-
-fn classify_laterality(value: Option<&str>) -> Option<&'static str> {
-    let token = normalize_token(value);
-    if token.starts_with('R') || token.contains("RIGHT") {
-        Some("R")
-    } else if token.starts_with('L') || token.contains("LEFT") {
-        Some("L")
-    } else {
-        None
-    }
-}
-
-fn classify_view(value: Option<&str>) -> Option<&'static str> {
-    let token = normalize_token(value);
-    if token.contains("MLO") {
-        Some("MLO")
-    } else if token.contains("CC") {
-        Some("CC")
-    } else {
-        None
-    }
-}
-
-fn normalize_token(value: Option<&str>) -> String {
-    value
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_uppercase()
-        .replace(' ', "")
 }
 
 fn download_instance(

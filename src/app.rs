@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ use crate::dicomweb::{
     download_dicomweb_group_request, download_dicomweb_request, DicomWebDownloadResult,
 };
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest, LaunchRequest};
+use crate::mammo::{classify_laterality, classify_view, normalize_token};
 use crate::renderer::{render_rgb, render_window_level};
 
 const APP_TITLE: &str = "Perspecta Viewer";
@@ -38,6 +39,16 @@ struct MammoViewport {
 struct PendingMammoLoad {
     path: PathBuf,
     image: DicomImage,
+}
+
+enum HistoryPreloadResult {
+    Single {
+        path: PathBuf,
+        image: DicomImage,
+    },
+    Group {
+        viewports: Vec<(PathBuf, DicomImage)>,
+    },
 }
 
 #[derive(Clone)]
@@ -116,7 +127,9 @@ pub struct DicomViewerApp {
     dicomweb_active_path_receiver: Option<Receiver<PathBuf>>,
     dicomweb_active_group_expected: Option<usize>,
     dicomweb_active_group_paths: Vec<PathBuf>,
+    dicomweb_active_pending_paths: VecDeque<PathBuf>,
     mammo_load_receiver: Option<Receiver<Result<PendingMammoLoad, String>>>,
+    history_preload_receiver: Option<Receiver<Result<HistoryPreloadResult, String>>>,
     window_center: f32,
     window_width: f32,
     status_line: String,
@@ -159,7 +172,9 @@ impl DicomViewerApp {
             dicomweb_active_path_receiver: None,
             dicomweb_active_group_expected: None,
             dicomweb_active_group_paths: Vec::new(),
+            dicomweb_active_pending_paths: VecDeque::new(),
             mammo_load_receiver: None,
+            history_preload_receiver: None,
             window_center: 0.0,
             window_width: 1.0,
             status_line: initial_status.unwrap_or_default(),
@@ -192,7 +207,9 @@ impl DicomViewerApp {
     fn is_loading(&self) -> bool {
         self.dicomweb_receiver.is_some()
             || self.dicomweb_active_path_receiver.is_some()
+            || !self.dicomweb_active_pending_paths.is_empty()
             || self.mammo_load_receiver.is_some()
+            || self.history_preload_receiver.is_some()
             || self.pending_history_open_index.is_some()
             || self.pending_local_open_paths.is_some()
     }
@@ -594,80 +611,60 @@ impl DicomViewerApp {
         self.history_entries.insert(0, entry);
     }
 
-    fn preload_group_into_history(&mut self, paths: &[PathBuf], ctx: &egui::Context) {
-        match paths.len() {
+    fn preload_group_into_history(
+        paths: &[PathBuf],
+        tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
+    ) {
+        let result = match paths.len() {
             1 => {
                 let path = paths[0].clone();
-                let Ok(image) = load_dicom(&path) else {
-                    return;
-                };
-                let center = image.window_center;
-                let width = image.window_width;
-                let Some(color_image) = Self::render_image_frame(&image, 0, center, width) else {
-                    return;
-                };
-                let texture_name = format!("history-preload-single:{}", path.display());
-                let texture = ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
-                self.push_single_history_entry(
-                    HistorySingleData {
-                        path,
-                        image,
-                        texture,
-                        window_center: center,
-                        window_width: width,
-                        current_frame: 0,
-                        cine_fps: DEFAULT_CINE_FPS,
-                    },
-                    ctx,
-                );
+                load_dicom(&path)
+                    .map(|image| HistoryPreloadResult::Single { path, image })
+                    .map_err(|err| format!("{err:#}"))
             }
             4 => {
-                let mut loaded = Vec::with_capacity(4);
+                let mut viewports = Vec::with_capacity(4);
                 for path in paths {
-                    let Ok(image) = load_dicom(path) else {
-                        return;
+                    let image = match load_dicom(path).map_err(|err| format!("{err:#}")) {
+                        Ok(image) => image,
+                        Err(err) => {
+                            let _ = tx.send(Err(err));
+                            return;
+                        }
                     };
-                    let center = image.window_center;
-                    let width = image.window_width;
-                    let Some(color_image) = Self::render_image_frame(&image, 0, center, width)
-                    else {
-                        return;
-                    };
-                    let texture_name = format!("history-preload-group:{}", path.display());
-                    let texture =
-                        ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
-                    let label = mammo_label(&image, path);
-                    loaded.push(MammoViewport {
-                        path: path.clone(),
-                        image,
-                        texture,
-                        label,
-                        window_center: center,
-                        window_width: width,
-                        current_frame: 0,
-                    });
+                    viewports.push((path.clone(), image));
                 }
-                loaded.sort_by(|a, b| {
-                    mammo_sort_key(&a.image, &a.path).cmp(&mammo_sort_key(&b.image, &b.path))
-                });
-                self.push_group_history_entry(&loaded, 0, ctx);
+                Ok(HistoryPreloadResult::Group { viewports })
             }
-            _ => {}
-        }
+            _ => Err("Unsupported preload group size".to_string()),
+        };
+        let _ = tx.send(result);
     }
 
     fn preload_non_active_groups_into_history(
         &mut self,
         groups: &[Vec<PathBuf>],
         open_group: usize,
-        ctx: &egui::Context,
     ) {
-        for (index, group) in groups.iter().enumerate().rev() {
-            if index == open_group {
-                continue;
-            }
-            self.preload_group_into_history(group, ctx);
+        let preload_jobs = groups
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(index, _)| *index != open_group)
+            .map(|(_, group)| group.clone())
+            .collect::<Vec<_>>();
+        if preload_jobs.is_empty() {
+            self.history_preload_receiver = None;
+            return;
         }
+
+        let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        thread::spawn(move || {
+            for group in preload_jobs {
+                Self::preload_group_into_history(&group, &tx);
+            }
+        });
+        self.history_preload_receiver = Some(rx);
     }
 
     fn sync_current_state_to_history(&mut self) {
@@ -855,12 +852,7 @@ impl DicomViewerApp {
         if active_paths.len() == 4 {
             return;
         }
-        for index in (0..groups.len())
-            .rev()
-            .filter(|index| *index != active_group)
-        {
-            self.load_selected_paths(groups[index].clone(), ctx);
-        }
+        self.preload_non_active_groups_into_history(&groups, active_group);
     }
 
     fn start_dicomweb_download(&mut self, request: DicomWebLaunchRequest) {
@@ -870,9 +862,11 @@ impl DicomViewerApp {
         }
 
         self.sync_current_state_to_history();
+        self.history_preload_receiver = None;
         self.dicomweb_active_path_receiver = None;
         self.dicomweb_active_group_expected = None;
         self.dicomweb_active_group_paths.clear();
+        self.dicomweb_active_pending_paths.clear();
         self.status_line = "Loading study from DICOMweb...".to_string();
         let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
         thread::spawn(move || {
@@ -895,9 +889,11 @@ impl DicomViewerApp {
             .unwrap_or(0);
 
         self.sync_current_state_to_history();
+        self.history_preload_receiver = None;
         self.status_line = "Loading grouped study from DICOMweb...".to_string();
         self.dicomweb_active_group_expected = Some(active_expected);
         self.dicomweb_active_group_paths.clear();
+        self.dicomweb_active_pending_paths.clear();
         if active_expected == 4 {
             self.mammo_load_receiver = None;
             self.clear_single_viewer();
@@ -932,7 +928,12 @@ impl DicomViewerApp {
             .or_else(|| self.mammo_group.iter().position(Option::is_none));
 
         let Some(slot_index) = slot else {
-            return Ok(());
+            return Err(format!(
+                "Discarded streamed image {}: no available mammo slot (loaded={}, capacity={})",
+                pending.path.display(),
+                self.loaded_mammo_count(),
+                self.mammo_group.len()
+            ));
         };
 
         let default_center = pending.image.window_center;
@@ -968,53 +969,165 @@ impl DicomViewerApp {
     }
 
     fn poll_dicomweb_active_paths(&mut self, ctx: &egui::Context) {
-        let Some(receiver) = self.dicomweb_active_path_receiver.take() else {
-            return;
-        };
-
         let expected = self.dicomweb_active_group_expected.unwrap_or(0);
-        let mut keep_receiver = true;
-        match receiver.try_recv() {
-            Ok(path) => {
-                self.dicomweb_active_group_paths.push(path.clone());
-                match expected {
-                    1 => {
-                        self.load_selected_paths(vec![path], ctx);
+        let mut keep_receiver = false;
+        if let Some(receiver) = self.dicomweb_active_path_receiver.take() {
+            keep_receiver = true;
+            loop {
+                match receiver.try_recv() {
+                    Ok(path) => {
+                        self.dicomweb_active_pending_paths.push_back(path);
                     }
-                    4 => match load_dicom(&path) {
-                        Ok(image) => {
-                            if let Err(err) =
-                                self.insert_loaded_mammo(PendingMammoLoad { path, image }, ctx)
-                            {
-                                self.status_line = err;
-                                self.mammo_group.clear();
-                                self.cine_mode = false;
-                                self.dicomweb_active_group_paths.clear();
-                                self.dicomweb_active_group_expected = None;
-                            } else {
-                                ctx.request_repaint();
-                            }
-                        }
-                        Err(err) => {
-                            self.status_line =
-                                format!("Error opening streamed DICOM {}: {err:#}", path.display());
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        keep_receiver = false;
+                        break;
+                    }
+                }
+            }
+            if keep_receiver {
+                self.dicomweb_active_path_receiver = Some(receiver);
+            }
+        }
+
+        if let Some(path) = self.dicomweb_active_pending_paths.pop_front() {
+            self.dicomweb_active_group_paths.push(path.clone());
+            match expected {
+                1 => {
+                    self.load_selected_paths(vec![path], ctx);
+                }
+                4 => match load_dicom(&path) {
+                    Ok(image) => {
+                        if let Err(err) =
+                            self.insert_loaded_mammo(PendingMammoLoad { path, image }, ctx)
+                        {
+                            self.status_line = err;
                             self.mammo_group.clear();
                             self.cine_mode = false;
                             self.dicomweb_active_group_paths.clear();
+                            self.dicomweb_active_pending_paths.clear();
                             self.dicomweb_active_group_expected = None;
+                        } else {
+                            if self.mammo_group_complete() {
+                                let mut loaded = self
+                                    .mammo_group
+                                    .iter()
+                                    .filter_map(Option::as_ref)
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                loaded.sort_by(|a, b| {
+                                    mammo_sort_key(&a.image, &a.path)
+                                        .cmp(&mammo_sort_key(&b.image, &b.path))
+                                });
+                                self.push_group_history_entry(
+                                    &loaded,
+                                    self.mammo_selected_index,
+                                    ctx,
+                                );
+                                self.move_current_history_to_front();
+                            }
+                            ctx.request_repaint();
                         }
-                    },
-                    _ => {}
-                }
+                    }
+                    Err(err) => {
+                        self.status_line =
+                            format!("Error opening streamed DICOM {}: {err:#}", path.display());
+                        self.mammo_group.clear();
+                        self.cine_mode = false;
+                        self.dicomweb_active_group_paths.clear();
+                        self.dicomweb_active_pending_paths.clear();
+                        self.dicomweb_active_group_expected = None;
+                    }
+                },
+                _ => {}
             }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                keep_receiver = false;
+        }
+
+        if keep_receiver || !self.dicomweb_active_pending_paths.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    fn poll_history_preload(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.history_preload_receiver.take() else {
+            return;
+        };
+
+        let mut keep_receiver = true;
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => match result {
+                    Ok(HistoryPreloadResult::Single { path, image }) => {
+                        let center = image.window_center;
+                        let width = image.window_width;
+                        let Some(color_image) = Self::render_image_frame(&image, 0, center, width)
+                        else {
+                            continue;
+                        };
+                        let texture_name = format!("history-preload-single:{}", path.display());
+                        let texture =
+                            ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
+                        self.push_single_history_entry(
+                            HistorySingleData {
+                                path,
+                                image,
+                                texture,
+                                window_center: center,
+                                window_width: width,
+                                current_frame: 0,
+                                cine_fps: DEFAULT_CINE_FPS,
+                            },
+                            ctx,
+                        );
+                        self.move_current_history_to_front();
+                    }
+                    Ok(HistoryPreloadResult::Group { viewports }) => {
+                        let mut loaded = Vec::with_capacity(viewports.len());
+                        for (path, image) in viewports {
+                            let center = image.window_center;
+                            let width = image.window_width;
+                            let Some(color_image) =
+                                Self::render_image_frame(&image, 0, center, width)
+                            else {
+                                continue;
+                            };
+                            let texture_name = format!("history-preload-group:{}", path.display());
+                            let texture =
+                                ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
+                            let label = mammo_label(&image, &path);
+                            loaded.push(MammoViewport {
+                                path,
+                                image,
+                                texture,
+                                label,
+                                window_center: center,
+                                window_width: width,
+                                current_frame: 0,
+                            });
+                        }
+                        if loaded.len() == 4 {
+                            loaded.sort_by(|a, b| {
+                                mammo_sort_key(&a.image, &a.path)
+                                    .cmp(&mammo_sort_key(&b.image, &b.path))
+                            });
+                            self.push_group_history_entry(&loaded, 0, ctx);
+                            self.move_current_history_to_front();
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("History preload skipped: {err}");
+                    }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    keep_receiver = false;
+                    break;
+                }
             }
         }
 
         if keep_receiver {
-            self.dicomweb_active_path_receiver = Some(receiver);
+            self.history_preload_receiver = Some(receiver);
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
@@ -1031,6 +1144,7 @@ impl DicomViewerApp {
                         self.load_selected_paths(paths, ctx);
                         self.dicomweb_active_group_expected = None;
                         self.dicomweb_active_group_paths.clear();
+                        self.dicomweb_active_pending_paths.clear();
                         self.dicomweb_active_path_receiver = None;
                         if self.status_line.is_empty() {
                             self.status_line = "Loaded study from DICOMweb.".to_string();
@@ -1040,13 +1154,17 @@ impl DicomViewerApp {
                         let active_group_len =
                             groups.get(open_group).map(|group| group.len()).unwrap_or(0);
                         let streamed_count = self.dicomweb_active_group_paths.len();
+                        let streaming_started = streamed_count > 0
+                            || !self.dicomweb_active_pending_paths.is_empty()
+                            || self.dicomweb_active_group_expected == Some(active_group_len);
                         let streamed_active_complete = streamed_count >= active_group_len
-                            && (active_group_len == 1 || active_group_len == 4);
+                            && (active_group_len == 1 || active_group_len == 4)
+                            && self.dicomweb_active_pending_paths.is_empty();
 
-                        if !streamed_active_complete {
+                        if !streamed_active_complete && !streaming_started {
                             self.load_local_groups(groups, open_group, ctx);
                         } else {
-                            self.preload_non_active_groups_into_history(&groups, open_group, ctx);
+                            self.preload_non_active_groups_into_history(&groups, open_group);
                             if active_group_len == 4 && self.mammo_group_complete() {
                                 let mut loaded = self
                                     .mammo_group
@@ -1067,9 +1185,12 @@ impl DicomViewerApp {
                             self.move_current_history_to_front();
                         }
 
-                        self.dicomweb_active_group_expected = None;
-                        self.dicomweb_active_group_paths.clear();
-                        self.dicomweb_active_path_receiver = None;
+                        if streamed_active_complete || !streaming_started {
+                            self.dicomweb_active_group_expected = None;
+                            self.dicomweb_active_group_paths.clear();
+                            self.dicomweb_active_pending_paths.clear();
+                            self.dicomweb_active_path_receiver = None;
+                        }
                         if self.status_line.is_empty() {
                             self.status_line = "Loaded grouped study from DICOMweb.".to_string();
                         }
@@ -1079,6 +1200,7 @@ impl DicomViewerApp {
                     self.status_line = format!("DICOMweb error: {err}");
                     self.dicomweb_active_group_expected = None;
                     self.dicomweb_active_group_paths.clear();
+                    self.dicomweb_active_pending_paths.clear();
                     self.dicomweb_active_path_receiver = None;
                 }
             },
@@ -1090,6 +1212,7 @@ impl DicomViewerApp {
                 self.status_line = "DICOMweb download worker disconnected.".to_string();
                 self.dicomweb_active_group_expected = None;
                 self.dicomweb_active_group_paths.clear();
+                self.dicomweb_active_pending_paths.clear();
                 self.dicomweb_active_path_receiver = None;
             }
         }
@@ -1171,6 +1294,7 @@ impl DicomViewerApp {
         if !paths.is_empty() {
             self.sync_current_state_to_history();
         }
+        self.history_preload_receiver = None;
 
         match paths.len() {
             0 => {}
@@ -1735,6 +1859,7 @@ impl eframe::App for DicomViewerApp {
 
         self.poll_dicomweb_active_paths(ctx);
         self.poll_dicomweb_download(ctx);
+        self.poll_history_preload(ctx);
         self.poll_mammo_group_load(ctx);
         self.advance_cine_if_needed(ctx);
 
@@ -2202,36 +2327,6 @@ impl eframe::App for DicomViewerApp {
         if self.is_loading() {
             ctx.set_cursor_icon(egui::CursorIcon::Progress);
         }
-    }
-}
-
-fn normalize_token(value: Option<&str>) -> String {
-    value
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_uppercase()
-        .replace(' ', "")
-}
-
-fn classify_laterality(value: Option<&str>) -> Option<&'static str> {
-    let token = normalize_token(value);
-    if token.starts_with('R') || token.contains("RIGHT") {
-        Some("R")
-    } else if token.starts_with('L') || token.contains("LEFT") {
-        Some("L")
-    } else {
-        None
-    }
-}
-
-fn classify_view(value: Option<&str>) -> Option<&'static str> {
-    let token = normalize_token(value);
-    if token.contains("MLO") {
-        Some("MLO")
-    } else if token.contains("CC") {
-        Some("CC")
-    } else {
-        None
     }
 }
 
