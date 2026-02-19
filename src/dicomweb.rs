@@ -79,9 +79,13 @@ pub fn download_dicomweb_request(
     Ok(DicomWebDownloadResult::Single(paths))
 }
 
-pub fn download_dicomweb_group_request(
+pub fn download_dicomweb_group_request<F>(
     request: &DicomWebGroupedLaunchRequest,
-) -> Result<DicomWebDownloadResult> {
+    mut on_active_path: F,
+) -> Result<DicomWebDownloadResult>
+where
+    F: FnMut(PathBuf),
+{
     let client = build_http_client()?;
     let base = normalize_base_url(&request.base_url);
     let auth = request.username.as_deref().zip(request.password.as_deref());
@@ -149,14 +153,26 @@ pub fn download_dicomweb_group_request(
             );
         }
 
-        let group_paths = download_instances_parallel(
-            &client,
-            &base,
-            &request.study_uid,
-            &cache_dir,
-            auth,
-            &selected_instances,
-        )?;
+        let group_paths = if group_index == request.open_group {
+            download_instances_streaming(
+                &client,
+                &base,
+                &request.study_uid,
+                &cache_dir,
+                auth,
+                &selected_instances,
+                &mut on_active_path,
+            )?
+        } else {
+            download_instances_parallel(
+                &client,
+                &base,
+                &request.study_uid,
+                &cache_dir,
+                auth,
+                &selected_instances,
+            )?
+        };
 
         downloaded_groups.push(group_paths);
     }
@@ -169,6 +185,35 @@ pub fn download_dicomweb_group_request(
         groups: downloaded_groups,
         open_group,
     })
+}
+
+fn download_instances_streaming<F>(
+    client: &Client,
+    base: &str,
+    study_uid: &str,
+    cache_dir: &Path,
+    auth: Option<(&str, &str)>,
+    instances: &[MetadataInstance],
+    on_path: &mut F,
+) -> Result<Vec<PathBuf>>
+where
+    F: FnMut(PathBuf),
+{
+    let mut paths = Vec::with_capacity(instances.len());
+    for instance in instances {
+        let path = download_instance(
+            client,
+            base,
+            study_uid,
+            instance.series_uid.as_deref(),
+            &instance.instance_uid,
+            cache_dir,
+            auth,
+        )?;
+        on_path(path.clone());
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 fn build_http_client() -> Result<Client> {
