@@ -1394,6 +1394,8 @@ impl eframe::App for DicomViewerApp {
         if let Some(direction) = history_cycle_direction {
             self.cycle_history_entry(direction);
         }
+        let history_transition_pending =
+            history_cycle_direction.is_some() || self.pending_history_open_index.is_some();
 
         let mut open_dicoms_clicked = false;
 
@@ -1549,174 +1551,195 @@ impl eframe::App for DicomViewerApp {
                     let controls_width = (available_width * 0.92).clamp(260.0, available_width);
                     let slider_width = (controls_width * 0.84).clamp(220.0, controls_width);
 
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                        if state.is_monochrome {
-                            let center_range = (state.min_value as f32 - 2000.0)
-                                ..=(state.max_value as f32 + 2000.0);
-                            let max_width =
-                                ((state.max_value - state.min_value).abs() as f32 * 2.0).max(1.0);
-                            let width_range = 1.0..=max_width;
-                            let refresh_button_size = ui.spacing().interact_size.y;
-                            let row_height = ui.spacing().interact_size.y;
-                            let slider_with_refresh_width =
-                                (slider_width - refresh_button_size - ui.spacing().item_spacing.x)
+                    ui.add_enabled_ui(!history_transition_pending, |ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                            if state.is_monochrome {
+                                let center_range = (state.min_value as f32 - 2000.0)
+                                    ..=(state.max_value as f32 + 2000.0);
+                                let max_width = ((state.max_value - state.min_value).abs() as f32
+                                    * 2.0)
+                                    .max(1.0);
+                                let width_range = 1.0..=max_width;
+                                let refresh_button_size = ui.spacing().interact_size.y;
+                                let row_height = ui.spacing().interact_size.y;
+                                let slider_with_refresh_width = (slider_width
+                                    - refresh_button_size
+                                    - ui.spacing().item_spacing.x)
                                     .max(120.0);
 
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(controls_width, row_height),
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .add_sized(
-                                            [refresh_button_size, row_height],
-                                            egui::Button::new(egui::RichText::new("↺").size(14.0)),
-                                        )
-                                        .on_hover_text("Reset Center")
-                                        .clicked()
-                                    {
-                                        state.window_center = state.default_center;
-                                        request_rebuild = true;
-                                    }
-
-                                    request_rebuild |= ui
-                                        .add_sized(
-                                            [slider_with_refresh_width, row_height],
-                                            egui::Slider::new(
-                                                &mut state.window_center,
-                                                center_range,
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(controls_width, row_height),
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [refresh_button_size, row_height],
+                                                egui::Button::new(
+                                                    egui::RichText::new("↺").size(14.0),
+                                                ),
                                             )
-                                            .text("Center"),
-                                        )
-                                        .changed();
-                                },
-                            );
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(controls_width, row_height),
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .add_sized(
-                                            [refresh_button_size, row_height],
-                                            egui::Button::new(egui::RichText::new("↺").size(14.0)),
-                                        )
-                                        .on_hover_text("Reset Width")
-                                        .clicked()
-                                    {
-                                        state.window_width = state.default_width;
-                                        request_rebuild = true;
-                                    }
+                                            .on_hover_text("Reset Center")
+                                            .clicked()
+                                        {
+                                            state.window_center = state.default_center;
+                                            request_rebuild = true;
+                                        }
 
-                                    request_rebuild |= ui
-                                        .add_sized(
-                                            [slider_with_refresh_width, row_height],
-                                            egui::Slider::new(&mut state.window_width, width_range)
+                                        request_rebuild |= ui
+                                            .add_sized(
+                                                [slider_with_refresh_width, row_height],
+                                                egui::Slider::new(
+                                                    &mut state.window_center,
+                                                    center_range,
+                                                )
+                                                .text("Center"),
+                                            )
+                                            .changed();
+                                    },
+                                );
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(controls_width, row_height),
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [refresh_button_size, row_height],
+                                                egui::Button::new(
+                                                    egui::RichText::new("↺").size(14.0),
+                                                ),
+                                            )
+                                            .on_hover_text("Reset Width")
+                                            .clicked()
+                                        {
+                                            state.window_width = state.default_width;
+                                            request_rebuild = true;
+                                        }
+
+                                        request_rebuild |= ui
+                                            .add_sized(
+                                                [slider_with_refresh_width, row_height],
+                                                egui::Slider::new(
+                                                    &mut state.window_width,
+                                                    width_range,
+                                                )
                                                 .text("Width"),
-                                        )
-                                        .changed();
-                                },
-                            );
-                        }
+                                            )
+                                            .changed();
+                                    },
+                                );
+                            }
 
-                        if state.frame_count > 1 {
-                            let mut frame_index = state.current_frame as u32;
-                            let max_frame = state.frame_count.saturating_sub(1) as u32;
-                            let refresh_button_size = ui.spacing().interact_size.y;
-                            let row_height = ui.spacing().interact_size.y;
-                            let slider_with_refresh_width =
-                                (slider_width - refresh_button_size - ui.spacing().item_spacing.x)
+                            if state.frame_count > 1 {
+                                let mut frame_index = state.current_frame as u32;
+                                let max_frame = state.frame_count.saturating_sub(1) as u32;
+                                let refresh_button_size = ui.spacing().interact_size.y;
+                                let row_height = ui.spacing().interact_size.y;
+                                let slider_with_refresh_width = (slider_width
+                                    - refresh_button_size
+                                    - ui.spacing().item_spacing.x)
                                     .max(120.0);
 
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(controls_width, row_height),
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .add_sized(
-                                            [refresh_button_size, row_height],
-                                            egui::Button::new(egui::RichText::new("↺").size(14.0)),
-                                        )
-                                        .on_hover_text("Reset Frame")
-                                        .clicked()
-                                    {
-                                        frame_index = 0;
-                                        state.current_frame = 0;
-                                        self.last_cine_advance = Some(Instant::now());
-                                        request_rebuild = true;
-                                    }
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(controls_width, row_height),
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [refresh_button_size, row_height],
+                                                egui::Button::new(
+                                                    egui::RichText::new("↺").size(14.0),
+                                                ),
+                                            )
+                                            .on_hover_text("Reset Frame")
+                                            .clicked()
+                                        {
+                                            frame_index = 0;
+                                            state.current_frame = 0;
+                                            self.last_cine_advance = Some(Instant::now());
+                                            request_rebuild = true;
+                                        }
 
-                                    if ui
-                                        .add_sized(
-                                            [slider_with_refresh_width, row_height],
-                                            egui::Slider::new(&mut frame_index, 0..=max_frame)
-                                                .text("Frame"),
-                                        )
-                                        .changed()
-                                    {
-                                        state.current_frame = frame_index as usize;
-                                        self.last_cine_advance = Some(Instant::now());
-                                        request_rebuild = true;
-                                    }
-                                },
-                            );
+                                        if ui
+                                            .add_sized(
+                                                [slider_with_refresh_width, row_height],
+                                                egui::Slider::new(&mut frame_index, 0..=max_frame)
+                                                    .text("Frame"),
+                                            )
+                                            .changed()
+                                        {
+                                            state.current_frame = frame_index as usize;
+                                            self.last_cine_advance = Some(Instant::now());
+                                            request_rebuild = true;
+                                        }
+                                    },
+                                );
 
-                            let button_width = 128.0;
-                            let cine_width = (controls_width * 0.34).clamp(72.0, controls_width);
-                            let refresh_button_size = ui.spacing().interact_size.y;
-                            let row_height = ui.spacing().interact_size.y;
-                            let cine_slider_width =
-                                (cine_width - refresh_button_size - ui.spacing().item_spacing.x)
-                                    .max(64.0);
+                                let button_width = 128.0;
+                                let refresh_button_size = ui.spacing().interact_size.y;
+                                let row_height = ui.spacing().interact_size.y;
 
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(controls_width, row_height),
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .add_sized(
-                                            [refresh_button_size, row_height],
-                                            egui::Button::new(egui::RichText::new("↺").size(14.0)),
-                                        )
-                                        .on_hover_text("Reset Cine FPS")
-                                        .clicked()
-                                    {
-                                        self.cine_fps = self.default_cine_fps_for_active_image();
-                                        self.last_cine_advance = Some(Instant::now());
-                                    }
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(controls_width, row_height),
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_enabled(
+                                                !history_transition_pending,
+                                                egui::Button::new(
+                                                    egui::RichText::new("↺").size(14.0),
+                                                )
+                                                .min_size(egui::vec2(
+                                                    refresh_button_size,
+                                                    row_height,
+                                                )),
+                                            )
+                                            .on_hover_text("Reset Cine FPS")
+                                            .clicked()
+                                        {
+                                            self.cine_fps =
+                                                self.default_cine_fps_for_active_image();
+                                            self.last_cine_advance = Some(Instant::now());
+                                        }
 
-                                    if ui
-                                        .add_sized(
-                                            [cine_slider_width, row_height],
-                                            egui::Slider::new(&mut self.cine_fps, 1.0..=120.0)
-                                                .text("Cine FPS"),
-                                        )
-                                        .changed()
-                                    {
-                                        self.cine_fps = self.cine_fps.clamp(1.0, 120.0);
-                                        self.last_cine_advance = Some(Instant::now());
-                                    }
-                                },
-                            );
+                                        if ui
+                                            .add_enabled(
+                                                !history_transition_pending,
+                                                egui::Slider::new(&mut self.cine_fps, 1.0..=120.0)
+                                                    .text("Cine FPS"),
+                                            )
+                                            .changed()
+                                        {
+                                            self.cine_fps = self.cine_fps.clamp(1.0, 120.0);
+                                            self.last_cine_advance = Some(Instant::now());
+                                        }
+                                    },
+                                );
 
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(controls_width, 0.0),
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .add_sized(
-                                            [button_width, ui.spacing().interact_size.y],
-                                            egui::Button::new(if self.cine_mode {
-                                                "Stop Cine (C)"
-                                            } else {
-                                                "Start Cine (C)"
-                                            }),
-                                        )
-                                        .clicked()
-                                    {
-                                        toggle_cine_clicked = true;
-                                    }
-                                },
-                            );
-                        }
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(controls_width, 0.0),
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add_enabled(
+                                                !history_transition_pending,
+                                                egui::Button::new(if self.cine_mode {
+                                                    "Stop Cine (C)"
+                                                } else {
+                                                    "Start Cine (C)"
+                                                })
+                                                .min_size(egui::vec2(
+                                                    button_width,
+                                                    ui.spacing().interact_size.y,
+                                                )),
+                                            )
+                                            .clicked()
+                                        {
+                                            toggle_cine_clicked = true;
+                                        }
+                                    },
+                                );
+                            }
+                        });
                     });
                 });
         }
@@ -1725,7 +1748,8 @@ impl eframe::App for DicomViewerApp {
             self.toggle_cine_mode();
         }
 
-        if request_rebuild {
+        // Avoid applying stale W/L UI state while cycling history quickly with Tab.
+        if request_rebuild && !history_transition_pending {
             if let Some(state) = active_state.as_ref() {
                 self.apply_active_viewport_state(state, ctx);
             }
