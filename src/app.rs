@@ -13,6 +13,7 @@ use eframe::egui::{
 use crate::dicom::{load_dicom, DicomImage, METADATA_FIELD_NAMES};
 use crate::dicomweb::{
     download_dicomweb_group_request, download_dicomweb_request, DicomWebDownloadResult,
+    DicomWebGroupStreamUpdate,
 };
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest, LaunchRequest};
 use crate::mammo::{classify_laterality, classify_view, normalize_token};
@@ -124,7 +125,7 @@ pub struct DicomViewerApp {
     pending_local_open_armed: bool,
     pending_launch_request: Option<LaunchRequest>,
     dicomweb_receiver: Option<Receiver<Result<DicomWebDownloadResult, String>>>,
-    dicomweb_active_path_receiver: Option<Receiver<PathBuf>>,
+    dicomweb_active_path_receiver: Option<Receiver<DicomWebGroupStreamUpdate>>,
     dicomweb_active_group_expected: Option<usize>,
     dicomweb_active_group_paths: Vec<PathBuf>,
     dicomweb_active_pending_paths: VecDeque<PathBuf>,
@@ -849,10 +850,10 @@ impl DicomViewerApp {
         let active_group = open_group.min(groups.len().saturating_sub(1));
         let active_paths = groups[active_group].clone();
         self.load_selected_paths(active_paths.clone(), ctx);
+        self.preload_non_active_groups_into_history(&groups, active_group);
         if active_paths.len() == 4 {
             return;
         }
-        self.preload_non_active_groups_into_history(&groups, active_group);
     }
 
     fn start_dicomweb_download(&mut self, request: DicomWebLaunchRequest) {
@@ -882,34 +883,18 @@ impl DicomViewerApp {
             return;
         }
 
-        let active_expected = request
-            .groups
-            .get(request.open_group)
-            .map(|group| group.len())
-            .unwrap_or(0);
-
         self.sync_current_state_to_history();
         self.history_preload_receiver = None;
         self.status_line = "Loading grouped study from DICOMweb...".to_string();
-        self.dicomweb_active_group_expected = Some(active_expected);
+        self.dicomweb_active_group_expected = None;
         self.dicomweb_active_group_paths.clear();
         self.dicomweb_active_pending_paths.clear();
-        if active_expected == 4 {
-            self.mammo_load_receiver = None;
-            self.clear_single_viewer();
-            self.mammo_group = (0..4).map(|_| None).collect();
-            self.mammo_selected_index = 0;
-            self.cine_mode = false;
-            self.last_cine_advance = None;
-            self.status_line =
-                "Loading grouped study from DICOMweb (streaming active group)...".to_string();
-        }
 
-        let (active_path_tx, active_path_rx) = mpsc::channel::<PathBuf>();
+        let (active_path_tx, active_path_rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
         let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
         thread::spawn(move || {
-            let result = download_dicomweb_group_request(&request, |path| {
-                let _ = active_path_tx.send(path);
+            let result = download_dicomweb_group_request(&request, |update| {
+                let _ = active_path_tx.send(update);
             })
             .map_err(|err| format!("{err:#}"));
             let _ = tx.send(result);
@@ -975,7 +960,21 @@ impl DicomViewerApp {
             keep_receiver = true;
             loop {
                 match receiver.try_recv() {
-                    Ok(path) => {
+                    Ok(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(count)) => {
+                        self.dicomweb_active_group_expected = Some(count);
+                        if count == 4 {
+                            self.mammo_load_receiver = None;
+                            self.clear_single_viewer();
+                            self.mammo_group = (0..4).map(|_| None).collect();
+                            self.mammo_selected_index = 0;
+                            self.cine_mode = false;
+                            self.last_cine_advance = None;
+                            self.status_line =
+                                "Loading grouped study from DICOMweb (streaming active group)..."
+                                    .to_string();
+                        }
+                    }
+                    Ok(DicomWebGroupStreamUpdate::ActivePath(path)) => {
                         self.dicomweb_active_pending_paths.push_back(path);
                     }
                     Err(TryRecvError::Empty) => break,
@@ -1007,6 +1006,7 @@ impl DicomViewerApp {
                             self.dicomweb_active_group_paths.clear();
                             self.dicomweb_active_pending_paths.clear();
                             self.dicomweb_active_group_expected = None;
+                            self.dicomweb_active_path_receiver = None;
                         } else {
                             if self.mammo_group_complete() {
                                 let mut loaded = self
@@ -1037,6 +1037,7 @@ impl DicomViewerApp {
                         self.dicomweb_active_group_paths.clear();
                         self.dicomweb_active_pending_paths.clear();
                         self.dicomweb_active_group_expected = None;
+                        self.dicomweb_active_path_receiver = None;
                     }
                 },
                 _ => {}

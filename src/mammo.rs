@@ -19,9 +19,9 @@ pub fn classify_laterality(value: Option<&str>) -> Option<&'static str> {
 
 pub fn classify_view(value: Option<&str>) -> Option<&'static str> {
     let token = normalize_token(value);
-    if token.contains("MLO") {
+    if token == "MLO" {
         Some("MLO")
-    } else if token.contains("CC") {
+    } else if token == "CC" {
         Some("CC")
     } else {
         None

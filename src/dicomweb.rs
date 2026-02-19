@@ -35,6 +35,12 @@ pub enum DicomWebDownloadResult {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum DicomWebGroupStreamUpdate {
+    ActiveGroupInstanceCount(usize),
+    ActivePath(PathBuf),
+}
+
 pub fn download_dicomweb_request(
     request: &DicomWebLaunchRequest,
 ) -> Result<DicomWebDownloadResult> {
@@ -85,7 +91,7 @@ pub fn download_dicomweb_group_request<F>(
     mut on_active_path: F,
 ) -> Result<DicomWebDownloadResult>
 where
-    F: FnMut(PathBuf),
+    F: FnMut(DicomWebGroupStreamUpdate),
 {
     let client = build_http_client()?;
     let base = normalize_base_url(&request.base_url);
@@ -165,6 +171,9 @@ where
         .map(|_| None::<Vec<PathBuf>>)
         .collect::<Vec<_>>();
 
+    on_active_path(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(
+        selected_instances_by_group[open_group].len(),
+    ));
     downloaded_groups[open_group] = Some(download_instances_streaming(
         &client,
         &base,
@@ -216,11 +225,10 @@ fn download_instances_streaming<F>(
     on_path: &mut F,
 ) -> Result<Vec<PathBuf>>
 where
-    F: FnMut(PathBuf),
+    F: FnMut(DicomWebGroupStreamUpdate),
 {
-    let mut paths = Vec::with_capacity(instances.len());
-    for instance in instances {
-        let path = download_instance(
+    download_instances_streaming_with(instances, on_path, |instance| {
+        download_instance(
             client,
             base,
             study_uid,
@@ -228,8 +236,23 @@ where
             &instance.instance_uid,
             cache_dir,
             auth,
-        )?;
-        on_path(path.clone());
+        )
+    })
+}
+
+fn download_instances_streaming_with<F, D>(
+    instances: &[MetadataInstance],
+    on_path: &mut F,
+    mut downloader: D,
+) -> Result<Vec<PathBuf>>
+where
+    F: FnMut(DicomWebGroupStreamUpdate),
+    D: FnMut(&MetadataInstance) -> Result<PathBuf>,
+{
+    let mut paths = Vec::with_capacity(instances.len());
+    for instance in instances {
+        let path = downloader(instance)?;
+        on_path(DicomWebGroupStreamUpdate::ActivePath(path.clone()));
         paths.push(path);
     }
     Ok(paths)
@@ -830,6 +853,7 @@ fn sanitize_for_file_name(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn split_top_level_objects_works() {
@@ -911,5 +935,49 @@ mod tests {
     fn extract_dicom_from_multipart_ignores_plain_payload() {
         let body = b"plain-dicom-payload".to_vec();
         assert!(extract_dicom_from_multipart(&body).is_none());
+    }
+
+    #[test]
+    fn download_instances_streaming_emits_active_path_for_each_instance_in_order() {
+        let instances = vec![
+            MetadataInstance {
+                series_uid: Some("series_a".to_string()),
+                instance_uid: "inst_1".to_string(),
+                view_position: Some("CC".to_string()),
+                laterality: Some("R".to_string()),
+                instance_number: Some(1),
+            },
+            MetadataInstance {
+                series_uid: Some("series_a".to_string()),
+                instance_uid: "inst_2".to_string(),
+                view_position: Some("MLO".to_string()),
+                laterality: Some("L".to_string()),
+                instance_number: Some(2),
+            },
+        ];
+
+        let mut updates = Vec::<DicomWebGroupStreamUpdate>::new();
+        let mut on_path = |update: DicomWebGroupStreamUpdate| updates.push(update);
+        let result = download_instances_streaming_with(&instances, &mut on_path, |instance| {
+            Ok(PathBuf::from(format!("{}.dcm", instance.instance_uid)))
+        })
+        .expect("streaming should succeed");
+
+        let callback_paths = updates
+            .into_iter()
+            .filter_map(|update| match update {
+                DicomWebGroupStreamUpdate::ActivePath(path) => Some(path),
+                DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            callback_paths,
+            vec![PathBuf::from("inst_1.dcm"), PathBuf::from("inst_2.dcm")]
+        );
+        assert_eq!(
+            result,
+            vec![PathBuf::from("inst_1.dcm"), PathBuf::from("inst_2.dcm")]
+        );
     }
 }
