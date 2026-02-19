@@ -851,9 +851,6 @@ impl DicomViewerApp {
         let active_paths = groups[active_group].clone();
         self.load_selected_paths(active_paths.clone(), ctx);
         self.preload_non_active_groups_into_history(&groups, active_group);
-        if active_paths.len() == 4 {
-            return;
-        }
     }
 
     fn start_dicomweb_download(&mut self, request: DicomWebLaunchRequest) {
