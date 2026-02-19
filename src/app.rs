@@ -848,8 +848,7 @@ impl DicomViewerApp {
         }
 
         let active_group = open_group.min(groups.len().saturating_sub(1));
-        let active_paths = groups[active_group].clone();
-        self.load_selected_paths(active_paths.clone(), ctx);
+        self.load_selected_paths(groups[active_group].clone(), ctx);
         self.preload_non_active_groups_into_history(&groups, active_group);
     }
 
@@ -906,7 +905,7 @@ impl DicomViewerApp {
         ctx: &egui::Context,
     ) -> Result<(), String> {
         let slot = mammo_slot_index(&pending.image)
-            .filter(|index| *index < self.mammo_group.len())
+            .filter(|index| *index < self.mammo_group.len() && self.mammo_group[*index].is_none())
             .or_else(|| self.mammo_group.iter().position(Option::is_none));
 
         let Some(slot_index) = slot else {
@@ -951,7 +950,6 @@ impl DicomViewerApp {
     }
 
     fn poll_dicomweb_active_paths(&mut self, ctx: &egui::Context) {
-        let expected = self.dicomweb_active_group_expected.unwrap_or(0);
         let mut keep_receiver = false;
         if let Some(receiver) = self.dicomweb_active_path_receiver.take() {
             keep_receiver = true;
@@ -986,6 +984,7 @@ impl DicomViewerApp {
             }
         }
 
+        let expected = self.dicomweb_active_group_expected.unwrap_or(0);
         if let Some(path) = self.dicomweb_active_pending_paths.pop_front() {
             self.dicomweb_active_group_paths.push(path.clone());
             match expected {
