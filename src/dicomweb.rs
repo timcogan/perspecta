@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
+use reqwest::blocking::Client;
+use reqwest::header::ACCEPT;
 
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest};
 
@@ -36,13 +37,14 @@ pub enum DicomWebDownloadResult {
 pub fn download_dicomweb_request(
     request: &DicomWebLaunchRequest,
 ) -> Result<DicomWebDownloadResult> {
-    ensure_curl_exists()?;
+    let client = build_http_client()?;
     let base = normalize_base_url(&request.base_url);
     let auth = request.username.as_deref().zip(request.password.as_deref());
     let cache_dir = create_cache_dir()?;
 
     if let Some(instance_uid) = request.instance_uid.as_ref() {
         let path = download_instance(
+            &client,
             &base,
             &request.study_uid,
             request.series_uid.as_deref(),
@@ -54,6 +56,7 @@ pub fn download_dicomweb_request(
     }
 
     let metadata_instances = fetch_instance_metadata(
+        &client,
         &base,
         &request.study_uid,
         request.series_uid.as_deref(),
@@ -64,17 +67,14 @@ pub fn download_dicomweb_request(
     }
 
     let selected = select_instances_for_viewer(metadata_instances, request.series_uid.as_deref())?;
-    let mut paths = Vec::with_capacity(selected.len());
-    for instance in selected {
-        paths.push(download_instance(
-            &base,
-            &request.study_uid,
-            instance.series_uid.as_deref(),
-            &instance.instance_uid,
-            &cache_dir,
-            auth,
-        )?);
-    }
+    let paths = download_instances_parallel(
+        &client,
+        &base,
+        &request.study_uid,
+        &cache_dir,
+        auth,
+        &selected,
+    )?;
 
     Ok(DicomWebDownloadResult::Single(paths))
 }
@@ -82,7 +82,7 @@ pub fn download_dicomweb_request(
 pub fn download_dicomweb_group_request(
     request: &DicomWebGroupedLaunchRequest,
 ) -> Result<DicomWebDownloadResult> {
-    ensure_curl_exists()?;
+    let client = build_http_client()?;
     let base = normalize_base_url(&request.base_url);
     let auth = request.username.as_deref().zip(request.password.as_deref());
     let cache_dir = create_cache_dir()?;
@@ -105,14 +105,19 @@ pub fn download_dicomweb_group_request(
         let mut selected_instances = Vec::<MetadataInstance>::new();
 
         for series_uid in group_series_uids {
-            let metadata_instances =
-                fetch_instance_metadata(&base, &request.study_uid, Some(series_uid.as_str()), auth)
-                    .with_context(|| {
-                        format!(
-                            "Failed fetching DICOMweb metadata for group {} series {}",
-                            group_index, series_uid
-                        )
-                    })?;
+            let metadata_instances = fetch_instance_metadata(
+                &client,
+                &base,
+                &request.study_uid,
+                Some(series_uid.as_str()),
+                auth,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed fetching DICOMweb metadata for group {} series {}",
+                    group_index, series_uid
+                )
+            })?;
 
             if metadata_instances.is_empty() {
                 bail!(
@@ -144,17 +149,14 @@ pub fn download_dicomweb_group_request(
             );
         }
 
-        let mut group_paths = Vec::<PathBuf>::with_capacity(selected_instances.len());
-        for instance in selected_instances {
-            group_paths.push(download_instance(
-                &base,
-                &request.study_uid,
-                instance.series_uid.as_deref(),
-                &instance.instance_uid,
-                &cache_dir,
-                auth,
-            )?);
-        }
+        let group_paths = download_instances_parallel(
+            &client,
+            &base,
+            &request.study_uid,
+            &cache_dir,
+            auth,
+            &selected_instances,
+        )?;
 
         downloaded_groups.push(group_paths);
     }
@@ -169,16 +171,12 @@ pub fn download_dicomweb_group_request(
     })
 }
 
-fn ensure_curl_exists() -> Result<()> {
-    let status = Command::new("curl")
-        .arg("--version")
-        .status()
-        .context("Could not execute curl")?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("curl is required for DICOMweb support but was not available");
-    }
+fn build_http_client() -> Result<Client> {
+    Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .context("Could not initialize HTTP client for DICOMweb")
 }
 
 fn normalize_base_url(base_url: &str) -> String {
@@ -225,6 +223,7 @@ fn create_cache_dir() -> Result<PathBuf> {
 }
 
 fn fetch_instance_metadata(
+    client: &Client,
     base: &str,
     study_uid: &str,
     series_uid: Option<&str>,
@@ -232,7 +231,7 @@ fn fetch_instance_metadata(
 ) -> Result<Vec<MetadataInstance>> {
     let url = metadata_url(base, study_uid, series_uid);
 
-    let metadata_json = curl_get_text(&url, "application/dicom+json", auth)
+    let metadata_json = http_get_text(client, &url, "application/dicom+json", auth)
         .with_context(|| format!("Failed fetching DICOMweb metadata from {url}"))?;
     parse_metadata_instances(&metadata_json)
 }
@@ -569,6 +568,7 @@ fn normalize_token(value: Option<&str>) -> String {
 }
 
 fn download_instance(
+    client: &Client,
     base: &str,
     study_uid: &str,
     series_uid: Option<&str>,
@@ -597,7 +597,7 @@ fn download_instance(
     let mut bytes = None::<Vec<u8>>;
     'attempts: for url in &urls {
         for accept in accepts {
-            match curl_get_bytes(url, accept, auth) {
+            match http_get_bytes(client, url, accept, auth) {
                 Ok(response_bytes) => {
                     let normalized = unwrap_dicom_multipart(response_bytes);
                     bytes = Some(normalized);
@@ -630,6 +630,59 @@ fn unwrap_dicom_multipart(body: Vec<u8>) -> Vec<u8> {
         Some(extracted) => extracted,
         None => body,
     }
+}
+
+fn download_instances_parallel(
+    client: &Client,
+    base: &str,
+    study_uid: &str,
+    cache_dir: &Path,
+    auth: Option<(&str, &str)>,
+    instances: &[MetadataInstance],
+) -> Result<Vec<PathBuf>> {
+    if instances.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut outputs = (0..instances.len())
+        .map(|_| None::<Result<PathBuf>>)
+        .collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        let mut jobs = Vec::with_capacity(instances.len());
+        for (index, instance) in instances.iter().enumerate() {
+            jobs.push((
+                index,
+                scope.spawn(move || {
+                    download_instance(
+                        client,
+                        base,
+                        study_uid,
+                        instance.series_uid.as_deref(),
+                        &instance.instance_uid,
+                        cache_dir,
+                        auth,
+                    )
+                }),
+            ));
+        }
+
+        for (index, job) in jobs {
+            outputs[index] = Some(
+                job.join()
+                    .unwrap_or_else(|_| bail!("DICOMweb download worker panicked")),
+            );
+        }
+    });
+
+    let mut paths = Vec::with_capacity(instances.len());
+    for output in outputs {
+        match output {
+            Some(Ok(path)) => paths.push(path),
+            Some(Err(err)) => return Err(err),
+            None => bail!("DICOMweb download worker returned no result"),
+        }
+    }
+    Ok(paths)
 }
 
 fn extract_dicom_from_multipart(body: &[u8]) -> Option<Vec<u8>> {
@@ -689,34 +742,42 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn curl_get_text(url: &str, accept: &str, auth: Option<(&str, &str)>) -> Result<String> {
-    let bytes = curl_get_bytes(url, accept, auth)?;
+fn http_get_text(
+    client: &Client,
+    url: &str,
+    accept: &str,
+    auth: Option<(&str, &str)>,
+) -> Result<String> {
+    let bytes = http_get_bytes(client, url, accept, auth)?;
     String::from_utf8(bytes).context("HTTP response was not valid UTF-8")
 }
 
-fn curl_get_bytes(url: &str, accept: &str, auth: Option<(&str, &str)>) -> Result<Vec<u8>> {
-    let mut command = Command::new("curl");
-    command
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--fail")
-        .arg("--location")
-        .arg("--header")
-        .arg(format!("Accept: {accept}"));
+fn http_get_bytes(
+    client: &Client,
+    url: &str,
+    accept: &str,
+    auth: Option<(&str, &str)>,
+) -> Result<Vec<u8>> {
+    let mut request = client.get(url).header(ACCEPT, accept);
     if let Some((username, password)) = auth {
-        command.arg("--user").arg(format!("{username}:{password}"));
-    }
-    command.arg(url);
-    let output = command
-        .output()
-        .with_context(|| format!("Could not execute curl for {url}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("curl failed for {url}: {stderr}");
+        request = request.basic_auth(username, Some(password));
     }
 
-    Ok(output.stdout)
+    let response = request
+        .send()
+        .with_context(|| format!("HTTP request failed for {url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response
+            .text()
+            .unwrap_or_else(|_| String::from("unable to read error body"));
+        bail!("HTTP {status} for {url}: {detail}");
+    }
+
+    response
+        .bytes()
+        .map(|body| body.to_vec())
+        .with_context(|| format!("Could not read response body from {url}"))
 }
 
 fn sanitize_for_file_name(value: &str) -> String {
