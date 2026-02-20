@@ -8,6 +8,7 @@ use reqwest::blocking::Client;
 use reqwest::header::ACCEPT;
 
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest};
+use crate::mammo::{classify_laterality, classify_view};
 
 const TAG_SOP_INSTANCE_UID: &str = "00080018";
 const TAG_SERIES_INSTANCE_UID: &str = "0020000E";
@@ -32,6 +33,12 @@ pub enum DicomWebDownloadResult {
         groups: Vec<Vec<PathBuf>>,
         open_group: usize,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum DicomWebGroupStreamUpdate {
+    ActiveGroupInstanceCount(usize),
+    ActivePath(PathBuf),
 }
 
 pub fn download_dicomweb_request(
@@ -79,9 +86,13 @@ pub fn download_dicomweb_request(
     Ok(DicomWebDownloadResult::Single(paths))
 }
 
-pub fn download_dicomweb_group_request(
+pub fn download_dicomweb_group_request<F>(
     request: &DicomWebGroupedLaunchRequest,
-) -> Result<DicomWebDownloadResult> {
+    mut on_active_path: F,
+) -> Result<DicomWebDownloadResult>
+where
+    F: FnMut(DicomWebGroupStreamUpdate),
+{
     let client = build_http_client()?;
     let base = normalize_base_url(&request.base_url);
     let auth = request.username.as_deref().zip(request.password.as_deref());
@@ -91,7 +102,7 @@ pub fn download_dicomweb_group_request(
         bail!("DICOMweb grouped launch requested no groups");
     }
 
-    let mut downloaded_groups = Vec::with_capacity(request.groups.len());
+    let mut selected_instances_by_group = Vec::with_capacity(request.groups.len());
 
     for (group_index, group_series_uids) in request.groups.iter().enumerate() {
         if group_series_uids.len() != 1 && group_series_uids.len() != 4 {
@@ -149,26 +160,102 @@ pub fn download_dicomweb_group_request(
             );
         }
 
+        selected_instances_by_group.push(selected_instances);
+    }
+
+    let open_group = request
+        .open_group
+        .min(selected_instances_by_group.len().saturating_sub(1));
+
+    let mut downloaded_groups = (0..selected_instances_by_group.len())
+        .map(|_| None::<Vec<PathBuf>>)
+        .collect::<Vec<_>>();
+
+    on_active_path(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(
+        selected_instances_by_group[open_group].len(),
+    ));
+    downloaded_groups[open_group] = Some(download_instances_streaming(
+        &client,
+        &base,
+        &request.study_uid,
+        &cache_dir,
+        auth,
+        &selected_instances_by_group[open_group],
+        &mut on_active_path,
+    )?);
+
+    for group_index in (0..selected_instances_by_group.len()).filter(|i| *i != open_group) {
         let group_paths = download_instances_parallel(
             &client,
             &base,
             &request.study_uid,
             &cache_dir,
             auth,
-            &selected_instances,
+            &selected_instances_by_group[group_index],
         )?;
-
-        downloaded_groups.push(group_paths);
+        downloaded_groups[group_index] = Some(group_paths);
     }
 
-    let open_group = request
-        .open_group
-        .min(downloaded_groups.len().saturating_sub(1));
+    let downloaded_groups = downloaded_groups
+        .into_iter()
+        .enumerate()
+        .map(|(group_index, group)| {
+            group.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "DICOMweb group {} failed to produce downloaded paths",
+                    group_index
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(DicomWebDownloadResult::Grouped {
         groups: downloaded_groups,
         open_group,
     })
+}
+
+fn download_instances_streaming<F>(
+    client: &Client,
+    base: &str,
+    study_uid: &str,
+    cache_dir: &Path,
+    auth: Option<(&str, &str)>,
+    instances: &[MetadataInstance],
+    on_path: &mut F,
+) -> Result<Vec<PathBuf>>
+where
+    F: FnMut(DicomWebGroupStreamUpdate),
+{
+    download_instances_streaming_with(instances, on_path, |instance| {
+        download_instance(
+            client,
+            base,
+            study_uid,
+            instance.series_uid.as_deref(),
+            &instance.instance_uid,
+            cache_dir,
+            auth,
+        )
+    })
+}
+
+fn download_instances_streaming_with<F, D>(
+    instances: &[MetadataInstance],
+    on_path: &mut F,
+    mut downloader: D,
+) -> Result<Vec<PathBuf>>
+where
+    F: FnMut(DicomWebGroupStreamUpdate),
+    D: FnMut(&MetadataInstance) -> Result<PathBuf>,
+{
+    let mut paths = Vec::with_capacity(instances.len());
+    for instance in instances {
+        let path = downloader(instance)?;
+        on_path(DicomWebGroupStreamUpdate::ActivePath(path.clone()));
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 fn build_http_client() -> Result<Client> {
@@ -537,36 +624,6 @@ fn mammo_sort_key(instance: &MetadataInstance) -> (u8, u8, i32, String) {
     )
 }
 
-fn classify_laterality(value: Option<&str>) -> Option<&'static str> {
-    let token = normalize_token(value);
-    if token.starts_with('R') || token.contains("RIGHT") {
-        Some("R")
-    } else if token.starts_with('L') || token.contains("LEFT") {
-        Some("L")
-    } else {
-        None
-    }
-}
-
-fn classify_view(value: Option<&str>) -> Option<&'static str> {
-    let token = normalize_token(value);
-    if token.contains("MLO") {
-        Some("MLO")
-    } else if token.contains("CC") {
-        Some("CC")
-    } else {
-        None
-    }
-}
-
-fn normalize_token(value: Option<&str>) -> String {
-    value
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_uppercase()
-        .replace(' ', "")
-}
-
 fn download_instance(
     client: &Client,
     base: &str,
@@ -796,6 +853,7 @@ fn sanitize_for_file_name(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn split_top_level_objects_works() {
@@ -877,5 +935,49 @@ mod tests {
     fn extract_dicom_from_multipart_ignores_plain_payload() {
         let body = b"plain-dicom-payload".to_vec();
         assert!(extract_dicom_from_multipart(&body).is_none());
+    }
+
+    #[test]
+    fn download_instances_streaming_emits_active_path_for_each_instance_in_order() {
+        let instances = vec![
+            MetadataInstance {
+                series_uid: Some("series_a".to_string()),
+                instance_uid: "inst_1".to_string(),
+                view_position: Some("CC".to_string()),
+                laterality: Some("R".to_string()),
+                instance_number: Some(1),
+            },
+            MetadataInstance {
+                series_uid: Some("series_a".to_string()),
+                instance_uid: "inst_2".to_string(),
+                view_position: Some("MLO".to_string()),
+                laterality: Some("L".to_string()),
+                instance_number: Some(2),
+            },
+        ];
+
+        let mut updates = Vec::<DicomWebGroupStreamUpdate>::new();
+        let mut on_path = |update: DicomWebGroupStreamUpdate| updates.push(update);
+        let result = download_instances_streaming_with(&instances, &mut on_path, |instance| {
+            Ok(PathBuf::from(format!("{}.dcm", instance.instance_uid)))
+        })
+        .expect("streaming should succeed");
+
+        let callback_paths = updates
+            .into_iter()
+            .filter_map(|update| match update {
+                DicomWebGroupStreamUpdate::ActivePath(path) => Some(path),
+                DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            callback_paths,
+            vec![PathBuf::from("inst_1.dcm"), PathBuf::from("inst_2.dcm")]
+        );
+        assert_eq!(
+            result,
+            vec![PathBuf::from("inst_1.dcm"), PathBuf::from("inst_2.dcm")]
+        );
     }
 }
