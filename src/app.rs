@@ -16,7 +16,7 @@ use crate::dicomweb::{
     DicomWebGroupStreamUpdate,
 };
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest, LaunchRequest};
-use crate::mammo::{classify_laterality, classify_view, normalize_token};
+use crate::mammo::{mammo_image_align, mammo_label, mammo_sort_key, preferred_mammo_slot};
 use crate::renderer::{render_rgb, render_window_level};
 
 const APP_TITLE: &str = "Perspecta Viewer";
@@ -483,7 +483,8 @@ impl DicomViewerApp {
         texture_key_prefix: &str,
         ctx: &egui::Context,
     ) -> Option<TextureHandle> {
-        let mut rendered_views = Vec::new();
+        let mut ordered_views = vec![None, None, None, None];
+        let mut fallback_views = Vec::new();
         for viewport in group {
             let frame_count = viewport.image.frame_count();
             if frame_count == 0 {
@@ -496,12 +497,28 @@ impl DicomViewerApp {
                 viewport.window_center,
                 viewport.window_width,
             )?;
-            rendered_views.push(rendered);
+            let slot = preferred_mammo_slot(&viewport.image, ordered_views.len(), |index| {
+                ordered_views.get(index).and_then(Option::as_ref).is_none()
+            });
+
+            if let Some(index) = slot {
+                ordered_views[index] = Some(rendered);
+            } else {
+                fallback_views.push(rendered);
+            }
         }
 
-        if rendered_views.is_empty() {
+        if ordered_views.iter().all(Option::is_none) && fallback_views.is_empty() {
             return None;
         }
+
+        for slot in ordered_views.iter_mut() {
+            if slot.is_none() {
+                *slot = fallback_views.pop();
+            }
+        }
+
+        let rendered_views = ordered_views.into_iter().flatten().collect::<Vec<_>>();
 
         let thumb = if rendered_views.len() == 1 {
             downsample_color_image(&rendered_views[0], HISTORY_THUMB_MAX_DIM)
@@ -923,9 +940,13 @@ impl DicomViewerApp {
         pending: PendingMammoLoad,
         ctx: &egui::Context,
     ) -> Result<(), String> {
-        let slot = mammo_slot_index(&pending.image)
-            .filter(|index| *index < self.mammo_group.len() && self.mammo_group[*index].is_none())
-            .or_else(|| self.mammo_group.iter().position(Option::is_none));
+        let slot = preferred_mammo_slot(&pending.image, self.mammo_group.len(), |index| {
+            self.mammo_group
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_none()
+        })
+        .or_else(|| self.mammo_group.iter().position(Option::is_none));
 
         let Some(slot_index) = slot else {
             return Err(format!(
@@ -1781,10 +1802,7 @@ impl DicomViewerApp {
                                             .min(remaining.y / texture_size.y)
                                             .max(0.01);
                                         let draw_size = texture_size * scale;
-                                        let image_align = mammo_image_align(
-                                            &viewport.image,
-                                            viewport.label.as_str(),
-                                        );
+                                        let image_align = mammo_image_align(index);
 
                                         ui.allocate_ui_with_layout(
                                             remaining,
@@ -2410,82 +2428,6 @@ impl eframe::App for DicomViewerApp {
     }
 }
 
-fn mammo_slot_index(image: &DicomImage) -> Option<usize> {
-    match (
-        classify_view(image.view_position.as_deref()),
-        classify_laterality(image.image_laterality.as_deref()),
-    ) {
-        (Some("CC"), Some("R")) => Some(0),
-        (Some("CC"), Some("L")) => Some(1),
-        (Some("MLO"), Some("R")) => Some(2),
-        (Some("MLO"), Some("L")) => Some(3),
-        _ => None,
-    }
-}
-
-fn mammo_image_align(image: &DicomImage, label: &str) -> egui::Align {
-    if let Some(laterality) = classify_laterality(image.image_laterality.as_deref()) {
-        return if laterality == "R" {
-            egui::Align::Max
-        } else {
-            egui::Align::Min
-        };
-    }
-
-    let label_token = normalize_token(Some(label));
-    if label_token.starts_with('R') {
-        egui::Align::Max
-    } else if label_token.starts_with('L') {
-        egui::Align::Min
-    } else {
-        egui::Align::Center
-    }
-}
-
-fn mammo_sort_key(image: &DicomImage, path: &Path) -> (u8, u8, i32, String) {
-    let view_rank = match classify_view(image.view_position.as_deref()) {
-        Some("CC") => 0,
-        Some("MLO") => 1,
-        _ => 2,
-    };
-    let laterality_rank = match classify_laterality(image.image_laterality.as_deref()) {
-        Some("R") => 0,
-        Some("L") => 1,
-        _ => 2,
-    };
-
-    let instance_number = image.instance_number.unwrap_or(i32::MAX);
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_string();
-
-    (view_rank, laterality_rank, instance_number, file_name)
-}
-
-fn mammo_label(image: &DicomImage, path: &Path) -> String {
-    let laterality = classify_laterality(image.image_laterality.as_deref());
-    let view = classify_view(image.view_position.as_deref());
-    let code = match (laterality, view) {
-        (Some(laterality), Some(view)) => format!("{laterality}{view}"),
-        (Some(laterality), None) => laterality.to_string(),
-        (None, Some(view)) => view.to_string(),
-        _ => String::new(),
-    };
-
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("DICOM");
-
-    if code.is_empty() {
-        file_name.to_string()
-    } else {
-        format!("{code} ({file_name})")
-    }
-}
-
 fn downsample_color_image(source: &ColorImage, max_dim: usize) -> ColorImage {
     let source_width = source.size[0];
     let source_height = source.size[1];
@@ -2537,6 +2479,8 @@ fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
     let target_height = cell_height * rows;
     let mut pixels = vec![egui::Color32::BLACK; target_width * target_height];
 
+    let align_mammo = images.len() == 4;
+
     for (index, image) in images.iter().enumerate() {
         let source_width = image.size[0].max(1);
         let source_height = image.size[1].max(1);
@@ -2548,7 +2492,15 @@ fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
 
         let col = index % columns;
         let row = index / columns;
-        let base_x = col * cell_width + (cell_width - draw_width) / 2;
+        let base_x = if align_mammo {
+            match mammo_image_align(index) {
+                egui::Align::Max => col * cell_width + (cell_width - draw_width),
+                egui::Align::Min => col * cell_width,
+                _ => col * cell_width + (cell_width - draw_width) / 2,
+            }
+        } else {
+            col * cell_width + (cell_width - draw_width) / 2
+        };
         let base_y = row * cell_height + (cell_height - draw_height) / 2;
 
         for y in 0..draw_height {
