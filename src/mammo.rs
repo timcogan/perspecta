@@ -1,3 +1,9 @@
+use std::path::Path;
+
+use eframe::egui;
+
+use crate::dicom::DicomImage;
+
 pub fn normalize_token(value: Option<&str>) -> String {
     value
         .unwrap_or_default()
@@ -28,7 +34,7 @@ pub fn classify_view(value: Option<&str>) -> Option<&'static str> {
     }
 }
 
-pub fn mammo_slot_index(image: &DicomImage) -> Option<usize> {
+fn mammo_slot_index(image: &DicomImage) -> Option<usize> {
     match (
         classify_view(image.view_position.as_deref()),
         classify_laterality(image.image_laterality.as_deref()),
@@ -117,8 +123,3 @@ pub fn mammo_label(image: &DicomImage, path: &Path) -> String {
         format!("{code} ({file_name})")
     }
 }
-use std::path::Path;
-
-use eframe::egui;
-
-use crate::dicom::DicomImage;

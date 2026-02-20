@@ -484,7 +484,7 @@ impl DicomViewerApp {
         ctx: &egui::Context,
     ) -> Option<TextureHandle> {
         let mut ordered_views = vec![None, None, None, None];
-        let mut fallback_views = Vec::new();
+        let mut fallback_views = VecDeque::new();
         for viewport in group {
             let frame_count = viewport.image.frame_count();
             if frame_count == 0 {
@@ -504,7 +504,7 @@ impl DicomViewerApp {
             if let Some(index) = slot {
                 ordered_views[index] = Some(rendered);
             } else {
-                fallback_views.push(rendered);
+                fallback_views.push_back(rendered);
             }
         }
 
@@ -514,7 +514,7 @@ impl DicomViewerApp {
 
         for slot in ordered_views.iter_mut() {
             if slot.is_none() {
-                *slot = fallback_views.pop();
+                *slot = fallback_views.pop_front();
             }
         }
 
