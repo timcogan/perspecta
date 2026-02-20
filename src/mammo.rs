@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::Path;
 
 use eframe::egui;
@@ -60,6 +61,39 @@ pub fn preferred_mammo_slot(
                 .into_iter()
                 .find(|index| *index < len && is_free(*index))
         })
+}
+
+pub fn order_mammo_indices<T>(
+    items: &[T],
+    mut image_of: impl FnMut(&T) -> &DicomImage,
+) -> Vec<usize> {
+    let mut ordered = vec![None; items.len()];
+    let mut fallback = VecDeque::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let image = image_of(item);
+        let slot = preferred_mammo_slot(image, ordered.len(), |slot_index| {
+            ordered.get(slot_index).and_then(Option::as_ref).is_none()
+        });
+
+        if let Some(slot) = slot {
+            if ordered[slot].is_none() {
+                ordered[slot] = Some(index);
+            } else {
+                fallback.push_back(index);
+            }
+        } else {
+            fallback.push_back(index);
+        }
+    }
+
+    for slot in ordered.iter_mut() {
+        if slot.is_none() {
+            *slot = fallback.pop_front();
+        }
+    }
+
+    ordered.into_iter().flatten().collect()
 }
 
 pub fn preferred_slots_for_laterality(laterality: Option<&str>) -> [usize; 4] {

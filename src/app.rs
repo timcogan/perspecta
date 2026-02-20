@@ -16,7 +16,9 @@ use crate::dicomweb::{
     DicomWebGroupStreamUpdate,
 };
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest, LaunchRequest};
-use crate::mammo::{mammo_image_align, mammo_label, mammo_sort_key, preferred_mammo_slot};
+use crate::mammo::{
+    mammo_image_align, mammo_label, mammo_sort_key, order_mammo_indices, preferred_mammo_slot,
+};
 use crate::renderer::{render_rgb, render_window_level};
 
 const APP_TITLE: &str = "Perspecta Viewer";
@@ -483,9 +485,10 @@ impl DicomViewerApp {
         texture_key_prefix: &str,
         ctx: &egui::Context,
     ) -> Option<TextureHandle> {
-        let mut ordered_views = vec![None, None, None, None];
-        let mut fallback_views = VecDeque::new();
-        for viewport in group {
+        let ordered_indices = order_mammo_indices(group, |viewport| &viewport.image);
+        let mut rendered_views = Vec::new();
+        for index in ordered_indices {
+            let viewport = &group[index];
             let frame_count = viewport.image.frame_count();
             if frame_count == 0 {
                 continue;
@@ -497,28 +500,12 @@ impl DicomViewerApp {
                 viewport.window_center,
                 viewport.window_width,
             )?;
-            let slot = preferred_mammo_slot(&viewport.image, ordered_views.len(), |index| {
-                ordered_views.get(index).and_then(Option::as_ref).is_none()
-            });
-
-            if let Some(index) = slot {
-                ordered_views[index] = Some(rendered);
-            } else {
-                fallback_views.push_back(rendered);
-            }
+            rendered_views.push(rendered);
         }
 
-        if ordered_views.iter().all(Option::is_none) && fallback_views.is_empty() {
+        if rendered_views.is_empty() {
             return None;
         }
-
-        for slot in ordered_views.iter_mut() {
-            if slot.is_none() {
-                *slot = fallback_views.pop_front();
-            }
-        }
-
-        let rendered_views = ordered_views.into_iter().flatten().collect::<Vec<_>>();
 
         let thumb = if rendered_views.len() == 1 {
             downsample_color_image(&rendered_views[0], HISTORY_THUMB_MAX_DIM)
@@ -788,26 +775,33 @@ impl DicomViewerApp {
                 self.mammo_load_receiver = None;
                 self.mammo_load_sender = None;
                 self.clear_single_viewer();
-                self.mammo_group = group
-                    .viewports
-                    .into_iter()
-                    .map(|viewport| MammoViewport {
-                        path: viewport.path,
-                        image: viewport.image,
-                        texture: viewport.texture,
-                        label: viewport.label,
-                        window_center: viewport.window_center,
-                        window_width: viewport.window_width,
-                        current_frame: viewport.current_frame,
-                    })
-                    .map(Some)
-                    .collect();
+                let ordered_indices =
+                    order_mammo_indices(&group.viewports, |viewport| &viewport.image);
+                let selected_index = ordered_indices
+                    .iter()
+                    .position(|index| *index == group.selected_index);
+                let mut viewports = group.viewports.into_iter().map(Some).collect::<Vec<_>>();
+                let mut ordered = Vec::with_capacity(viewports.len());
+                for index in ordered_indices {
+                    if let Some(viewport) = viewports[index].take() {
+                        ordered.push(Some(MammoViewport {
+                            path: viewport.path,
+                            image: viewport.image,
+                            texture: viewport.texture,
+                            label: viewport.label,
+                            window_center: viewport.window_center,
+                            window_width: viewport.window_width,
+                            current_frame: viewport.current_frame,
+                        }));
+                    }
+                }
+                self.mammo_group = ordered;
                 if self.loaded_mammo_count() == 0 {
                     self.status_line = "History entry had no cached mammo images.".to_string();
                     return;
                 }
-                self.mammo_selected_index = group
-                    .selected_index
+                self.mammo_selected_index = selected_index
+                    .unwrap_or(group.selected_index)
                     .min(self.mammo_group.len().saturating_sub(1));
                 self.status_line.clear();
                 ctx.request_repaint();
