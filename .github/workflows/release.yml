@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            dist plan --output-format=json > plan-dist-manifest.json
+            dist plan --output-format=json --target=x86_64-unknown-linux-gnu > plan-dist-manifest.json
           else
             [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
             dist host --steps=create --tag="$TAG" --output-format=json > plan-dist-manifest.json
@@ -106,12 +106,12 @@ jobs:
           TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
         run: |
           set -euo pipefail
-          dist build $TAG_FLAG --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          dist build $TAG_FLAG --target=${{ join(matrix.targets, ',') }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
       - name: Attest
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: "target/distrib/*${{ join(matrix.targets, ', ') }}*"
+          subject-path: "target/distrib/*${{ join(matrix.targets, ',') }}*"
       - id: cargo-dist
         name: Post-build
         shell: bash
@@ -158,7 +158,7 @@ jobs:
           TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
         run: |
           set -euo pipefail
-          dist build $TAG_FLAG --output-format=json "--artifacts=global" > dist-manifest.json
+          dist build $TAG_FLAG --target=x86_64-unknown-linux-gnu --output-format=json --artifacts=global > dist-manifest.json
           echo "dist ran successfully"
           echo "paths<<EOF" >> "$GITHUB_OUTPUT"
           jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
@@ -228,6 +228,7 @@ jobs:
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
+          TAG_FLAG: ${{ needs.plan.outputs.tag }}
         run: |
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
+          gh release create "$TAG_FLAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*

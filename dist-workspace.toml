@@ -1,11 +1,12 @@
 [workspace]
 members = ["cargo:."]
 
-[workspace.metadata.dist]
+[dist]
 # Keep this in sync with the version installed in CI (release.yml)
 cargo-dist-version = "0.30.4"
 ci = "github"
 hosting = "github"
+allow-dirty = ["ci"]
 
 # Build targets
 # Linux (GNU), Windows (MSVC), macOS (Apple Silicon)

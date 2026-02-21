@@ -29,3 +29,7 @@
 # OS-generated files
 .DS_Store
 Thumbs.db
+
+# dist generated manifests
+plan-dist-manifest.json
+dist-manifest.json
