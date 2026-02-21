@@ -37,6 +37,8 @@ struct MammoViewport {
     window_center: f32,
     window_width: f32,
     current_frame: usize,
+    zoom: f32,
+    pan: egui::Vec2,
 }
 
 struct PendingMammoLoad {
@@ -142,6 +144,8 @@ pub struct DicomViewerApp {
     cine_mode: bool,
     cine_fps: f32,
     last_cine_advance: Option<Instant>,
+    single_view_zoom: f32,
+    single_view_pan: egui::Vec2,
 }
 
 impl Default for DicomViewerApp {
@@ -189,6 +193,8 @@ impl DicomViewerApp {
             cine_mode: false,
             cine_fps: DEFAULT_CINE_FPS,
             last_cine_advance: None,
+            single_view_zoom: 1.0,
+            single_view_pan: egui::Vec2::ZERO,
         }
     }
 
@@ -452,6 +458,12 @@ impl DicomViewerApp {
         self.cine_mode = false;
         self.last_cine_advance = None;
         self.mammo_selected_index = 0;
+        self.reset_single_view_transform();
+    }
+
+    fn reset_single_view_transform(&mut self) {
+        self.single_view_zoom = 1.0;
+        self.single_view_pan = egui::Vec2::ZERO;
     }
 
     fn next_history_texture_name(&mut self, prefix: &str) -> String {
@@ -759,6 +771,7 @@ impl DicomViewerApp {
                 self.cine_fps = single.cine_fps.clamp(1.0, 120.0);
                 self.mammo_group.clear();
                 self.mammo_selected_index = 0;
+                self.reset_single_view_transform();
                 if let Some(image) = self.image.as_ref() {
                     let frame_count = image.frame_count();
                     if frame_count == 0 {
@@ -792,6 +805,8 @@ impl DicomViewerApp {
                             window_center: viewport.window_center,
                             window_width: viewport.window_width,
                             current_frame: viewport.current_frame,
+                            zoom: 1.0,
+                            pan: egui::Vec2::ZERO,
                         }));
                     }
                 }
@@ -973,6 +988,8 @@ impl DicomViewerApp {
             window_center: default_center,
             window_width: default_width,
             current_frame: 0,
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
         });
 
         if self.loaded_mammo_count() == 1 {
@@ -1129,6 +1146,8 @@ impl DicomViewerApp {
                                 window_center: center,
                                 window_width: width,
                                 current_frame: 0,
+                                zoom: 1.0,
+                                pan: egui::Vec2::ZERO,
                             });
                         }
                         if loaded.len() == 4 {
@@ -1425,6 +1444,7 @@ impl DicomViewerApp {
                 self.current_single_path = Some(path.clone());
                 self.mammo_group.clear();
                 self.mammo_selected_index = 0;
+                self.reset_single_view_transform();
                 self.rebuild_texture(ctx);
                 let history_image = self.image.clone();
                 let history_texture = self.texture.clone();
@@ -1788,37 +1808,111 @@ impl DicomViewerApp {
                                     .inner_margin(egui::Margin::same(MAMMO_VIEW_INNER_MARGIN));
                                 frame.show(ui, |ui| {
                                     let remaining = ui.available_size();
+                                    let (viewport_rect, response) =
+                                        ui.allocate_exact_size(remaining, Sense::click_and_drag());
+                                    if response.clicked() {
+                                        clicked_index = Some(index);
+                                    }
                                     if let Some(viewport) =
-                                        self.mammo_group.get(index).and_then(Option::as_ref)
+                                        self.mammo_group.get_mut(index).and_then(Option::as_mut)
                                     {
                                         let texture_size = viewport.texture.size_vec2();
-                                        let scale = (remaining.x / texture_size.x)
-                                            .min(remaining.y / texture_size.y)
-                                            .max(0.01);
-                                        let draw_size = texture_size * scale;
-                                        let image_align = mammo_image_align(index);
+                                        if texture_size.x > 0.0
+                                            && texture_size.y > 0.0
+                                            && viewport_rect.is_positive()
+                                        {
+                                            if response.double_clicked() {
+                                                viewport.zoom = 1.0;
+                                                viewport.pan = egui::Vec2::ZERO;
+                                            }
+                                            if viewport.zoom > 1.0 && response.dragged() {
+                                                let frame_drag_delta =
+                                                    ui.input(|input| input.pointer.delta());
+                                                viewport.pan += frame_drag_delta;
+                                            }
+                                            if response.hovered() {
+                                                let (zoom_delta, raw_scroll, smooth_scroll) = ui
+                                                    .input(|input| {
+                                                        (
+                                                            input.zoom_delta(),
+                                                            input.raw_scroll_delta.y,
+                                                            input.smooth_scroll_delta.y,
+                                                        )
+                                                    });
+                                                let scroll = if smooth_scroll.abs() > 0.0 {
+                                                    smooth_scroll
+                                                } else {
+                                                    raw_scroll
+                                                };
+                                                let wheel_zoom = (scroll * 0.0015).exp();
+                                                let mut next_zoom = viewport.zoom;
+                                                if (zoom_delta - 1.0).abs() > f32::EPSILON {
+                                                    next_zoom *= zoom_delta;
+                                                } else if (wheel_zoom - 1.0).abs() > f32::EPSILON {
+                                                    next_zoom *= wheel_zoom;
+                                                }
+                                                next_zoom = next_zoom.clamp(1.0, 12.0);
+                                                if (next_zoom - viewport.zoom).abs() > f32::EPSILON
+                                                {
+                                                    let old_zoom = viewport.zoom;
+                                                    viewport.zoom = next_zoom;
+                                                    if let Some(pointer_pos) = response.hover_pos()
+                                                    {
+                                                        let old_center =
+                                                            viewport_rect.center() + viewport.pan;
+                                                        let pointer_offset =
+                                                            pointer_pos - old_center;
+                                                        let zoom_ratio = viewport.zoom / old_zoom;
+                                                        viewport.pan +=
+                                                            pointer_offset * (1.0 - zoom_ratio);
+                                                    }
+                                                }
+                                            }
 
-                                        ui.allocate_ui_with_layout(
-                                            remaining,
-                                            egui::Layout::top_down(image_align),
-                                            |ui| {
-                                                let top_padding =
-                                                    ((remaining.y - draw_size.y) * 0.5).max(0.0);
-                                                if top_padding > 0.0 {
-                                                    ui.add_space(top_padding);
+                                            let fit_scale = (viewport_rect.width()
+                                                / texture_size.x)
+                                                .min(viewport_rect.height() / texture_size.y)
+                                                .max(0.01);
+                                            let draw_size =
+                                                texture_size * fit_scale * viewport.zoom;
+                                            let max_pan_x = ((draw_size.x - viewport_rect.width())
+                                                * 0.5)
+                                                .max(0.0);
+                                            let max_pan_y =
+                                                ((draw_size.y - viewport_rect.height()) * 0.5)
+                                                    .max(0.0);
+                                            viewport.pan.x =
+                                                viewport.pan.x.clamp(-max_pan_x, max_pan_x);
+                                            viewport.pan.y =
+                                                viewport.pan.y.clamp(-max_pan_y, max_pan_y);
+                                            if viewport.zoom <= 1.0 {
+                                                viewport.pan = egui::Vec2::ZERO;
+                                            }
+
+                                            let mut base_center = viewport_rect.center();
+                                            if draw_size.x < viewport_rect.width() {
+                                                let x_slack =
+                                                    (viewport_rect.width() - draw_size.x) * 0.5;
+                                                match mammo_image_align(index) {
+                                                    egui::Align::Min => base_center.x -= x_slack,
+                                                    egui::Align::Center => {}
+                                                    egui::Align::Max => base_center.x += x_slack,
                                                 }
-                                                let response = ui.add(
-                                                    egui::Image::new((
-                                                        viewport.texture.id(),
-                                                        draw_size,
-                                                    ))
-                                                    .sense(Sense::click()),
-                                                );
-                                                if response.clicked() {
-                                                    clicked_index = Some(index);
-                                                }
-                                            },
-                                        );
+                                            }
+                                            let image_rect = egui::Rect::from_center_size(
+                                                base_center + viewport.pan,
+                                                draw_size,
+                                            );
+                                            ui.painter().with_clip_rect(viewport_rect).image(
+                                                viewport.texture.id(),
+                                                image_rect,
+                                                egui::Rect::from_min_max(
+                                                    egui::Pos2::ZERO,
+                                                    egui::pos2(1.0, 1.0),
+                                                ),
+                                                egui::Color32::WHITE,
+                                            );
+                                        }
                                     } else {
                                         ui.allocate_ui_with_layout(
                                             remaining,
@@ -2338,17 +2432,77 @@ impl eframe::App for DicomViewerApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             if has_mammo_group {
                 self.show_mammo_grid(ui);
-            } else if let Some(texture) = self.texture.as_ref() {
+            } else if let Some(texture) = self.texture.clone() {
                 let available = ui.available_size();
+                let (canvas_rect, response) = ui.allocate_exact_size(available, Sense::drag());
                 let image_size = texture.size_vec2();
-                let scale = (available.x / image_size.x)
-                    .min(available.y / image_size.y)
-                    .max(0.1);
-                let draw_size = image_size * scale;
+                if image_size.x > 0.0 && image_size.y > 0.0 && canvas_rect.is_positive() {
+                    if response.double_clicked() {
+                        self.reset_single_view_transform();
+                    }
 
-                ui.vertical_centered(|ui| {
-                    ui.image((texture.id(), draw_size));
-                });
+                    if self.single_view_zoom > 1.0 && response.dragged() {
+                        let frame_drag_delta = ui.input(|input| input.pointer.delta());
+                        self.single_view_pan += frame_drag_delta;
+                    }
+
+                    if response.hovered() {
+                        let (zoom_delta, raw_scroll, smooth_scroll) = ui.input(|input| {
+                            (
+                                input.zoom_delta(),
+                                input.raw_scroll_delta.y,
+                                input.smooth_scroll_delta.y,
+                            )
+                        });
+                        let scroll = if smooth_scroll.abs() > 0.0 {
+                            smooth_scroll
+                        } else {
+                            raw_scroll
+                        };
+                        let wheel_zoom = (scroll * 0.0015).exp();
+                        let mut next_zoom = self.single_view_zoom;
+                        if (zoom_delta - 1.0).abs() > f32::EPSILON {
+                            next_zoom *= zoom_delta;
+                        } else if (wheel_zoom - 1.0).abs() > f32::EPSILON {
+                            next_zoom *= wheel_zoom;
+                        }
+                        next_zoom = next_zoom.clamp(1.0, 12.0);
+
+                        if (next_zoom - self.single_view_zoom).abs() > f32::EPSILON {
+                            let old_zoom = self.single_view_zoom;
+                            self.single_view_zoom = next_zoom;
+                            if let Some(pointer_pos) = response.hover_pos() {
+                                let old_center = canvas_rect.center() + self.single_view_pan;
+                                let pointer_offset = pointer_pos - old_center;
+                                let zoom_ratio = self.single_view_zoom / old_zoom;
+                                self.single_view_pan += pointer_offset * (1.0 - zoom_ratio);
+                            }
+                        }
+                    }
+
+                    let fit_scale = (canvas_rect.width() / image_size.x)
+                        .min(canvas_rect.height() / image_size.y)
+                        .max(0.01);
+                    let draw_size = image_size * fit_scale * self.single_view_zoom;
+                    let max_pan_x = ((draw_size.x - canvas_rect.width()) * 0.5).max(0.0);
+                    let max_pan_y = ((draw_size.y - canvas_rect.height()) * 0.5).max(0.0);
+                    self.single_view_pan.x = self.single_view_pan.x.clamp(-max_pan_x, max_pan_x);
+                    self.single_view_pan.y = self.single_view_pan.y.clamp(-max_pan_y, max_pan_y);
+                    if self.single_view_zoom <= 1.0 {
+                        self.single_view_pan = egui::Vec2::ZERO;
+                    }
+
+                    let image_rect = egui::Rect::from_center_size(
+                        canvas_rect.center() + self.single_view_pan,
+                        draw_size,
+                    );
+                    ui.painter().image(
+                        texture.id(),
+                        image_rect,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
             } else {
                 let is_loading = self.is_loading();
                 ui.allocate_ui_with_layout(
