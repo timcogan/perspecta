@@ -2,6 +2,7 @@
 name = "perspecta"
 version = "0.1.6"
 edition = "2021"
+repository = "https://github.com/timcogan/perspecta"
 
 [dependencies]
 anyhow = "1.0"
