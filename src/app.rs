@@ -1771,6 +1771,19 @@ impl DicomViewerApp {
         viewport.texture.set(color_image, TextureOptions::LINEAR);
     }
 
+    fn mammo_base_center(viewport_rect: egui::Rect, draw_width: f32, index: usize) -> egui::Pos2 {
+        let mut base_center = viewport_rect.center();
+        if draw_width < viewport_rect.width() {
+            let x_slack = (viewport_rect.width() - draw_width) * 0.5;
+            match mammo_image_align(index) {
+                egui::Align::Min => base_center.x -= x_slack,
+                egui::Align::Center => {}
+                egui::Align::Max => base_center.x += x_slack,
+            }
+        }
+        base_center
+    }
+
     fn show_mammo_grid(&mut self, ui: &mut egui::Ui) {
         const MAMMO_GRID_GAP: f32 = 2.0;
         const MAMMO_VIEW_INNER_MARGIN: f32 = 3.0;
@@ -1821,6 +1834,17 @@ impl DicomViewerApp {
                                             && texture_size.y > 0.0
                                             && viewport_rect.is_positive()
                                         {
+                                            let fit_scale = (viewport_rect.width()
+                                                / texture_size.x)
+                                                .min(viewport_rect.height() / texture_size.y)
+                                                .max(0.01);
+                                            let draw_size_before =
+                                                texture_size * fit_scale * viewport.zoom;
+                                            let base_center_before = Self::mammo_base_center(
+                                                viewport_rect,
+                                                draw_size_before.x,
+                                                index,
+                                            );
                                             if response.double_clicked() {
                                                 viewport.zoom = 1.0;
                                                 viewport.pan = egui::Vec2::ZERO;
@@ -1859,7 +1883,7 @@ impl DicomViewerApp {
                                                     if let Some(pointer_pos) = response.hover_pos()
                                                     {
                                                         let old_center =
-                                                            viewport_rect.center() + viewport.pan;
+                                                            base_center_before + viewport.pan;
                                                         let pointer_offset =
                                                             pointer_pos - old_center;
                                                         let zoom_ratio = viewport.zoom / old_zoom;
@@ -1869,10 +1893,6 @@ impl DicomViewerApp {
                                                 }
                                             }
 
-                                            let fit_scale = (viewport_rect.width()
-                                                / texture_size.x)
-                                                .min(viewport_rect.height() / texture_size.y)
-                                                .max(0.01);
                                             let draw_size =
                                                 texture_size * fit_scale * viewport.zoom;
                                             let max_pan_x = ((draw_size.x - viewport_rect.width())
@@ -1889,16 +1909,11 @@ impl DicomViewerApp {
                                                 viewport.pan = egui::Vec2::ZERO;
                                             }
 
-                                            let mut base_center = viewport_rect.center();
-                                            if draw_size.x < viewport_rect.width() {
-                                                let x_slack =
-                                                    (viewport_rect.width() - draw_size.x) * 0.5;
-                                                match mammo_image_align(index) {
-                                                    egui::Align::Min => base_center.x -= x_slack,
-                                                    egui::Align::Center => {}
-                                                    egui::Align::Max => base_center.x += x_slack,
-                                                }
-                                            }
+                                            let base_center = Self::mammo_base_center(
+                                                viewport_rect,
+                                                draw_size.x,
+                                                index,
+                                            );
                                             let image_rect = egui::Rect::from_center_size(
                                                 base_center + viewport.pan,
                                                 draw_size,
@@ -2434,7 +2449,8 @@ impl eframe::App for DicomViewerApp {
                 self.show_mammo_grid(ui);
             } else if let Some(texture) = self.texture.clone() {
                 let available = ui.available_size();
-                let (canvas_rect, response) = ui.allocate_exact_size(available, Sense::drag());
+                let (canvas_rect, response) =
+                    ui.allocate_exact_size(available, Sense::click_and_drag());
                 let image_size = texture.size_vec2();
                 if image_size.x > 0.0 && image_size.y > 0.0 && canvas_rect.is_positive() {
                     if response.double_clicked() {
