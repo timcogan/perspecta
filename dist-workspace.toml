@@ -1,4 +1,7 @@
-[dist]
+[workspace]
+members = ["cargo:."]
+
+[workspace.metadata.dist]
 # Keep this in sync with the version installed in CI (release.yml)
 cargo-dist-version = "0.30.4"
 ci = "github"
