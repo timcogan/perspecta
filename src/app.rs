@@ -39,6 +39,7 @@ struct MammoViewport {
     current_frame: usize,
     zoom: f32,
     pan: egui::Vec2,
+    frame_scroll_accum: f32,
 }
 
 struct PendingMammoLoad {
@@ -146,6 +147,7 @@ pub struct DicomViewerApp {
     last_cine_advance: Option<Instant>,
     single_view_zoom: f32,
     single_view_pan: egui::Vec2,
+    single_view_frame_scroll_accum: f32,
 }
 
 impl Default for DicomViewerApp {
@@ -195,6 +197,7 @@ impl DicomViewerApp {
             last_cine_advance: None,
             single_view_zoom: 1.0,
             single_view_pan: egui::Vec2::ZERO,
+            single_view_frame_scroll_accum: 0.0,
         }
     }
 
@@ -459,6 +462,7 @@ impl DicomViewerApp {
         self.last_cine_advance = None;
         self.mammo_selected_index = 0;
         self.reset_single_view_transform();
+        self.single_view_frame_scroll_accum = 0.0;
     }
 
     fn reset_single_view_transform(&mut self) {
@@ -772,6 +776,7 @@ impl DicomViewerApp {
                 self.mammo_group.clear();
                 self.mammo_selected_index = 0;
                 self.reset_single_view_transform();
+                self.single_view_frame_scroll_accum = 0.0;
                 if let Some(image) = self.image.as_ref() {
                     let frame_count = image.frame_count();
                     if frame_count == 0 {
@@ -807,6 +812,7 @@ impl DicomViewerApp {
                             current_frame: viewport.current_frame,
                             zoom: 1.0,
                             pan: egui::Vec2::ZERO,
+                            frame_scroll_accum: 0.0,
                         }));
                     }
                 }
@@ -990,6 +996,7 @@ impl DicomViewerApp {
             current_frame: 0,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
+            frame_scroll_accum: 0.0,
         });
 
         if self.loaded_mammo_count() == 1 {
@@ -1148,6 +1155,7 @@ impl DicomViewerApp {
                                 current_frame: 0,
                                 zoom: 1.0,
                                 pan: egui::Vec2::ZERO,
+                                frame_scroll_accum: 0.0,
                             });
                         }
                         if loaded.len() == 4 {
@@ -1445,6 +1453,7 @@ impl DicomViewerApp {
                 self.mammo_group.clear();
                 self.mammo_selected_index = 0;
                 self.reset_single_view_transform();
+                self.single_view_frame_scroll_accum = 0.0;
                 self.rebuild_texture(ctx);
                 let history_image = self.image.clone();
                 let history_texture = self.texture.clone();
@@ -1807,15 +1816,30 @@ impl DicomViewerApp {
             || (*window_width - old_width).abs() > f32::EPSILON
     }
 
-    fn frame_step_from_scroll(scroll: f32) -> i32 {
-        if scroll.abs() <= f32::EPSILON {
+    fn frame_step_from_scroll(scroll_accum: &mut f32, scroll: f32) -> i32 {
+        const DEAD_ZONE: f32 = 0.5;
+        const PIXELS_PER_FRAME_STEP: f32 = 30.0;
+
+        if scroll.abs() <= DEAD_ZONE {
             return 0;
         }
-        let steps = ((scroll.abs() / 40.0).round() as i32).max(1);
-        if scroll > 0.0 {
-            -steps
+
+        // Reset stale residuals when the user reverses scroll direction.
+        if *scroll_accum != 0.0 && scroll.signum() != scroll_accum.signum() {
+            *scroll_accum = 0.0;
+        }
+        *scroll_accum += scroll;
+
+        let raw_steps = (*scroll_accum / PIXELS_PER_FRAME_STEP).trunc() as i32;
+        if raw_steps == 0 {
+            return 0;
+        }
+
+        *scroll_accum -= raw_steps as f32 * PIXELS_PER_FRAME_STEP;
+        if raw_steps > 0 {
+            -raw_steps
         } else {
-            steps
+            raw_steps.unsigned_abs() as i32
         }
     }
 
@@ -1921,25 +1945,18 @@ impl DicomViewerApp {
                                                         viewport.image.max_value,
                                                         frame_drag_delta,
                                                     ) {
-                                                        let frame_count =
-                                                            viewport.image.frame_count();
-                                                        if frame_count > 0 {
-                                                            viewport.current_frame = viewport
-                                                                .current_frame
-                                                                .min(frame_count.saturating_sub(1));
-                                                            if let Some(color_image) =
-                                                                Self::render_image_frame(
-                                                                    &viewport.image,
-                                                                    viewport.current_frame,
-                                                                    viewport.window_center,
-                                                                    viewport.window_width,
-                                                                )
-                                                            {
-                                                                viewport.texture.set(
-                                                                    color_image,
-                                                                    TextureOptions::LINEAR,
-                                                                );
-                                                            }
+                                                        if let Some(color_image) =
+                                                            Self::render_image_frame(
+                                                                &viewport.image,
+                                                                viewport.current_frame,
+                                                                viewport.window_center,
+                                                                viewport.window_width,
+                                                            )
+                                                        {
+                                                            viewport.texture.set(
+                                                                color_image,
+                                                                TextureOptions::LINEAR,
+                                                            );
                                                         }
                                                     }
                                                 } else if viewport.zoom > 1.0 {
@@ -1965,8 +1982,10 @@ impl DicomViewerApp {
                                                 if frame_scroll_mode {
                                                     let frame_count = viewport.image.frame_count();
                                                     if frame_count > 1 {
-                                                        let step =
-                                                            Self::frame_step_from_scroll(scroll);
+                                                        let step = Self::frame_step_from_scroll(
+                                                            &mut viewport.frame_scroll_accum,
+                                                            scroll,
+                                                        );
                                                         if step != 0 {
                                                             let next_frame = (viewport.current_frame
                                                                 as i32
@@ -2624,7 +2643,10 @@ impl eframe::App for DicomViewerApp {
                             if let Some(image) = self.image.as_ref() {
                                 let frame_count = image.frame_count();
                                 if frame_count > 1 {
-                                    let step = Self::frame_step_from_scroll(scroll);
+                                    let step = Self::frame_step_from_scroll(
+                                        &mut self.single_view_frame_scroll_accum,
+                                        scroll,
+                                    );
                                     if step != 0 {
                                         self.current_frame = (self.current_frame as i32 + step)
                                             .clamp(0, frame_count as i32 - 1)
