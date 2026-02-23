@@ -1836,11 +1836,7 @@ impl DicomViewerApp {
         }
 
         *scroll_accum -= raw_steps as f32 * PIXELS_PER_FRAME_STEP;
-        if raw_steps > 0 {
-            -raw_steps
-        } else {
-            raw_steps.unsigned_abs() as i32
-        }
+        -raw_steps
     }
 
     fn dominant_scroll_axis(raw_scroll: egui::Vec2, smooth_scroll: egui::Vec2) -> f32 {
@@ -1965,14 +1961,19 @@ impl DicomViewerApp {
                                                 }
                                             }
                                             if response.hovered() {
-                                                let (modifiers, raw_scroll, smooth_scroll) = ui
-                                                    .input(|input| {
-                                                        (
-                                                            input.modifiers,
-                                                            input.raw_scroll_delta,
-                                                            input.smooth_scroll_delta,
-                                                        )
-                                                    });
+                                                let (
+                                                    modifiers,
+                                                    raw_scroll,
+                                                    smooth_scroll,
+                                                    zoom_delta,
+                                                ) = ui.input(|input| {
+                                                    (
+                                                        input.modifiers,
+                                                        input.raw_scroll_delta,
+                                                        input.smooth_scroll_delta,
+                                                        input.zoom_delta(),
+                                                    )
+                                                });
                                                 let frame_scroll_mode =
                                                     Self::is_frame_scroll_input(modifiers);
                                                 let scroll = Self::dominant_scroll_axis(
@@ -1998,8 +1999,6 @@ impl DicomViewerApp {
                                                         }
                                                     }
                                                 } else {
-                                                    let zoom_delta =
-                                                        ui.input(|input| input.zoom_delta());
                                                     let wheel_zoom = (scroll * 0.0015).exp();
                                                     let mut next_zoom = viewport.zoom;
                                                     if (zoom_delta - 1.0).abs() > f32::EPSILON {
