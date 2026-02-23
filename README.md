@@ -23,6 +23,7 @@ Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`efram
 - Real-time window/level controls for grayscale workflows.
 - Multi-frame cine playback (`C` key or UI control).
 - Mouse-wheel zoom + drag pan in both single-image and `2x2` mammo views.
+- Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation, `Shift + drag` for window/level.
 - Metadata side panel for quick inspection.
 - Launch through a custom URL scheme (`perspecta://...`).
 - Launch directly from DICOMweb (study/series/instance aware).
@@ -130,6 +131,8 @@ This writes a desktop entry under `~/.local/share/applications`.
 ## Mouse Controls
 
 - Hover + mouse wheel: zoom in/out (single-image and `2x2` mammo viewports)
+- `Shift` + mouse wheel: previous/next frame (multi-frame images)
+- `Shift` + drag (monochrome images): adjust window/level
 - Click + drag: pan when zoomed in
 - Double click: reset zoom/pan for the active viewport
 

@@ -1784,6 +1784,61 @@ impl DicomViewerApp {
         base_center
     }
 
+    fn apply_window_level_drag(
+        window_center: &mut f32,
+        window_width: &mut f32,
+        min_value: i32,
+        max_value: i32,
+        drag_delta: egui::Vec2,
+    ) -> bool {
+        if drag_delta == egui::Vec2::ZERO {
+            return false;
+        }
+
+        let span = (max_value as i64 - min_value as i64).unsigned_abs() as f32;
+        let sensitivity = (span / 512.0).clamp(0.25, 256.0);
+        let old_center = *window_center;
+        let old_width = *window_width;
+
+        *window_center += -drag_delta.y * sensitivity;
+        *window_width = (*window_width + drag_delta.x * sensitivity).max(1.0);
+
+        (*window_center - old_center).abs() > f32::EPSILON
+            || (*window_width - old_width).abs() > f32::EPSILON
+    }
+
+    fn frame_step_from_scroll(scroll: f32) -> i32 {
+        if scroll.abs() <= f32::EPSILON {
+            return 0;
+        }
+        let steps = ((scroll.abs() / 40.0).round() as i32).max(1);
+        if scroll > 0.0 {
+            -steps
+        } else {
+            steps
+        }
+    }
+
+    fn dominant_scroll_axis(raw_scroll: egui::Vec2, smooth_scroll: egui::Vec2) -> f32 {
+        let pick = |delta: egui::Vec2| {
+            if delta.y.abs() >= delta.x.abs() {
+                delta.y
+            } else {
+                delta.x
+            }
+        };
+
+        if smooth_scroll != egui::Vec2::ZERO {
+            pick(smooth_scroll)
+        } else {
+            pick(raw_scroll)
+        }
+    }
+
+    fn is_frame_scroll_input(modifiers: egui::Modifiers) -> bool {
+        modifiers.shift
+    }
+
     fn show_mammo_grid(&mut self, ui: &mut egui::Ui) {
         const MAMMO_GRID_GAP: f32 = 2.0;
         const MAMMO_VIEW_INNER_MARGIN: f32 = 3.0;
@@ -1796,6 +1851,7 @@ impl DicomViewerApp {
             let cell_height = ((available.y - MAMMO_GRID_GAP).max(2.0)) / 2.0;
             let cell_size = egui::vec2(cell_width, cell_height);
             let mut clicked_index = None;
+            let mut pending_frame_target: Option<(usize, usize)> = None;
 
             for row in 0..2 {
                 ui.horizontal(|ui| {
@@ -1849,46 +1905,108 @@ impl DicomViewerApp {
                                                 viewport.zoom = 1.0;
                                                 viewport.pan = egui::Vec2::ZERO;
                                             }
-                                            if viewport.zoom > 1.0 && response.dragged() {
-                                                let frame_drag_delta =
-                                                    ui.input(|input| input.pointer.delta());
-                                                viewport.pan += frame_drag_delta;
-                                            }
-                                            if response.hovered() {
-                                                let (zoom_delta, raw_scroll, smooth_scroll) = ui
-                                                    .input(|input| {
+                                            if response.dragged() {
+                                                let (frame_drag_delta, shift_held) =
+                                                    ui.input(|input| {
                                                         (
-                                                            input.zoom_delta(),
-                                                            input.raw_scroll_delta.y,
-                                                            input.smooth_scroll_delta.y,
+                                                            input.pointer.delta(),
+                                                            input.modifiers.shift,
                                                         )
                                                     });
-                                                let scroll = if smooth_scroll.abs() > 0.0 {
-                                                    smooth_scroll
-                                                } else {
-                                                    raw_scroll
-                                                };
-                                                let wheel_zoom = (scroll * 0.0015).exp();
-                                                let mut next_zoom = viewport.zoom;
-                                                if (zoom_delta - 1.0).abs() > f32::EPSILON {
-                                                    next_zoom *= zoom_delta;
-                                                } else if (wheel_zoom - 1.0).abs() > f32::EPSILON {
-                                                    next_zoom *= wheel_zoom;
+                                                if shift_held && viewport.image.is_monochrome() {
+                                                    if Self::apply_window_level_drag(
+                                                        &mut viewport.window_center,
+                                                        &mut viewport.window_width,
+                                                        viewport.image.min_value,
+                                                        viewport.image.max_value,
+                                                        frame_drag_delta,
+                                                    ) {
+                                                        let frame_count =
+                                                            viewport.image.frame_count();
+                                                        if frame_count > 0 {
+                                                            viewport.current_frame = viewport
+                                                                .current_frame
+                                                                .min(frame_count.saturating_sub(1));
+                                                            if let Some(color_image) =
+                                                                Self::render_image_frame(
+                                                                    &viewport.image,
+                                                                    viewport.current_frame,
+                                                                    viewport.window_center,
+                                                                    viewport.window_width,
+                                                                )
+                                                            {
+                                                                viewport.texture.set(
+                                                                    color_image,
+                                                                    TextureOptions::LINEAR,
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                } else if viewport.zoom > 1.0 {
+                                                    viewport.pan += frame_drag_delta;
                                                 }
-                                                next_zoom = next_zoom.clamp(1.0, 12.0);
-                                                if (next_zoom - viewport.zoom).abs() > f32::EPSILON
-                                                {
-                                                    let old_zoom = viewport.zoom;
-                                                    viewport.zoom = next_zoom;
-                                                    if let Some(pointer_pos) = response.hover_pos()
+                                            }
+                                            if response.hovered() {
+                                                let (modifiers, raw_scroll, smooth_scroll) = ui
+                                                    .input(|input| {
+                                                        (
+                                                            input.modifiers,
+                                                            input.raw_scroll_delta,
+                                                            input.smooth_scroll_delta,
+                                                        )
+                                                    });
+                                                let frame_scroll_mode =
+                                                    Self::is_frame_scroll_input(modifiers);
+                                                let scroll = Self::dominant_scroll_axis(
+                                                    raw_scroll,
+                                                    smooth_scroll,
+                                                );
+
+                                                if frame_scroll_mode {
+                                                    let frame_count = viewport.image.frame_count();
+                                                    if frame_count > 1 {
+                                                        let step =
+                                                            Self::frame_step_from_scroll(scroll);
+                                                        if step != 0 {
+                                                            let next_frame = (viewport.current_frame
+                                                                as i32
+                                                                + step)
+                                                                .clamp(0, frame_count as i32 - 1)
+                                                                as usize;
+                                                            pending_frame_target =
+                                                                Some((index, next_frame));
+                                                        }
+                                                    }
+                                                } else {
+                                                    let zoom_delta =
+                                                        ui.input(|input| input.zoom_delta());
+                                                    let wheel_zoom = (scroll * 0.0015).exp();
+                                                    let mut next_zoom = viewport.zoom;
+                                                    if (zoom_delta - 1.0).abs() > f32::EPSILON {
+                                                        next_zoom *= zoom_delta;
+                                                    } else if (wheel_zoom - 1.0).abs()
+                                                        > f32::EPSILON
                                                     {
-                                                        let old_center =
-                                                            base_center_before + viewport.pan;
-                                                        let pointer_offset =
-                                                            pointer_pos - old_center;
-                                                        let zoom_ratio = viewport.zoom / old_zoom;
-                                                        viewport.pan +=
-                                                            pointer_offset * (1.0 - zoom_ratio);
+                                                        next_zoom *= wheel_zoom;
+                                                    }
+                                                    next_zoom = next_zoom.clamp(1.0, 12.0);
+                                                    if (next_zoom - viewport.zoom).abs()
+                                                        > f32::EPSILON
+                                                    {
+                                                        let old_zoom = viewport.zoom;
+                                                        viewport.zoom = next_zoom;
+                                                        if let Some(pointer_pos) =
+                                                            response.hover_pos()
+                                                        {
+                                                            let old_center =
+                                                                base_center_before + viewport.pan;
+                                                            let pointer_offset =
+                                                                pointer_pos - old_center;
+                                                            let zoom_ratio =
+                                                                viewport.zoom / old_zoom;
+                                                            viewport.pan +=
+                                                                pointer_offset * (1.0 - zoom_ratio);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1946,6 +2064,11 @@ impl DicomViewerApp {
 
             if let Some(index) = clicked_index {
                 self.mammo_selected_index = index;
+            }
+            if let Some((index, frame_target)) = pending_frame_target {
+                self.mammo_selected_index = index;
+                self.set_mammo_group_frame(frame_target);
+                self.last_cine_advance = Some(Instant::now());
             }
         });
     }
@@ -2457,41 +2580,79 @@ impl eframe::App for DicomViewerApp {
                         self.reset_single_view_transform();
                     }
 
-                    if self.single_view_zoom > 1.0 && response.dragged() {
-                        let frame_drag_delta = ui.input(|input| input.pointer.delta());
-                        self.single_view_pan += frame_drag_delta;
+                    if response.dragged() {
+                        let (frame_drag_delta, shift_held) =
+                            ui.input(|input| (input.pointer.delta(), input.modifiers.shift));
+                        let wl_meta = self
+                            .image
+                            .as_ref()
+                            .map(|image| (image.is_monochrome(), image.min_value, image.max_value));
+                        let mut handled_wl_drag = false;
+                        if shift_held {
+                            if let Some((true, min_value, max_value)) = wl_meta {
+                                handled_wl_drag = true;
+                                if Self::apply_window_level_drag(
+                                    &mut self.window_center,
+                                    &mut self.window_width,
+                                    min_value,
+                                    max_value,
+                                    frame_drag_delta,
+                                ) {
+                                    self.rebuild_texture(ctx);
+                                }
+                            }
+                        }
+                        if !handled_wl_drag && self.single_view_zoom > 1.0 {
+                            self.single_view_pan += frame_drag_delta;
+                        }
                     }
 
                     if response.hovered() {
-                        let (zoom_delta, raw_scroll, smooth_scroll) = ui.input(|input| {
-                            (
-                                input.zoom_delta(),
-                                input.raw_scroll_delta.y,
-                                input.smooth_scroll_delta.y,
-                            )
-                        });
-                        let scroll = if smooth_scroll.abs() > 0.0 {
-                            smooth_scroll
-                        } else {
-                            raw_scroll
-                        };
-                        let wheel_zoom = (scroll * 0.0015).exp();
-                        let mut next_zoom = self.single_view_zoom;
-                        if (zoom_delta - 1.0).abs() > f32::EPSILON {
-                            next_zoom *= zoom_delta;
-                        } else if (wheel_zoom - 1.0).abs() > f32::EPSILON {
-                            next_zoom *= wheel_zoom;
-                        }
-                        next_zoom = next_zoom.clamp(1.0, 12.0);
+                        let (modifiers, zoom_delta, raw_scroll, smooth_scroll) =
+                            ui.input(|input| {
+                                (
+                                    input.modifiers,
+                                    input.zoom_delta(),
+                                    input.raw_scroll_delta,
+                                    input.smooth_scroll_delta,
+                                )
+                            });
+                        let frame_scroll_mode = Self::is_frame_scroll_input(modifiers);
+                        let scroll = Self::dominant_scroll_axis(raw_scroll, smooth_scroll);
 
-                        if (next_zoom - self.single_view_zoom).abs() > f32::EPSILON {
-                            let old_zoom = self.single_view_zoom;
-                            self.single_view_zoom = next_zoom;
-                            if let Some(pointer_pos) = response.hover_pos() {
-                                let old_center = canvas_rect.center() + self.single_view_pan;
-                                let pointer_offset = pointer_pos - old_center;
-                                let zoom_ratio = self.single_view_zoom / old_zoom;
-                                self.single_view_pan += pointer_offset * (1.0 - zoom_ratio);
+                        if frame_scroll_mode {
+                            if let Some(image) = self.image.as_ref() {
+                                let frame_count = image.frame_count();
+                                if frame_count > 1 {
+                                    let step = Self::frame_step_from_scroll(scroll);
+                                    if step != 0 {
+                                        self.current_frame = (self.current_frame as i32 + step)
+                                            .clamp(0, frame_count as i32 - 1)
+                                            as usize;
+                                        self.last_cine_advance = Some(Instant::now());
+                                        self.rebuild_texture(ctx);
+                                    }
+                                }
+                            }
+                        } else {
+                            let wheel_zoom = (scroll * 0.0015).exp();
+                            let mut next_zoom = self.single_view_zoom;
+                            if (zoom_delta - 1.0).abs() > f32::EPSILON {
+                                next_zoom *= zoom_delta;
+                            } else if (wheel_zoom - 1.0).abs() > f32::EPSILON {
+                                next_zoom *= wheel_zoom;
+                            }
+                            next_zoom = next_zoom.clamp(1.0, 12.0);
+
+                            if (next_zoom - self.single_view_zoom).abs() > f32::EPSILON {
+                                let old_zoom = self.single_view_zoom;
+                                self.single_view_zoom = next_zoom;
+                                if let Some(pointer_pos) = response.hover_pos() {
+                                    let old_center = canvas_rect.center() + self.single_view_pan;
+                                    let pointer_offset = pointer_pos - old_center;
+                                    let zoom_ratio = self.single_view_zoom / old_zoom;
+                                    self.single_view_pan += pointer_offset * (1.0 - zoom_ratio);
+                                }
                             }
                         }
                     }
