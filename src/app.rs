@@ -1874,6 +1874,7 @@ impl DicomViewerApp {
             let cell_width = ((available.x - MAMMO_GRID_GAP).max(2.0)) / 2.0;
             let cell_height = ((available.y - MAMMO_GRID_GAP).max(2.0)) / 2.0;
             let cell_size = egui::vec2(cell_width, cell_height);
+            let common_frame_count = self.mammo_group_common_frame_count();
             let mut clicked_index = None;
             let mut pending_frame_target: Option<(usize, usize)> = None;
 
@@ -1980,7 +1981,7 @@ impl DicomViewerApp {
                                                 );
 
                                                 if frame_scroll_mode {
-                                                    let frame_count = viewport.image.frame_count();
+                                                    let frame_count = common_frame_count;
                                                     if frame_count > 1 {
                                                         let step = Self::frame_step_from_scroll(
                                                             &mut viewport.frame_scroll_accum,
