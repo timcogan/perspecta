@@ -1,0 +1,10 @@
+# Hugo build output
+public/
+resources/
+
+# Hugo local build lock
+.hugo_build.lock
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db

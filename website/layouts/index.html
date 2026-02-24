@@ -1,0 +1,30 @@
+{{ define "main" }}
+<main class="page">
+  <header class="nav">
+    <a class="brand" href="/" aria-label="Perspecta home">
+      <img src="/brand/perspecta-wordmark.svg" alt="Perspecta">
+    </a>
+    <nav class="links" aria-label="Primary">
+      <a href="{{ .Site.Params.releases }}">Releases</a>
+      <a href="{{ .Site.Params.github }}">GitHub</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h1>Fast. Minimalist. Free.</h1>
+    <p class="lede">
+      A DICOM viewer with
+      responsive rendering and simple integration.
+    </p>
+    <div class="cta">
+      <a class="button primary" href="{{ .Site.Params.releases }}">Download</a>
+      <a class="button" href="{{ .Site.Params.github }}">Source</a>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <span>© 2026 Tim Cogan</span>
+    <span>MIT License</span>
+  </footer>
+</main>
+{{ end }}
