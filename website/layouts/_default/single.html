@@ -1,0 +1,15 @@
+{{ define "main" }}
+<main class="page">
+  {{ partial "header.html" . }}
+
+  <article class="doc">
+    <h1>{{ .Title }}</h1>
+    {{ with .Params.last_updated }}
+    <p class="doc-updated">Last updated: {{ . }}</p>
+    {{ end }}
+    {{ .Content }}
+  </article>
+
+  {{ partial "footer.html" . }}
+</main>
+{{ end }}

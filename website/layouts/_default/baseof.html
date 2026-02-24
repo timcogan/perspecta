@@ -5,10 +5,40 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ if .IsHome }}{{ .Site.Title }}{{ else }}{{ .Title }} · {{ .Site.Title }}{{ end }}</title>
     <meta name="description" content="{{ .Params.description | default .Site.Params.description }}">
-    <link rel="icon" href="{{ \"/brand/perspecta.svg\" | relURL }}" type="image/svg+xml">
-    <link rel="stylesheet" href="{{ \"/css/styles.css\" | relURL }}">
+    <link rel="icon" href="{{ "/brand/perspecta.svg" | relURL }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ "/css/styles.css" | relURL }}">
+    {{ with .Site.Params.ga4 }}
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('consent', 'default', {
+        ad_storage: 'denied',
+        ad_user_data: 'denied',
+        ad_personalization: 'denied',
+        analytics_storage: 'denied'
+      });
+      gtag('js', new Date());
+      gtag('config', '{{ . }}');
+    </script>
+    <script async src="https://www.googletagmanager.com/gtag/js?id={{ . }}"></script>
+    {{ end }}
   </head>
   <body>
     {{ block "main" . }}{{ end }}
+    {{ with .Site.Params.ga4 }}
+    <div class="cookie-banner is-hidden" role="dialog" aria-modal="true" aria-label="Cookie consent">
+      <div class="cookie-content">
+        <div>
+          <strong>Cookies</strong>
+          <p>We use analytics cookies to understand usage. You can accept or decline.</p>
+        </div>
+        <div class="cookie-actions">
+          <button class="button cookie-decline" type="button">Decline</button>
+          <button class="button primary cookie-accept" type="button">Accept</button>
+        </div>
+      </div>
+    </div>
+    <script src="{{ "/js/consent.js" | relURL }}"></script>
+    {{ end }}
   </body>
 </html>

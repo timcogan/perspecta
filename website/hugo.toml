@@ -7,3 +7,4 @@ disableKinds = ["taxonomy", "term", "RSS", "sitemap", "robotsTXT"]
 description = "A fast DICOM viewer built in Rust."
 github = "https://github.com/timcogan/perspecta"
 releases = "https://github.com/timcogan/perspecta/releases"
+ga4 = "G-EF5MLHGXBX"
