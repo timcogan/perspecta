@@ -37,7 +37,8 @@ jobs:
           extended: false
 
       - name: Build site
-        run: hugo --source website --destination website/public --minify
+        working-directory: website
+        run: hugo --destination public --minify
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
