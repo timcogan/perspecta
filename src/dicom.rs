@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 use std::{fs, io::Cursor};
 
 use anyhow::{bail, Context, Result};
@@ -42,12 +45,16 @@ pub const METADATA_FIELD_NAMES: &[&str] = &[
     "InstanceNumber",
 ];
 
+type MonoFrameCache = Arc<Mutex<Vec<Option<Arc<[i32]>>>>>;
+type RgbFrameCache = Arc<Mutex<Vec<Option<Arc<[u8]>>>>>;
+
 #[derive(Debug, Clone)]
 pub struct DicomImage {
     pub width: usize,
     pub height: usize,
-    mono_frames: Vec<Vec<i32>>,
-    rgb_frames: Vec<Vec<u8>>,
+    mono_frames: MonoFrames,
+    rgb_frames: RgbFrames,
+    frame_count: usize,
     pub color_mode: ImageColorMode,
     pub samples_per_pixel: u16,
     pub invert: bool,
@@ -62,28 +69,121 @@ pub struct DicomImage {
     pub metadata: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone)]
+enum MonoFrames {
+    None,
+    Eager(Vec<Arc<[i32]>>),
+    Lazy(LazyMonoFrames),
+}
+
+#[derive(Debug, Clone)]
+enum RgbFrames {
+    None,
+    Eager(Vec<Arc<[u8]>>),
+    Lazy(LazyRgbFrames),
+}
+
+#[derive(Debug, Clone)]
+struct LazyMonoFrames {
+    path: PathBuf,
+    cache: MonoFrameCache,
+    preload_started: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone)]
+struct LazyRgbFrames {
+    path: PathBuf,
+    cache: RgbFrameCache,
+    preload_started: Arc<AtomicBool>,
+}
+
 impl DicomImage {
     pub fn is_monochrome(&self) -> bool {
         self.color_mode == ImageColorMode::Monochrome
     }
 
     pub fn frame_count(&self) -> usize {
-        match self.color_mode {
-            ImageColorMode::Monochrome => self.mono_frames.len(),
-            ImageColorMode::Rgb => self.rgb_frames.len(),
+        self.frame_count
+    }
+
+    pub fn frame_mono_pixels(&self, frame_index: usize) -> Option<Arc<[i32]>> {
+        match &self.mono_frames {
+            MonoFrames::None => None,
+            MonoFrames::Eager(frames) => frames.get(frame_index).cloned(),
+            MonoFrames::Lazy(lazy) => lazy.frame(frame_index),
         }
     }
 
-    pub fn frame_mono_pixels(&self, frame_index: usize) -> Option<&[i32]> {
-        self.mono_frames
-            .get(frame_index)
-            .map(|frame| frame.as_slice())
+    pub fn frame_rgb_pixels(&self, frame_index: usize) -> Option<Arc<[u8]>> {
+        match &self.rgb_frames {
+            RgbFrames::None => None,
+            RgbFrames::Eager(frames) => frames.get(frame_index).cloned(),
+            RgbFrames::Lazy(lazy) => lazy.frame(frame_index),
+        }
+    }
+}
+
+impl LazyMonoFrames {
+    fn frame(&self, frame_index: usize) -> Option<Arc<[i32]>> {
+        if let Ok(cache) = self.cache.lock() {
+            if let Some(frame) = cache.get(frame_index).and_then(|slot| slot.clone()) {
+                self.ensure_background_preload();
+                return Some(frame);
+            }
+        }
+
+        self.ensure_background_preload();
+        None
     }
 
-    pub fn frame_rgb_pixels(&self, frame_index: usize) -> Option<&[u8]> {
-        self.rgb_frames
-            .get(frame_index)
-            .map(|frame| frame.as_slice())
+    fn ensure_background_preload(&self) {
+        if self.preload_started.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let path = self.path.clone();
+        let cache = Arc::clone(&self.cache);
+        let preload_started = Arc::clone(&self.preload_started);
+        thread::spawn(move || {
+            if let Err(err) = preload_mono_frames_from_path(&path, &cache) {
+                preload_started.store(false, Ordering::Relaxed);
+                eprintln!(
+                    "preload_mono_frames_from_path failed for {}: {err:#}",
+                    path.display()
+                );
+            }
+        });
+    }
+}
+
+impl LazyRgbFrames {
+    fn frame(&self, frame_index: usize) -> Option<Arc<[u8]>> {
+        if let Ok(cache) = self.cache.lock() {
+            if let Some(frame) = cache.get(frame_index).and_then(|slot| slot.clone()) {
+                self.ensure_background_preload();
+                return Some(frame);
+            }
+        }
+
+        self.ensure_background_preload();
+        None
+    }
+
+    fn ensure_background_preload(&self) {
+        if self.preload_started.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let path = self.path.clone();
+        let cache = Arc::clone(&self.cache);
+        let preload_started = Arc::clone(&self.preload_started);
+        thread::spawn(move || {
+            if let Err(err) = preload_rgb_frames_from_path(&path, &cache) {
+                preload_started.store(false, Ordering::Relaxed);
+                eprintln!(
+                    "preload_rgb_frames_from_path failed for {}: {err:#}",
+                    path.display()
+                );
+            }
+        });
     }
 }
 
@@ -105,8 +205,8 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
     let invert = photometric.eq_ignore_ascii_case("MONOCHROME1");
 
     let decoded = obj
-        .decode_pixel_data()
-        .context("Failed to decode PixelData")?;
+        .decode_pixel_data_frame(0)
+        .context("Failed to decode PixelData frame 0")?;
 
     let decoded_width = decoded.columns() as usize;
     let decoded_height = decoded.rows() as usize;
@@ -120,10 +220,11 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
         );
     }
 
-    let frame_count = decoded.number_of_frames() as usize;
-    if frame_count == 0 {
-        bail!("Decoded pixel data has no frames");
-    }
+    let frame_count = match read_int_first(&obj, "NumberOfFrames") {
+        Some(value) if value > 0 => value as usize,
+        Some(value) => bail!("Invalid NumberOfFrames={} (must be >= 1)", value),
+        None => 1,
+    };
 
     let samples_per_pixel = decoded.samples_per_pixel();
     let recommended_cine_fps = read_float_first(&obj, "FrameTime")
@@ -142,35 +243,43 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
                 bail!("BitsAllocated={} is not supported (only 8/16)", bits_allocated);
             }
 
-            let mut mono_frames = Vec::with_capacity(frame_count);
-            for frame_index in 0..frame_count {
-                let frame_pixels: Vec<i32> = decoded
-                    .to_vec_frame(frame_index as u32)
-                    .with_context(|| format!("Could not convert decoded frame {} to i32 samples", frame_index))?;
-                if frame_pixels.len() != width * height {
-                    bail!(
-                        "Decoded pixel count mismatch in frame {}: got {}, expected {}",
-                        frame_index,
-                        frame_pixels.len(),
-                        width * height
-                    );
-                }
-                mono_frames.push(frame_pixels);
+            let first_frame_pixels: Vec<i32> = decoded
+                .to_vec_frame(0)
+                .context("Could not convert decoded frame 0 to i32 samples")?;
+            if first_frame_pixels.len() != width * height {
+                bail!(
+                    "Decoded pixel count mismatch in frame 0: got {}, expected {}",
+                    first_frame_pixels.len(),
+                    width * height
+                );
             }
 
             let (min_value, max_value) =
-                min_max_frames(&mono_frames).context("No pixels available for rendering")?;
+                min_max(&first_frame_pixels).context("No pixels available for rendering")?;
 
             let default_center = read_float_first(&obj, "WindowCenter")
                 .unwrap_or_else(|| (min_value + max_value) as f32 / 2.0);
             let default_width = read_float_first(&obj, "WindowWidth")
                 .unwrap_or_else(|| (max_value - min_value).max(1) as f32);
 
+            let mono_frames = if frame_count == 1 {
+                MonoFrames::Eager(vec![Arc::<[i32]>::from(first_frame_pixels.into_boxed_slice())])
+            } else {
+                let mut cache = vec![None; frame_count];
+                cache[0] = Some(Arc::<[i32]>::from(first_frame_pixels.into_boxed_slice()));
+                MonoFrames::Lazy(LazyMonoFrames {
+                    path: path.to_path_buf(),
+                    cache: Arc::new(Mutex::new(cache)),
+                    preload_started: Arc::new(AtomicBool::new(false)),
+                })
+            };
+
             Ok(DicomImage {
                 width,
                 height,
                 mono_frames,
-                rgb_frames: Vec::new(),
+                rgb_frames: RgbFrames::None,
+                frame_count,
                 color_mode: ImageColorMode::Monochrome,
                 samples_per_pixel,
                 invert,
@@ -197,38 +306,46 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
                 .context("Overflow while calculating color frame size")?;
             let bits_shift = decoded.bits_stored().saturating_sub(8);
 
-            let mut rgb_frames = Vec::with_capacity(frame_count);
-            for frame_index in 0..frame_count {
-                let frame_pixels: Vec<u8> = if bits_allocated == 8 {
-                    decoded
-                        .to_vec_frame(frame_index as u32)
-                        .with_context(|| format!("Could not convert decoded frame {} to u8 samples", frame_index))?
-                } else {
-                    let frame_pixels_u16: Vec<u16> = decoded
-                        .to_vec_frame(frame_index as u32)
-                        .with_context(|| format!("Could not convert decoded frame {} to u16 samples", frame_index))?;
-                    frame_pixels_u16
-                        .into_iter()
-                        .map(|sample| (sample >> bits_shift) as u8)
-                        .collect()
-                };
+            let first_frame_pixels: Vec<u8> = if bits_allocated == 8 {
+                decoded
+                    .to_vec_frame(0)
+                    .context("Could not convert decoded frame 0 to u8 samples")?
+            } else {
+                let frame_pixels_u16: Vec<u16> = decoded
+                    .to_vec_frame(0)
+                    .context("Could not convert decoded frame 0 to u16 samples")?;
+                frame_pixels_u16
+                    .into_iter()
+                    .map(|sample| (sample >> bits_shift) as u8)
+                    .collect()
+            };
 
-                if frame_pixels.len() != expected_len {
-                    bail!(
-                        "Decoded color pixel count mismatch in frame {}: got {}, expected {}",
-                        frame_index,
-                        frame_pixels.len(),
-                        expected_len
-                    );
-                }
-                rgb_frames.push(frame_pixels);
+            if first_frame_pixels.len() != expected_len {
+                bail!(
+                    "Decoded color pixel count mismatch in frame 0: got {}, expected {}",
+                    first_frame_pixels.len(),
+                    expected_len
+                );
             }
+
+            let rgb_frames = if frame_count == 1 {
+                RgbFrames::Eager(vec![Arc::<[u8]>::from(first_frame_pixels.into_boxed_slice())])
+            } else {
+                let mut cache = vec![None; frame_count];
+                cache[0] = Some(Arc::<[u8]>::from(first_frame_pixels.into_boxed_slice()));
+                RgbFrames::Lazy(LazyRgbFrames {
+                    path: path.to_path_buf(),
+                    cache: Arc::new(Mutex::new(cache)),
+                    preload_started: Arc::new(AtomicBool::new(false)),
+                })
+            };
 
             Ok(DicomImage {
                 width,
                 height,
-                mono_frames: Vec::new(),
+                mono_frames: MonoFrames::None,
                 rgb_frames,
+                frame_count,
                 color_mode: ImageColorMode::Rgb,
                 samples_per_pixel,
                 invert: false,
@@ -248,6 +365,199 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
             other
         ),
     }
+}
+
+fn preload_mono_frames_from_path(path: &Path, cache: &MonoFrameCache) -> Result<()> {
+    let frame_count = match cache.lock() {
+        Ok(guard) => guard.len(),
+        Err(err) => {
+            bail!("Background monochrome preload cache lock poisoned: {err}");
+        }
+    };
+    if frame_count <= 1 {
+        return Ok(());
+    }
+
+    let worker_count = preload_worker_count(frame_count);
+    let mut workers = Vec::with_capacity(worker_count);
+
+    for worker_id in 0..worker_count {
+        let path = path.to_path_buf();
+        let cache = Arc::clone(cache);
+        workers.push(thread::spawn(move || -> Result<()> {
+            let obj = open_dicom_object(&path)?;
+            for frame_index in (worker_id..frame_count).step_by(worker_count) {
+                let already_loaded = match cache.lock() {
+                    Ok(guard) => guard
+                        .get(frame_index)
+                        .and_then(|slot| slot.as_ref())
+                        .is_some(),
+                    Err(err) => {
+                        bail!(
+                            "Background monochrome preload cache lock poisoned while checking frame {}: {err}",
+                            frame_index
+                        );
+                    }
+                };
+                if already_loaded {
+                    continue;
+                }
+
+                let decoded = obj
+                    .decode_pixel_data_frame(frame_index as u32)
+                    .with_context(|| {
+                        format!(
+                            "Failed to decode PixelData frame {} for background preload",
+                            frame_index
+                        )
+                    })?;
+                if decoded.samples_per_pixel() != 1 {
+                    bail!(
+                        "Background preload expected monochrome pixels, got SamplesPerPixel={}",
+                        decoded.samples_per_pixel()
+                    );
+                }
+                let frame_pixels: Vec<i32> = decoded.to_vec_frame(0).with_context(|| {
+                    format!(
+                        "Could not convert decoded frame {} to i32 samples",
+                        frame_index
+                    )
+                })?;
+                let frame_pixels = Arc::<[i32]>::from(frame_pixels.into_boxed_slice());
+
+                match cache.lock() {
+                    Ok(mut guard) => {
+                        if let Some(slot) = guard.get_mut(frame_index) {
+                            if slot.is_none() {
+                                *slot = Some(frame_pixels);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        bail!(
+                            "Background monochrome preload cache lock poisoned while storing frame {}: {err}",
+                            frame_index
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }));
+    }
+
+    for worker in workers {
+        match worker.join() {
+            Ok(result) => result?,
+            Err(_) => bail!("Background monochrome preload worker panicked"),
+        }
+    }
+
+    Ok(())
+}
+
+fn preload_rgb_frames_from_path(path: &Path, cache: &RgbFrameCache) -> Result<()> {
+    let frame_count = match cache.lock() {
+        Ok(guard) => guard.len(),
+        Err(err) => {
+            bail!("Background RGB preload cache lock poisoned: {err}");
+        }
+    };
+    if frame_count <= 1 {
+        return Ok(());
+    }
+
+    let worker_count = preload_worker_count(frame_count);
+    let mut workers = Vec::with_capacity(worker_count);
+
+    for worker_id in 0..worker_count {
+        let path = path.to_path_buf();
+        let cache = Arc::clone(cache);
+        workers.push(thread::spawn(move || -> Result<()> {
+            let obj = open_dicom_object(&path)?;
+            for frame_index in (worker_id..frame_count).step_by(worker_count) {
+                let already_loaded = match cache.lock() {
+                    Ok(guard) => guard
+                        .get(frame_index)
+                        .and_then(|slot| slot.as_ref())
+                        .is_some(),
+                    Err(err) => {
+                        bail!(
+                            "Background RGB preload cache lock poisoned while checking frame {}: {err}",
+                            frame_index
+                        );
+                    }
+                };
+                if already_loaded {
+                    continue;
+                }
+
+                let decoded = obj
+                    .decode_pixel_data_frame(frame_index as u32)
+                    .with_context(|| {
+                        format!(
+                            "Failed to decode PixelData frame {} for background preload",
+                            frame_index
+                        )
+                    })?;
+                let bits_allocated = decoded.bits_allocated();
+                if bits_allocated != 8 && bits_allocated != 16 {
+                    bail!(
+                        "BitsAllocated={} is not supported for color images (only 8/16)",
+                        bits_allocated
+                    );
+                }
+
+                let frame_pixels: Vec<u8> = if bits_allocated == 8 {
+                    decoded.to_vec_frame(0).with_context(|| {
+                        format!(
+                            "Could not convert decoded frame {} to u8 samples",
+                            frame_index
+                        )
+                    })?
+                } else {
+                    let bits_shift = decoded.bits_stored().saturating_sub(8);
+                    let frame_pixels_u16: Vec<u16> =
+                        decoded.to_vec_frame(0).with_context(|| {
+                            format!(
+                                "Could not convert decoded frame {} to u16 samples",
+                                frame_index
+                            )
+                        })?;
+                    frame_pixels_u16
+                        .into_iter()
+                        .map(|sample| (sample >> bits_shift) as u8)
+                        .collect()
+                };
+                let frame_pixels = Arc::<[u8]>::from(frame_pixels.into_boxed_slice());
+
+                match cache.lock() {
+                    Ok(mut guard) => {
+                        if let Some(slot) = guard.get_mut(frame_index) {
+                            if slot.is_none() {
+                                *slot = Some(frame_pixels);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        bail!(
+                            "Background RGB preload cache lock poisoned while storing frame {}: {err}",
+                            frame_index
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }));
+    }
+
+    for worker in workers {
+        match worker.join() {
+            Ok(result) => result?,
+            Err(_) => bail!("Background RGB preload worker panicked"),
+        }
+    }
+
+    Ok(())
 }
 
 fn open_dicom_object(path: &Path) -> Result<DefaultDicomObject> {
@@ -271,6 +581,29 @@ fn open_dicom_object(path: &Path) -> Result<DefaultDicomObject> {
             Err(err).with_context(|| format!("Could not open {}", path.display()))
         }
     }
+}
+
+fn preload_worker_count(frame_count: usize) -> usize {
+    let auto_workers = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(1, 4);
+
+    let configured = configured_preload_workers().unwrap_or(auto_workers);
+    configured.clamp(1, 32).min(frame_count.max(1))
+}
+
+fn configured_preload_workers() -> Option<usize> {
+    static CONFIG: OnceLock<Option<usize>> = OnceLock::new();
+
+    *CONFIG.get_or_init(|| {
+        let raw = std::env::var("PERSPECTA_PRELOAD_WORKERS").ok()?;
+        let value = raw.trim().parse::<usize>().ok()?;
+        if value == 0 {
+            return None;
+        }
+        Some(value)
+    })
 }
 
 fn is_missing_meta_group_length_error(error: &ReadError) -> bool {
@@ -570,25 +903,6 @@ fn min_max(values: &[i32]) -> Option<(i32, i32)> {
         }
     }
     Some((min_v, max_v))
-}
-
-fn min_max_frames(frames: &[Vec<i32>]) -> Option<(i32, i32)> {
-    let mut frame_iter = frames.iter();
-    let first = frame_iter.next()?;
-    let (mut min_value, mut max_value) = min_max(first)?;
-
-    for frame in frame_iter {
-        if let Some((frame_min, frame_max)) = min_max(frame) {
-            if frame_min < min_value {
-                min_value = frame_min;
-            }
-            if frame_max > max_value {
-                max_value = frame_max;
-            }
-        }
-    }
-
-    Some((min_value, max_value))
 }
 
 #[cfg(test)]
