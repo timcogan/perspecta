@@ -239,14 +239,108 @@ a {
   color: var(--muted);
 }
 
+.cookie-banner {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  background: rgba(12, 14, 18, 0.95);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 16px 18px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  z-index: 2000;
+  backdrop-filter: blur(6px);
+}
+
+.cookie-banner.is-hidden {
+  display: none;
+}
+
+.cookie-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.cookie-content p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.cookie-actions {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.cookie-decline {
+  color: var(--fg);
+}
+
+@media (max-width: 720px) {
+  .cookie-content {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .cookie-actions {
+    width: 100%;
+  }
+
+  .cookie-actions .button {
+    flex: 1 1 auto;
+  }
+}
+
 .footer {
   margin-top: auto;
   padding-top: 46px;
   color: var(--muted);
   font-size: 13px;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
+}
+
+.footer a {
+  color: var(--muted);
+}
+
+.footer a:hover {
+  color: var(--fg);
+}
+
+.doc {
+  max-width: 780px;
+  margin: 40px auto 0;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.doc h1 {
+  margin: 0 0 18px;
+  color: var(--fg);
+  font-size: clamp(28px, 5vw, 40px);
+}
+
+.doc-updated {
+  margin: -10px 0 16px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.doc p {
+  margin: 0 0 14px;
+}
+
+.doc ul {
+  margin: 0 0 14px;
+  padding-left: 20px;
 }
 
 @media (max-width: 860px) {

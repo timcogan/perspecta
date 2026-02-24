@@ -1,14 +1,6 @@
 {{ define "main" }}
 <main class="page">
-  <header class="nav">
-    <a class="brand" href="/" aria-label="Perspecta home">
-      <img src="{{ \"/brand/perspecta-wordmark.svg\" | relURL }}" alt="Perspecta">
-    </a>
-    <nav class="links" aria-label="Primary">
-      <a href="{{ .Site.Params.releases }}">Releases</a>
-      <a href="{{ .Site.Params.github }}">GitHub</a>
-    </nav>
-  </header>
+  {{ partial "header.html" . }}
 
   <section class="hero">
     <h1>Fast. Minimalist. Free.</h1>
@@ -22,9 +14,6 @@
     </div>
   </section>
 
-  <footer class="footer">
-    <span>© 2026 Tim Cogan</span>
-    <span>MIT License</span>
-  </footer>
+  {{ partial "footer.html" . }}
 </main>
 {{ end }}
