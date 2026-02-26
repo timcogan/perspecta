@@ -105,9 +105,9 @@ where
     let mut selected_instances_by_group = Vec::with_capacity(request.groups.len());
 
     for (group_index, group_series_uids) in request.groups.iter().enumerate() {
-        if group_series_uids.len() != 1 && group_series_uids.len() != 4 {
+        if !matches!(group_series_uids.len(), 1 | 2 | 4) {
             bail!(
-                "DICOMweb group {} has {} series UIDs; each group must contain exactly 1 or 4 series UIDs",
+                "DICOMweb group {} has {} series UIDs; each group must contain exactly 1, 2, or 4 series UIDs",
                 group_index,
                 group_series_uids.len()
             );
@@ -152,9 +152,9 @@ where
             }
         }
 
-        if selected_instances.len() != 1 && selected_instances.len() != 4 {
+        if !matches!(selected_instances.len(), 1 | 2 | 4) {
             bail!(
-                "DICOMweb group {} resolved to {} instances; each group must resolve to 1 or 4 DICOM instances",
+                "DICOMweb group {} resolved to {} instances; each group must resolve to 1, 2, or 4 DICOM instances",
                 group_index,
                 selected_instances.len()
             );
@@ -564,6 +564,9 @@ fn reduce_series_instances(mut instances: Vec<MetadataInstance>) -> Result<Vec<M
     }
 
     sort_instances_for_mammo(&mut instances);
+    if instances.len() == 2 {
+        return Ok(instances);
+    }
     if instances.len() == 4 {
         return Ok(instances);
     }
@@ -575,7 +578,7 @@ fn reduce_series_instances(mut instances: Vec<MetadataInstance>) -> Result<Vec<M
     }
 
     bail!(
-        "Series has {} instances. Perspecta currently auto-opens 1 image or a mammo quartet of 4.",
+        "Series has {} instances. Perspecta currently auto-opens 1 image, 2 images (1x2), or a mammo quartet of 4.",
         instances.len()
     )
 }

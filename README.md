@@ -17,12 +17,12 @@ Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`efram
 ## Highlights
 
 - Open local DICOM files (`.dcm`) in single-image mode.
-- Open 4-image mammography layouts (`2x2`) with consistent viewport ordering.
+- Open 2-image (`1x2`) and 4-image (`2x2`) mammography layouts with consistent viewport ordering.
 - Decode DICOM `PixelData` through `dicom-pixeldata` (including encapsulated data).
 - JPEG 2000 support via `openjp2`.
 - Real-time window/level controls for grayscale workflows.
 - Multi-frame cine playback (`C` key or UI control).
-- Mouse-wheel zoom + drag pan in both single-image and `2x2` mammo views.
+- Mouse-wheel zoom + drag pan in single-image and multi-view (`1x2` / `2x2`) mammo views.
 - Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation, `Shift + drag` for window/level.
 - Metadata side panel for quick inspection.
 - Launch through a custom URL scheme (`perspecta://...`).
@@ -59,10 +59,12 @@ make run-release
 
 ```bash
 cargo run -- "example-data/image.dcm"
+cargo run -- "example-data/RCC.dcm" "example-data/LCC.dcm"
 cargo run -- "example-data/RCC.dcm" "example-data/LCC.dcm" "example-data/RMLO.dcm" "example-data/LMLO.dcm"
 ```
 
 - `1` file: opens the standard single-image view.
+- `2` files: opens the mammography `1x2` layout.
 - `4` files: opens the mammography `2x2` layout.
 
 ### 2. Custom URL Scheme (`perspecta://`)
@@ -81,14 +83,14 @@ perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042&study=<StudyInstanceUID>
 | --- | --- |
 | `path`, `file` | Add one local file path |
 | `paths`, `files` | Add multiple local file paths (comma- or pipe-separated) |
-| `group` | Add one local preload group (must contain `1` or `4` paths) |
+| `group` | Add one local preload group (must contain `1`, `2`, or `4` paths) |
 | `groups` | Add multiple local preload groups separated by `;` |
 | `open_group` | Select which preloaded group opens first (default `0`) |
 | `dicomweb` | DICOMweb base URL (or full URL containing study/series/instance path segments) |
 | `study` | StudyInstanceUID (required for DICOMweb launch) |
 | `series` | SeriesInstanceUID (optional) |
 | `instance` | SOPInstanceUID (optional) |
-| `group_series` | DICOMweb grouped preload by series UID lists (each group must contain `1` or `4`) |
+| `group_series` | DICOMweb grouped preload by series UID lists (each group must contain `1`, `2`, or `4`) |
 | `user`, `password` | Optional HTTP basic auth credentials (must be provided together) |
 | `auth` | Alternative auth format: `username:password` (percent-encoded) |
 
@@ -130,7 +132,7 @@ This writes a desktop entry under `~/.local/share/applications`.
 
 ## Mouse Controls
 
-- Hover + mouse wheel: zoom in/out (single-image and `2x2` mammo viewports)
+- Hover + mouse wheel: zoom in/out (single-image and `1x2` / `2x2` mammo viewports)
 - `Shift` + mouse wheel: previous/next frame (multi-frame images)
 - `Shift` + drag (monochrome images): adjust window/level
 - Click + drag: pan when zoomed in
