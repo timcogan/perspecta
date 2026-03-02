@@ -105,15 +105,14 @@ where
     let mut selected_instances_by_group = Vec::with_capacity(request.groups.len());
 
     for (group_index, group_series_uids) in request.groups.iter().enumerate() {
-        if !matches!(group_series_uids.len(), 1..=4) {
+        if !matches!(group_series_uids.len(), 1..=4 | 8) {
             bail!(
-                "DICOMweb group {} has {} series UIDs; each group must contain exactly 1, 2, 3, or 4 series UIDs",
+                "DICOMweb group {} has {} series UIDs; each group must contain exactly 1, 2, 3, 4, or 8 series UIDs",
                 group_index,
                 group_series_uids.len()
             );
         }
-
-        let mut selected_instances = Vec::<MetadataInstance>::new();
+        let mut reduced_by_series = Vec::<Vec<MetadataInstance>>::new();
 
         for series_uid in group_series_uids {
             let metadata_instances = fetch_instance_metadata(
@@ -144,17 +143,31 @@ where
                     group_index, series_uid
                 )
             })?;
+            reduced_by_series.push(std::mem::take(&mut reduced));
+        }
 
-            if group_series_uids.len() == 1 {
+        let mut selected_instances = Vec::<MetadataInstance>::new();
+        if reduced_by_series.len() == 1 {
+            if let Some(mut reduced) = reduced_by_series.into_iter().next() {
                 selected_instances.append(&mut reduced);
-            } else if let Some(first) = reduced.into_iter().next() {
-                selected_instances.push(first);
+            }
+        } else if reduced_by_series.len() == 2
+            && reduced_by_series.iter().all(|reduced| reduced.len() == 4)
+        {
+            for mut reduced in reduced_by_series {
+                selected_instances.append(&mut reduced);
+            }
+        } else {
+            for reduced in reduced_by_series {
+                if let Some(first) = reduced.into_iter().next() {
+                    selected_instances.push(first);
+                }
             }
         }
 
-        if !matches!(selected_instances.len(), 1..=4) {
+        if !matches!(selected_instances.len(), 1..=4 | 8) {
             bail!(
-                "DICOMweb group {} resolved to {} instances; each group must resolve to 1, 2, 3, or 4 DICOM instances",
+                "DICOMweb group {} resolved to {} instances; each group must resolve to 1, 2, 3, 4, or 8 DICOM instances",
                 group_index,
                 selected_instances.len()
             );

@@ -226,9 +226,9 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
             .collect::<Vec<_>>();
 
         for (index, group) in groups.iter().enumerate() {
-            if !matches!(group.len(), 1..=4) {
+            if !matches!(group.len(), 1..=4 | 8) {
                 return Err(format!(
-                    "Group {} has {} paths. Each group must contain exactly 1, 2, 3, or 4 DICOM paths.",
+                    "Group {} has {} paths. Each group must contain exactly 1, 2, 3, 4, or 8 DICOM paths.",
                     index,
                     group.len()
                 ));
@@ -264,9 +264,9 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
         };
 
         for (index, group) in grouped_series_uids.iter().enumerate() {
-            if !matches!(group.len(), 1..=4) {
+            if !matches!(group.len(), 1..=4 | 8) {
                 return Err(format!(
-                    "group_series group {} has {} series UIDs. Each group must contain exactly 1, 2, 3, or 4 series UIDs.",
+                    "group_series group {} has {} series UIDs. Each group must contain exactly 1, 2, 3, 4, or 8 series UIDs.",
                     index,
                     group.len()
                 ));
@@ -753,6 +753,30 @@ mod tests {
                     PathBuf::from("example-data/a.dcm"),
                     PathBuf::from("example-data/b.dcm"),
                     PathBuf::from("example-data/c.dcm"),
+                ]],
+                open_group: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_grouped_local_request_supports_eight_up() {
+        let request = parse_perspecta_uri(
+            "perspecta://open?group=example-data%2Fa.dcm|example-data%2Fb.dcm|example-data%2Fc.dcm|example-data%2Fd.dcm|example-data%2Fe.dcm|example-data%2Ff.dcm|example-data%2Fg.dcm|example-data%2Fh.dcm",
+        )
+        .expect("URI should parse");
+        assert_eq!(
+            request,
+            LaunchRequest::LocalGroups {
+                groups: vec![vec![
+                    PathBuf::from("example-data/a.dcm"),
+                    PathBuf::from("example-data/b.dcm"),
+                    PathBuf::from("example-data/c.dcm"),
+                    PathBuf::from("example-data/d.dcm"),
+                    PathBuf::from("example-data/e.dcm"),
+                    PathBuf::from("example-data/f.dcm"),
+                    PathBuf::from("example-data/g.dcm"),
+                    PathBuf::from("example-data/h.dcm"),
                 ]],
                 open_group: 0,
             }

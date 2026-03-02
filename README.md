@@ -68,6 +68,7 @@ cargo run -- "example-data/RCC.dcm" "example-data/LCC.dcm" "example-data/RMLO.dc
 - `2` files: opens the mammography `1x2` layout.
 - `3` files: opens the mammography `1x3` layout.
 - `4` files: opens the mammography `2x2` layout.
+- `8` files: opens the mammography comparison `2x4` layout (current row + prior row).
 
 ### 2. Custom URL Scheme (`perspecta://`)
 

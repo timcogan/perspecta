@@ -16,9 +16,7 @@ use crate::dicomweb::{
     DicomWebGroupStreamUpdate,
 };
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest, LaunchRequest};
-use crate::mammo::{
-    mammo_image_align, mammo_label, mammo_sort_key, order_mammo_indices, preferred_mammo_slot,
-};
+use crate::mammo::{mammo_image_align, mammo_label, order_mammo_indices, preferred_mammo_slot};
 use crate::renderer::{render_rgb, render_window_level};
 
 const APP_TITLE: &str = "Perspecta Viewer";
@@ -236,7 +234,7 @@ impl DicomViewerApp {
     }
 
     fn is_supported_multi_view_group_size(count: usize) -> bool {
-        matches!(count, 2..=4)
+        matches!(count, 2..=4 | 8)
     }
 
     fn multi_view_grid_dimensions(count: usize) -> Option<(usize, usize)> {
@@ -244,6 +242,7 @@ impl DicomViewerApp {
             2 => Some((1, 2)),
             3 => Some((1, 3)),
             4 => Some((2, 2)),
+            8 => Some((2, 4)),
             _ => None,
         }
     }
@@ -253,6 +252,7 @@ impl DicomViewerApp {
             2 => "1x2",
             3 => "1x3",
             4 => "2x2",
+            8 => "2x4",
             _ => "multi-view",
         }
     }
@@ -694,7 +694,7 @@ impl DicomViewerApp {
                     })
                     .map_err(|err| format!("{err:#}"))
             }
-            2..=4 => {
+            2..=4 | 8 => {
                 let mut viewports = Vec::with_capacity(paths.len());
                 for path in paths {
                     let image = match load_dicom(path).map_err(|err| format!("{err:#}")) {
@@ -921,9 +921,9 @@ impl DicomViewerApp {
         }
 
         for (index, group) in groups.iter().enumerate() {
-            if !matches!(group.len(), 1..=4) {
+            if !matches!(group.len(), 1..=4 | 8) {
                 self.status_line = format!(
-                    "Launch group {} has {} paths; each group must contain 1, 2, 3, or 4 DICOM files.",
+                    "Launch group {} has {} paths; each group must contain 1, 2, 3, 4, or 8 DICOM files.",
                     index,
                     group.len()
                 );
@@ -1150,7 +1150,7 @@ impl DicomViewerApp {
                 1 => {
                     self.load_selected_paths(vec![path], ctx);
                 }
-                2..=4 => {
+                count if Self::is_supported_multi_view_group_size(count) => {
                     if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
                         thread::spawn(move || {
                             let result = match load_dicom(&path) {
@@ -1253,11 +1253,16 @@ impl DicomViewerApp {
                             });
                         }
                         if Self::is_supported_multi_view_group_size(loaded.len()) {
-                            loaded.sort_by(|a, b| {
-                                mammo_sort_key(&a.image, &a.path)
-                                    .cmp(&mammo_sort_key(&b.image, &b.path))
-                            });
-                            self.push_group_history_entry(&loaded, 0, ctx);
+                            let ordered_indices =
+                                order_mammo_indices(&loaded, |viewport| &viewport.image);
+                            let mut pending = loaded.into_iter().map(Some).collect::<Vec<_>>();
+                            let mut ordered = Vec::with_capacity(pending.len());
+                            for index in ordered_indices {
+                                if let Some(viewport) = pending[index].take() {
+                                    ordered.push(viewport);
+                                }
+                            }
+                            self.push_group_history_entry(&ordered, 0, ctx);
                             self.move_current_history_to_front();
                         }
                         break;
@@ -1306,10 +1311,10 @@ impl DicomViewerApp {
                         let streamed_count = self.dicomweb_active_group_paths.len();
                         let streaming_started = streamed_count > 0
                             || !self.dicomweb_active_pending_paths.is_empty()
-                            || ((matches!(active_group_len, 1..=4))
+                            || ((matches!(active_group_len, 1..=4 | 8))
                                 && self.dicomweb_active_group_expected == Some(active_group_len));
                         let streamed_active_complete = streamed_count >= active_group_len
-                            && matches!(active_group_len, 1..=4)
+                            && matches!(active_group_len, 1..=4 | 8)
                             && self.dicomweb_active_pending_paths.is_empty();
 
                         if !streamed_active_complete && !streaming_started {
@@ -1541,10 +1546,10 @@ impl DicomViewerApp {
                     self.load_path(path, ctx);
                 }
             }
-            2..=4 => self.load_mammo_group_paths(paths, ctx),
+            2..=4 | 8 => self.load_mammo_group_paths(paths, ctx),
             other => {
                 self.status_line = format!(
-                    "Select 1 DICOM for 1x1 view, 2 DICOMs for 1x2 view, 3 DICOMs for 1x3 view, or 4 DICOMs for 2x2 view (got {}).",
+                    "Select 1 DICOM for 1x1 view, 2 DICOMs for 1x2 view, 3 DICOMs for 1x3 view, 4 DICOMs for 2x2 view, or 8 DICOMs for 2x4 view (got {}).",
                     other
                 );
             }
@@ -1609,7 +1614,7 @@ impl DicomViewerApp {
     fn load_mammo_group_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
         if !Self::is_supported_multi_view_group_size(paths.len()) {
             self.status_line = format!(
-                "Multi-view group requires exactly 2 (1x2), 3 (1x3), or 4 (2x2) DICOM files (got {}).",
+                "Multi-view group requires exactly 2 (1x2), 3 (1x3), 4 (2x2), or 8 (2x4) DICOM files (got {}).",
                 paths.len()
             );
             return;
@@ -2991,15 +2996,18 @@ fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
         return downsample_color_image(&images[0], max_dim);
     }
 
-    let columns = if images.len() >= 4 { 2 } else { images.len() };
-    let rows = images.len().div_ceil(columns);
+    let (rows, columns) = match images.len() {
+        8 => (2, 4),
+        4 => (2, 2),
+        count => (1, count),
+    };
     let cell_width = (max_dim / columns).max(1);
     let cell_height = (max_dim / rows).max(1);
     let target_width = cell_width * columns;
     let target_height = cell_height * rows;
     let mut pixels = vec![egui::Color32::BLACK; target_width * target_height];
 
-    let align_mammo = images.len() == 4;
+    let align_mammo = matches!(images.len(), 4 | 8);
 
     for (index, image) in images.iter().enumerate() {
         let source_width = image.size[0].max(1);
@@ -3247,5 +3255,8 @@ mod tests {
         assert!(DicomViewerApp::is_supported_multi_view_group_size(3));
         assert_eq!(DicomViewerApp::multi_view_grid_dimensions(3), Some((1, 3)));
         assert_eq!(DicomViewerApp::multi_view_layout_label(3), "1x3");
+        assert!(DicomViewerApp::is_supported_multi_view_group_size(8));
+        assert_eq!(DicomViewerApp::multi_view_grid_dimensions(8), Some((2, 4)));
+        assert_eq!(DicomViewerApp::multi_view_layout_label(8), "2x4");
     }
 }
