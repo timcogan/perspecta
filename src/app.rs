@@ -1321,16 +1321,12 @@ impl DicomViewerApp {
                                 && !self.history_pushed_for_active_group
                             {
                                 self.reorder_complete_mammo_group();
-                                let mut loaded = self
+                                let loaded = self
                                     .mammo_group
                                     .iter()
                                     .filter_map(Option::as_ref)
                                     .cloned()
                                     .collect::<Vec<_>>();
-                                loaded.sort_by(|a, b| {
-                                    mammo_sort_key(&a.image, &a.path)
-                                        .cmp(&mammo_sort_key(&b.image, &b.path))
-                                });
                                 self.push_group_history_entry(
                                     &loaded,
                                     self.mammo_selected_index,
@@ -1416,16 +1412,12 @@ impl DicomViewerApp {
                             || self.dicomweb_active_path_receiver.is_some())
                         && !self.history_pushed_for_active_group
                     {
-                        let mut loaded = self
+                        let loaded = self
                             .mammo_group
                             .iter()
                             .filter_map(Option::as_ref)
                             .cloned()
                             .collect::<Vec<_>>();
-                        loaded.sort_by(|a, b| {
-                            mammo_sort_key(&a.image, &a.path)
-                                .cmp(&mammo_sort_key(&b.image, &b.path))
-                        });
                         self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
                         self.move_current_history_to_front();
                         self.history_pushed_for_active_group = true;
@@ -1473,15 +1465,12 @@ impl DicomViewerApp {
         if self.mammo_group_complete() {
             self.reorder_complete_mammo_group();
             if !self.history_pushed_for_active_group {
-                let mut loaded = self
+                let loaded = self
                     .mammo_group
                     .iter()
                     .filter_map(Option::as_ref)
                     .cloned()
                     .collect::<Vec<_>>();
-                loaded.sort_by(|a, b| {
-                    mammo_sort_key(&a.image, &a.path).cmp(&mammo_sort_key(&b.image, &b.path))
-                });
                 self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
             }
             self.status_line.clear();
