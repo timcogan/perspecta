@@ -236,7 +236,7 @@ impl DicomViewerApp {
     }
 
     fn is_supported_multi_view_group_size(count: usize) -> bool {
-        matches!(count, 2 | 3 | 4)
+        matches!(count, 2..=4)
     }
 
     fn multi_view_grid_dimensions(count: usize) -> Option<(usize, usize)> {
@@ -694,7 +694,7 @@ impl DicomViewerApp {
                     })
                     .map_err(|err| format!("{err:#}"))
             }
-            2 | 3 | 4 => {
+            2..=4 => {
                 let mut viewports = Vec::with_capacity(paths.len());
                 for path in paths {
                     let image = match load_dicom(path).map_err(|err| format!("{err:#}")) {
@@ -921,7 +921,7 @@ impl DicomViewerApp {
         }
 
         for (index, group) in groups.iter().enumerate() {
-            if !matches!(group.len(), 1 | 2 | 3 | 4) {
+            if !matches!(group.len(), 1..=4) {
                 self.status_line = format!(
                     "Launch group {} has {} paths; each group must contain 1, 2, 3, or 4 DICOM files.",
                     index,
@@ -1150,7 +1150,7 @@ impl DicomViewerApp {
                 1 => {
                     self.load_selected_paths(vec![path], ctx);
                 }
-                2 | 3 | 4 => {
+                2..=4 => {
                     if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
                         thread::spawn(move || {
                             let result = match load_dicom(&path) {
@@ -1306,10 +1306,10 @@ impl DicomViewerApp {
                         let streamed_count = self.dicomweb_active_group_paths.len();
                         let streaming_started = streamed_count > 0
                             || !self.dicomweb_active_pending_paths.is_empty()
-                            || ((matches!(active_group_len, 1 | 2 | 3 | 4))
+                            || ((matches!(active_group_len, 1..=4))
                                 && self.dicomweb_active_group_expected == Some(active_group_len));
                         let streamed_active_complete = streamed_count >= active_group_len
-                            && matches!(active_group_len, 1 | 2 | 3 | 4)
+                            && matches!(active_group_len, 1..=4)
                             && self.dicomweb_active_pending_paths.is_empty();
 
                         if !streamed_active_complete && !streaming_started {
@@ -1552,7 +1552,7 @@ impl DicomViewerApp {
                     self.load_path(path, ctx);
                 }
             }
-            2 | 3 | 4 => self.load_mammo_group_paths(paths, ctx),
+            2..=4 => self.load_mammo_group_paths(paths, ctx),
             other => {
                 self.status_line = format!(
                     "Select 1 DICOM for 1x1 view, 2 DICOMs for 1x2 view, 3 DICOMs for 1x3 view, or 4 DICOMs for 2x2 view (got {}).",

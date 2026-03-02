@@ -226,7 +226,7 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
             .collect::<Vec<_>>();
 
         for (index, group) in groups.iter().enumerate() {
-            if !matches!(group.len(), 1 | 2 | 3 | 4) {
+            if !matches!(group.len(), 1..=4) {
                 return Err(format!(
                     "Group {} has {} paths. Each group must contain exactly 1, 2, 3, or 4 DICOM paths.",
                     index,
@@ -264,7 +264,7 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
         };
 
         for (index, group) in grouped_series_uids.iter().enumerate() {
-            if !matches!(group.len(), 1 | 2 | 3 | 4) {
+            if !matches!(group.len(), 1..=4) {
                 return Err(format!(
                     "group_series group {} has {} series UIDs. Each group must contain exactly 1, 2, 3, or 4 series UIDs.",
                     index,
