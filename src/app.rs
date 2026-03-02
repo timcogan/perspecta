@@ -257,6 +257,17 @@ impl DicomViewerApp {
         }
     }
 
+    fn reorder_items_by_indices<T>(items: Vec<T>, ordered_indices: Vec<usize>) -> Vec<T> {
+        let mut pending = items.into_iter().map(Some).collect::<Vec<_>>();
+        let mut ordered = Vec::with_capacity(pending.len());
+        for index in ordered_indices {
+            if let Some(item) = pending.get_mut(index).and_then(Option::take) {
+                ordered.push(item);
+            }
+        }
+        ordered
+    }
+
     fn has_mammo_group(&self) -> bool {
         !self.mammo_group.is_empty()
             || self.mammo_load_receiver.is_some()
@@ -837,11 +848,12 @@ impl DicomViewerApp {
                 let selected_index = ordered_indices
                     .iter()
                     .position(|index| *index == group.selected_index);
-                let mut viewports = group.viewports.into_iter().map(Some).collect::<Vec<_>>();
-                let mut ordered = Vec::with_capacity(viewports.len());
-                for index in ordered_indices {
-                    if let Some(viewport) = viewports[index].take() {
-                        ordered.push(Some(MammoViewport {
+                let ordered_viewports =
+                    Self::reorder_items_by_indices(group.viewports, ordered_indices);
+                self.mammo_group = ordered_viewports
+                    .into_iter()
+                    .map(|viewport| {
+                        Some(MammoViewport {
                             path: viewport.path,
                             image: viewport.image,
                             texture: viewport.texture,
@@ -852,10 +864,9 @@ impl DicomViewerApp {
                             zoom: 1.0,
                             pan: egui::Vec2::ZERO,
                             frame_scroll_accum: 0.0,
-                        }));
-                    }
-                }
-                self.mammo_group = ordered;
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 if self.loaded_mammo_count() == 0 {
                     self.status_line = "History entry had no cached group images.".to_string();
                     return;
@@ -1071,12 +1082,8 @@ impl DicomViewerApp {
         }
 
         let ordered_indices = order_mammo_indices(&viewports, |viewport| &viewport.image);
-        let mut pending = viewports.into_iter().map(Some).collect::<Vec<_>>();
-        let mut ordered = Vec::with_capacity(pending.len());
-        for index in ordered_indices {
-            ordered.push(pending[index].take());
-        }
-        self.mammo_group = ordered;
+        let ordered = Self::reorder_items_by_indices(viewports, ordered_indices);
+        self.mammo_group = ordered.into_iter().map(Some).collect::<Vec<_>>();
 
         if let Some(selected_path) = selected_path {
             if let Some(index) = self.mammo_group.iter().position(|slot| {
@@ -1255,13 +1262,7 @@ impl DicomViewerApp {
                         if Self::is_supported_multi_view_group_size(loaded.len()) {
                             let ordered_indices =
                                 order_mammo_indices(&loaded, |viewport| &viewport.image);
-                            let mut pending = loaded.into_iter().map(Some).collect::<Vec<_>>();
-                            let mut ordered = Vec::with_capacity(pending.len());
-                            for index in ordered_indices {
-                                if let Some(viewport) = pending[index].take() {
-                                    ordered.push(viewport);
-                                }
-                            }
+                            let ordered = Self::reorder_items_by_indices(loaded, ordered_indices);
                             self.push_group_history_entry(&ordered, 0, ctx);
                             self.move_current_history_to_front();
                         }
