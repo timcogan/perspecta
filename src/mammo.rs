@@ -89,10 +89,7 @@ fn compare_study_dates_desc(a: Option<&str>, b: Option<&str>) -> Ordering {
 fn order_eight_up_indices(entries: &[(u8, u8, i32)], study_dates: &[Option<String>]) -> Vec<usize> {
     let mut by_study = BTreeMap::<Option<String>, Vec<usize>>::new();
     for (index, study_date) in study_dates.iter().take(entries.len()).enumerate() {
-        by_study
-            .entry(study_date.clone())
-            .or_default()
-            .push(index);
+        by_study.entry(study_date.clone()).or_default().push(index);
     }
 
     let mut grouped = by_study.into_iter().collect::<Vec<_>>();

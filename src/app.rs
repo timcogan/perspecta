@@ -1311,10 +1311,10 @@ impl DicomViewerApp {
                         let streamed_count = self.dicomweb_active_group_paths.len();
                         let streaming_started = streamed_count > 0
                             || !self.dicomweb_active_pending_paths.is_empty()
-                            || ((matches!(active_group_len, 1..=4 | 8))
+                            || ((Self::is_supported_multi_view_group_size(active_group_len))
                                 && self.dicomweb_active_group_expected == Some(active_group_len));
                         let streamed_active_complete = streamed_count >= active_group_len
-                            && matches!(active_group_len, 1..=4 | 8)
+                            && Self::is_supported_multi_view_group_size(active_group_len)
                             && self.dicomweb_active_pending_paths.is_empty();
 
                         if !streamed_active_complete && !streaming_started {
