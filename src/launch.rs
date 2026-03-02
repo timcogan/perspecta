@@ -226,9 +226,9 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
             .collect::<Vec<_>>();
 
         for (index, group) in groups.iter().enumerate() {
-            if !matches!(group.len(), 1 | 2 | 4) {
+            if !matches!(group.len(), 1 | 2 | 3 | 4) {
                 return Err(format!(
-                    "Group {} has {} paths. Each group must contain exactly 1, 2, or 4 DICOM paths.",
+                    "Group {} has {} paths. Each group must contain exactly 1, 2, 3, or 4 DICOM paths.",
                     index,
                     group.len()
                 ));
@@ -264,9 +264,9 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
         };
 
         for (index, group) in grouped_series_uids.iter().enumerate() {
-            if !matches!(group.len(), 1 | 2 | 4) {
+            if !matches!(group.len(), 1 | 2 | 3 | 4) {
                 return Err(format!(
-                    "group_series group {} has {} series UIDs. Each group must contain exactly 1, 2, or 4 series UIDs.",
+                    "group_series group {} has {} series UIDs. Each group must contain exactly 1, 2, 3, or 4 series UIDs.",
                     index,
                     group.len()
                 ));
@@ -651,6 +651,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_dicomweb_grouped_series_request_supports_three_up() {
+        let request = parse_perspecta_uri(
+            "perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042%2Fdicom-web&study=study_uid_alpha&group_series=series_a|series_b|series_c",
+        )
+        .expect("URI should parse");
+        assert_eq!(
+            request,
+            LaunchRequest::DicomWebGroups(DicomWebGroupedLaunchRequest {
+                base_url: "http://localhost:8042/dicom-web".to_string(),
+                study_uid: "study_uid_alpha".to_string(),
+                groups: vec![vec![
+                    "series_a".to_string(),
+                    "series_b".to_string(),
+                    "series_c".to_string(),
+                ]],
+                open_group: 0,
+                username: None,
+                password: None,
+            })
+        );
+    }
+
+    #[test]
     fn parse_dicomweb_grouped_series_requires_dicomweb_url() {
         let error = parse_perspecta_uri(
             "perspecta://open?study=study_uid_alpha&group_series=series_a|series_b|series_c|series_d",
@@ -711,6 +734,25 @@ mod tests {
                 groups: vec![vec![
                     PathBuf::from("example-data/a.dcm"),
                     PathBuf::from("example-data/b.dcm"),
+                ]],
+                open_group: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_grouped_local_request_supports_three_up() {
+        let request = parse_perspecta_uri(
+            "perspecta://open?group=example-data%2Fa.dcm|example-data%2Fb.dcm|example-data%2Fc.dcm",
+        )
+        .expect("URI should parse");
+        assert_eq!(
+            request,
+            LaunchRequest::LocalGroups {
+                groups: vec![vec![
+                    PathBuf::from("example-data/a.dcm"),
+                    PathBuf::from("example-data/b.dcm"),
+                    PathBuf::from("example-data/c.dcm"),
                 ]],
                 open_group: 0,
             }

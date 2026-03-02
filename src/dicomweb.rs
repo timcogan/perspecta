@@ -105,9 +105,9 @@ where
     let mut selected_instances_by_group = Vec::with_capacity(request.groups.len());
 
     for (group_index, group_series_uids) in request.groups.iter().enumerate() {
-        if !matches!(group_series_uids.len(), 1 | 2 | 4) {
+        if !matches!(group_series_uids.len(), 1 | 2 | 3 | 4) {
             bail!(
-                "DICOMweb group {} has {} series UIDs; each group must contain exactly 1, 2, or 4 series UIDs",
+                "DICOMweb group {} has {} series UIDs; each group must contain exactly 1, 2, 3, or 4 series UIDs",
                 group_index,
                 group_series_uids.len()
             );
@@ -152,9 +152,9 @@ where
             }
         }
 
-        if !matches!(selected_instances.len(), 1 | 2 | 4) {
+        if !matches!(selected_instances.len(), 1 | 2 | 3 | 4) {
             bail!(
-                "DICOMweb group {} resolved to {} instances; each group must resolve to 1, 2, or 4 DICOM instances",
+                "DICOMweb group {} resolved to {} instances; each group must resolve to 1, 2, 3, or 4 DICOM instances",
                 group_index,
                 selected_instances.len()
             );
@@ -564,10 +564,7 @@ fn reduce_series_instances(mut instances: Vec<MetadataInstance>) -> Result<Vec<M
     }
 
     sort_instances_for_mammo(&mut instances);
-    if instances.len() == 2 {
-        return Ok(instances);
-    }
-    if instances.len() == 4 {
+    if matches!(instances.len(), 2 | 3 | 4) {
         return Ok(instances);
     }
 
@@ -575,10 +572,13 @@ fn reduce_series_instances(mut instances: Vec<MetadataInstance>) -> Result<Vec<M
         if let Some(quartet) = pick_mammo_quartet(&instances) {
             return Ok(quartet);
         }
+        if let Some(triplet) = pick_mammo_triplet(&instances) {
+            return Ok(triplet);
+        }
     }
 
     bail!(
-        "Series has {} instances. Perspecta currently auto-opens 1 image, 2 images (1x2), or a mammo quartet of 4.",
+        "Series has {} instances. Perspecta currently auto-opens 1 image, 2 images (1x2), 3 images (1x3), or a mammo quartet of 4.",
         instances.len()
     )
 }
@@ -601,6 +601,34 @@ fn pick_mammo_quartet(instances: &[MetadataInstance]) -> Option<Vec<MetadataInst
     }
 
     Some(vec![rcc?, lcc?, rmlo?, lmlo?])
+}
+
+fn pick_mammo_triplet(instances: &[MetadataInstance]) -> Option<Vec<MetadataInstance>> {
+    let mut rcc = None::<MetadataInstance>;
+    let mut lcc = None::<MetadataInstance>;
+    let mut rmlo = None::<MetadataInstance>;
+    let mut lmlo = None::<MetadataInstance>;
+
+    for instance in instances {
+        let key = mammo_sort_key(instance);
+        match key.0 {
+            0 if key.1 == 0 && rcc.is_none() => rcc = Some(instance.clone()),
+            0 if key.1 == 1 && lcc.is_none() => lcc = Some(instance.clone()),
+            1 if key.1 == 0 && rmlo.is_none() => rmlo = Some(instance.clone()),
+            1 if key.1 == 1 && lmlo.is_none() => lmlo = Some(instance.clone()),
+            _ => {}
+        }
+    }
+
+    let ordered = [rcc, lcc, rmlo, lmlo]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if ordered.len() == 3 {
+        Some(ordered)
+    } else {
+        None
+    }
 }
 
 fn sort_instances_for_mammo(instances: &mut [MetadataInstance]) {
@@ -858,6 +886,21 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn metadata_instance(
+        instance_uid: &str,
+        view_position: Option<&str>,
+        laterality: Option<&str>,
+        instance_number: Option<i32>,
+    ) -> MetadataInstance {
+        MetadataInstance {
+            series_uid: Some("series_a".to_string()),
+            instance_uid: instance_uid.to_string(),
+            view_position: view_position.map(|value| value.to_string()),
+            laterality: laterality.map(|value| value.to_string()),
+            instance_number,
+        }
+    }
+
     #[test]
     fn split_top_level_objects_works() {
         let text = r#"[{"a":1},{"b":2},{"c":{"x":3}}]"#;
@@ -938,6 +981,40 @@ mod tests {
     fn extract_dicom_from_multipart_ignores_plain_payload() {
         let body = b"plain-dicom-payload".to_vec();
         assert!(extract_dicom_from_multipart(&body).is_none());
+    }
+
+    #[test]
+    fn reduce_series_instances_supports_three_up() {
+        let reduced = reduce_series_instances(vec![
+            metadata_instance("inst_lmlo", Some("MLO"), Some("L"), Some(3)),
+            metadata_instance("inst_rcc", Some("CC"), Some("R"), Some(1)),
+            metadata_instance("inst_rmlo", Some("MLO"), Some("R"), Some(2)),
+        ])
+        .expect("three-up series should be supported");
+
+        let ordered_uids = reduced
+            .into_iter()
+            .map(|instance| instance.instance_uid)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered_uids, vec!["inst_rcc", "inst_rmlo", "inst_lmlo"]);
+    }
+
+    #[test]
+    fn reduce_series_instances_can_pick_triplet_from_larger_series() {
+        let reduced = reduce_series_instances(vec![
+            metadata_instance("inst_lmlo_1", Some("MLO"), Some("L"), Some(4)),
+            metadata_instance("inst_rcc", Some("CC"), Some("R"), Some(1)),
+            metadata_instance("inst_rmlo_1", Some("MLO"), Some("R"), Some(2)),
+            metadata_instance("inst_rmlo_2", Some("MLO"), Some("R"), Some(3)),
+            metadata_instance("inst_lmlo_2", Some("MLO"), Some("L"), Some(5)),
+        ])
+        .expect("larger series should reduce to a supported triplet");
+
+        let ordered_uids = reduced
+            .into_iter()
+            .map(|instance| instance.instance_uid)
+            .collect::<Vec<_>>();
+        assert_eq!(ordered_uids, vec!["inst_rcc", "inst_rmlo_1", "inst_lmlo_1"]);
     }
 
     #[test]

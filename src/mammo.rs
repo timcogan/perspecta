@@ -48,6 +48,21 @@ fn mammo_slot_index(image: &DicomImage) -> Option<usize> {
     }
 }
 
+fn three_up_sort_key(image: &DicomImage) -> (u8, u8, i32) {
+    let view_rank = match classify_view(image.view_position.as_deref()) {
+        Some("CC") => 0,
+        Some("MLO") => 1,
+        _ => 2,
+    };
+    let laterality_rank = match classify_laterality(image.image_laterality.as_deref()) {
+        Some("R") => 0,
+        Some("L") => 1,
+        _ => 2,
+    };
+    let instance_number = image.instance_number.unwrap_or(i32::MAX);
+    (view_rank, laterality_rank, instance_number)
+}
+
 pub fn preferred_mammo_slot(
     image: &DicomImage,
     len: usize,
@@ -67,6 +82,16 @@ pub fn order_mammo_indices<T>(
     items: &[T],
     mut image_of: impl FnMut(&T) -> &DicomImage,
 ) -> Vec<usize> {
+    if items.len() == 3 {
+        let mut keyed = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (index, three_up_sort_key(image_of(item))))
+            .collect::<Vec<_>>();
+        keyed.sort_by_key(|(index, key)| (*key, *index));
+        return keyed.into_iter().map(|(index, _)| index).collect();
+    }
+
     let mut ordered = vec![None; items.len()];
     let mut fallback = VecDeque::new();
 

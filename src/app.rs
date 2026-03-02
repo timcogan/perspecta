@@ -236,12 +236,13 @@ impl DicomViewerApp {
     }
 
     fn is_supported_multi_view_group_size(count: usize) -> bool {
-        matches!(count, 2 | 4)
+        matches!(count, 2 | 3 | 4)
     }
 
     fn multi_view_grid_dimensions(count: usize) -> Option<(usize, usize)> {
         match count {
             2 => Some((1, 2)),
+            3 => Some((1, 3)),
             4 => Some((2, 2)),
             _ => None,
         }
@@ -250,6 +251,7 @@ impl DicomViewerApp {
     fn multi_view_layout_label(count: usize) -> &'static str {
         match count {
             2 => "1x2",
+            3 => "1x3",
             4 => "2x2",
             _ => "multi-view",
         }
@@ -692,7 +694,7 @@ impl DicomViewerApp {
                     })
                     .map_err(|err| format!("{err:#}"))
             }
-            2 | 4 => {
+            2 | 3 | 4 => {
                 let mut viewports = Vec::with_capacity(paths.len());
                 for path in paths {
                     let image = match load_dicom(path).map_err(|err| format!("{err:#}")) {
@@ -919,9 +921,9 @@ impl DicomViewerApp {
         }
 
         for (index, group) in groups.iter().enumerate() {
-            if !matches!(group.len(), 1 | 2 | 4) {
+            if !matches!(group.len(), 1 | 2 | 3 | 4) {
                 self.status_line = format!(
-                    "Launch group {} has {} paths; each group must contain 1, 2, or 4 DICOM files.",
+                    "Launch group {} has {} paths; each group must contain 1, 2, 3, or 4 DICOM files.",
                     index,
                     group.len()
                 );
@@ -1044,6 +1046,55 @@ impl DicomViewerApp {
         Ok(())
     }
 
+    fn reorder_complete_mammo_group(&mut self) {
+        if !self.mammo_group_complete() {
+            return;
+        }
+
+        let selected_path = self
+            .mammo_group
+            .get(self.mammo_selected_index)
+            .and_then(Option::as_ref)
+            .map(|viewport| viewport.path.clone());
+
+        let viewports = self
+            .mammo_group
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect::<Vec<_>>();
+        if viewports.len() != self.mammo_group.len() {
+            self.mammo_group = viewports.into_iter().map(Some).collect();
+            self.mammo_selected_index = self
+                .mammo_selected_index
+                .min(self.mammo_group.len().saturating_sub(1));
+            return;
+        }
+
+        let ordered_indices = order_mammo_indices(&viewports, |viewport| &viewport.image);
+        let mut pending = viewports.into_iter().map(Some).collect::<Vec<_>>();
+        let mut ordered = Vec::with_capacity(pending.len());
+        for index in ordered_indices {
+            ordered.push(pending[index].take());
+        }
+        self.mammo_group = ordered;
+
+        if let Some(selected_path) = selected_path {
+            if let Some(index) = self.mammo_group.iter().position(|slot| {
+                slot.as_ref()
+                    .is_some_and(|viewport| viewport.path == selected_path)
+            }) {
+                self.mammo_selected_index = index;
+                return;
+            }
+        }
+
+        self.mammo_selected_index = self
+            .mammo_group
+            .iter()
+            .position(Option::is_some)
+            .unwrap_or(0);
+    }
+
     fn poll_dicomweb_active_paths(&mut self, ctx: &egui::Context) {
         let mut keep_receiver = false;
         if let Some(receiver) = self.dicomweb_active_path_receiver.take() {
@@ -1099,7 +1150,7 @@ impl DicomViewerApp {
                 1 => {
                     self.load_selected_paths(vec![path], ctx);
                 }
-                2 | 4 => {
+                2 | 3 | 4 => {
                     if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
                         thread::spawn(move || {
                             let result = match load_dicom(&path) {
@@ -1255,10 +1306,10 @@ impl DicomViewerApp {
                         let streamed_count = self.dicomweb_active_group_paths.len();
                         let streaming_started = streamed_count > 0
                             || !self.dicomweb_active_pending_paths.is_empty()
-                            || ((matches!(active_group_len, 1 | 2 | 4))
+                            || ((matches!(active_group_len, 1 | 2 | 3 | 4))
                                 && self.dicomweb_active_group_expected == Some(active_group_len));
                         let streamed_active_complete = streamed_count >= active_group_len
-                            && matches!(active_group_len, 1 | 2 | 4)
+                            && matches!(active_group_len, 1 | 2 | 3 | 4)
                             && self.dicomweb_active_pending_paths.is_empty();
 
                         if !streamed_active_complete && !streaming_started {
@@ -1269,6 +1320,7 @@ impl DicomViewerApp {
                                 && self.mammo_group_complete()
                                 && !self.history_pushed_for_active_group
                             {
+                                self.reorder_complete_mammo_group();
                                 let mut loaded = self
                                     .mammo_group
                                     .iter()
@@ -1356,6 +1408,7 @@ impl DicomViewerApp {
                         }
                         return;
                     }
+                    self.reorder_complete_mammo_group();
                     if self.mammo_group_complete()
                         && (self
                             .dicomweb_active_group_expected
@@ -1418,6 +1471,7 @@ impl DicomViewerApp {
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
         if self.mammo_group_complete() {
+            self.reorder_complete_mammo_group();
             if !self.history_pushed_for_active_group {
                 let mut loaded = self
                     .mammo_group
@@ -1498,10 +1552,10 @@ impl DicomViewerApp {
                     self.load_path(path, ctx);
                 }
             }
-            2 | 4 => self.load_mammo_group_paths(paths, ctx),
+            2 | 3 | 4 => self.load_mammo_group_paths(paths, ctx),
             other => {
                 self.status_line = format!(
-                    "Select 1 DICOM for 1x1 view, 2 DICOMs for 1x2 view, or 4 DICOMs for 2x2 view (got {}).",
+                    "Select 1 DICOM for 1x1 view, 2 DICOMs for 1x2 view, 3 DICOMs for 1x3 view, or 4 DICOMs for 2x2 view (got {}).",
                     other
                 );
             }
@@ -1566,7 +1620,7 @@ impl DicomViewerApp {
     fn load_mammo_group_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
         if !Self::is_supported_multi_view_group_size(paths.len()) {
             self.status_line = format!(
-                "Multi-view group requires exactly 2 (1x2) or 4 (2x2) DICOM files (got {}).",
+                "Multi-view group requires exactly 2 (1x2), 3 (1x3), or 4 (2x2) DICOM files (got {}).",
                 paths.len()
             );
             return;
@@ -3182,6 +3236,12 @@ mod tests {
 
         app.dicomweb_active_path_receiver = None;
         let (_tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        app.dicomweb_active_group_expected = Some(3);
+        app.dicomweb_active_path_receiver = Some(rx);
+        assert!(app.has_mammo_group());
+
+        app.dicomweb_active_path_receiver = None;
+        let (_tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
         app.dicomweb_active_group_expected = Some(4);
         app.dicomweb_active_path_receiver = Some(rx);
         assert!(app.has_mammo_group());
@@ -3191,5 +3251,12 @@ mod tests {
         app.dicomweb_active_pending_paths
             .push_back(PathBuf::from("streamed.dcm"));
         assert!(app.has_mammo_group());
+    }
+
+    #[test]
+    fn three_up_multi_view_layout_is_supported() {
+        assert!(DicomViewerApp::is_supported_multi_view_group_size(3));
+        assert_eq!(DicomViewerApp::multi_view_grid_dimensions(3), Some((1, 3)));
+        assert_eq!(DicomViewerApp::multi_view_layout_label(3), "1x3");
     }
 }
