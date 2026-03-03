@@ -745,7 +745,7 @@ impl DicomViewerApp {
                     })
                     .map_err(|err| format!("{err:#}"))
             }
-            2..=4 | 8 => {
+            count if Self::is_supported_multi_view_group_size(count) => {
                 let mut viewports = Vec::with_capacity(paths.len());
                 for path in paths {
                     let image = match load_dicom(path).map_err(|err| format!("{err:#}")) {
@@ -912,8 +912,9 @@ impl DicomViewerApp {
                     self.status_line = "History entry had no cached group images.".to_string();
                     return;
                 }
-                self.mammo_selected_index =
-                    selected_index.unwrap_or(group.selected_index).min(self.mammo_group.len().saturating_sub(1));
+                self.mammo_selected_index = selected_index
+                    .unwrap_or(group.selected_index)
+                    .min(self.mammo_group.len().saturating_sub(1));
                 self.status_line.clear();
                 ctx.request_repaint();
             }
@@ -1604,7 +1605,9 @@ impl DicomViewerApp {
                     self.load_path(path, ctx);
                 }
             }
-            2..=4 | 8 => self.load_mammo_group_paths(paths, ctx),
+            count if Self::is_supported_multi_view_group_size(count) => {
+                self.load_mammo_group_paths(paths, ctx)
+            }
             other => {
                 self.status_line = format!(
                     "Select 1 DICOM for 1x1 view, 2 DICOMs for 1x2 view, 3 DICOMs for 1x3 view, 4 DICOMs for 2x2 view, or 8 DICOMs for 2x4 view (got {}).",
@@ -3331,5 +3334,84 @@ mod tests {
         assert!(DicomViewerApp::is_supported_multi_view_group_size(8));
         assert_eq!(DicomViewerApp::multi_view_grid_dimensions(8), Some((2, 4)));
         assert_eq!(DicomViewerApp::multi_view_layout_label(8), "2x4");
+    }
+
+    #[test]
+    fn reorder_items_by_indices_rejects_invalid_inputs() {
+        let items = vec![10, 20, 30, 40];
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items.clone(), vec![0, 1, 2]),
+            None
+        );
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items.clone(), vec![0, 1, 1, 3]),
+            None
+        );
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items.clone(), vec![0, 1, 2, 4]),
+            None
+        );
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items, vec![2, 0, 3, 1]),
+            Some(vec![30, 10, 40, 20])
+        );
+    }
+
+    #[test]
+    fn reorder_items_by_indices_consistent_with_group_presence_states() {
+        let items = vec![10, 20, 30, 40];
+        let valid_indices = vec![1, 0, 3, 2];
+        let invalid_indices = vec![0, 1, 1, 3];
+        let expected = Some(vec![20, 10, 40, 30]);
+        let expected_invalid = None::<Vec<i32>>;
+
+        let mut app = DicomViewerApp::default();
+        assert!(!app.has_mammo_group());
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items.clone(), valid_indices.clone()),
+            expected
+        );
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items.clone(), invalid_indices.clone()),
+            expected_invalid
+        );
+
+        let (_tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        app.dicomweb_active_group_expected = Some(4);
+        app.dicomweb_active_path_receiver = Some(rx);
+        assert!(app.has_mammo_group());
+        assert!(DicomViewerApp::is_supported_multi_view_group_size(4));
+        assert_eq!(DicomViewerApp::multi_view_grid_dimensions(4), Some((2, 2)));
+        assert_eq!(DicomViewerApp::multi_view_layout_label(4), "2x2");
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items.clone(), valid_indices.clone()),
+            expected
+        );
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items.clone(), invalid_indices.clone()),
+            expected_invalid
+        );
+
+        app.dicomweb_active_path_receiver = None;
+        app.dicomweb_active_pending_paths
+            .push_back(PathBuf::from("pending-stream.dcm"));
+        assert!(app.has_mammo_group());
+        assert!(DicomViewerApp::is_supported_multi_view_group_size(8));
+        assert_eq!(DicomViewerApp::multi_view_grid_dimensions(8), Some((2, 4)));
+        assert_eq!(DicomViewerApp::multi_view_layout_label(8), "2x4");
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items.clone(), valid_indices.clone()),
+            expected
+        );
+        assert_eq!(
+            DicomViewerApp::reorder_items_by_indices(items, invalid_indices),
+            expected_invalid
+        );
+
+        app.dicomweb_active_pending_paths.clear();
+        let (_tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        app.dicomweb_active_group_expected = Some(5);
+        app.dicomweb_active_path_receiver = Some(rx);
+        assert!(!app.has_mammo_group());
     }
 }
