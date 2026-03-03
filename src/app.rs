@@ -25,6 +25,7 @@ const HISTORY_MAX_ENTRIES: usize = 24;
 const HISTORY_THUMB_MAX_DIM: usize = 96;
 const HISTORY_LIST_THUMB_MAX_DIM: f32 = 56.0;
 const DEFAULT_CINE_FPS: f32 = 24.0;
+const VALID_GROUP_SIZES: &[usize] = &[1, 2, 3, 4, 8];
 
 #[derive(Clone)]
 struct MammoViewport {
@@ -257,6 +258,33 @@ impl DicomViewerApp {
         }
     }
 
+    fn format_valid_group_sizes_list() -> String {
+        let Some((&last, leading)) = VALID_GROUP_SIZES.split_last() else {
+            return String::new();
+        };
+        if leading.is_empty() {
+            return last.to_string();
+        }
+        if leading.len() == 1 {
+            return format!("{} or {}", leading[0], last);
+        }
+        let prefix = leading
+            .iter()
+            .map(|size| size.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{prefix}, or {last}")
+    }
+
+    fn format_group_size_error(index: usize, len: usize) -> String {
+        format!(
+            "Launch group {} has {} paths; each group must contain {} DICOM files.",
+            index,
+            len,
+            Self::format_valid_group_sizes_list()
+        )
+    }
+
     fn reorder_indices_cover_all(items_len: usize, ordered_indices: &[usize]) -> bool {
         if ordered_indices.len() != items_len {
             return false;
@@ -271,19 +299,20 @@ impl DicomViewerApp {
         seen.iter().all(|flag| *flag)
     }
 
-    fn reorder_items_by_indices<T>(items: Vec<T>, ordered_indices: Vec<usize>) -> Option<Vec<T>> {
-        if !Self::reorder_indices_cover_all(items.len(), &ordered_indices) {
-            return None;
-        }
-
+    fn reorder_items_by_indices<T>(items: Vec<T>, ordered_indices: Vec<usize>) -> Vec<T> {
+        debug_assert!(
+            Self::reorder_indices_cover_all(items.len(), &ordered_indices),
+            "reorder_items_by_indices: ordered_indices must cover all items exactly once"
+        );
         let mut pending = items.into_iter().map(Some).collect::<Vec<_>>();
         let mut ordered = Vec::with_capacity(pending.len());
         for index in ordered_indices {
-            if let Some(item) = pending.get_mut(index).and_then(Option::take) {
-                ordered.push(item);
-            }
+            let item = pending[index]
+                .take()
+                .expect("reorder_items_by_indices: prevalidated index cannot repeat");
+            ordered.push(item);
         }
-        Some(ordered)
+        ordered
     }
 
     fn restore_ordered_items_or_log<T>(
@@ -303,8 +332,7 @@ impl DicomViewerApp {
                 .position(|index| *index == selected)
                 .unwrap_or(selected)
         });
-        let ordered_viewports = Self::reorder_items_by_indices(ordered_viewports, ordered_indices)
-            .expect("reorder_items_by_indices: prevalidated ordered_indices must succeed");
+        let ordered_viewports = Self::reorder_items_by_indices(ordered_viewports, ordered_indices);
         (ordered_viewports, selected_index, true)
     }
 
@@ -973,12 +1001,8 @@ impl DicomViewerApp {
         }
 
         for (index, group) in groups.iter().enumerate() {
-            if !matches!(group.len(), 1..=4 | 8) {
-                self.status_line = format!(
-                    "Launch group {} has {} paths; each group must contain 1, 2, 3, 4, or 8 DICOM files.",
-                    index,
-                    group.len()
-                );
+            if !VALID_GROUP_SIZES.contains(&group.len()) {
+                self.status_line = Self::format_group_size_error(index, group.len());
                 return;
             }
         }
@@ -3337,44 +3361,58 @@ mod tests {
     }
 
     #[test]
-    fn reorder_items_by_indices_rejects_invalid_inputs() {
+    fn reorder_items_by_indices_reorders_valid_permutation() {
         let items = vec![10, 20, 30, 40];
         assert_eq!(
-            DicomViewerApp::reorder_items_by_indices(items.clone(), vec![0, 1, 2]),
-            None
-        );
-        assert_eq!(
-            DicomViewerApp::reorder_items_by_indices(items.clone(), vec![0, 1, 1, 3]),
-            None
-        );
-        assert_eq!(
-            DicomViewerApp::reorder_items_by_indices(items.clone(), vec![0, 1, 2, 4]),
-            None
-        );
-        assert_eq!(
             DicomViewerApp::reorder_items_by_indices(items, vec![2, 0, 3, 1]),
-            Some(vec![30, 10, 40, 20])
+            vec![30, 10, 40, 20]
         );
     }
 
     #[test]
-    fn reorder_items_by_indices_consistent_with_group_presence_states() {
+    fn restore_ordered_items_or_log_rejects_invalid_inputs() {
+        let items = vec![10, 20, 30, 40];
+        for invalid_indices in [vec![0, 1, 2], vec![0, 1, 1, 3], vec![0, 1, 2, 4]] {
+            let (ordered, selected, reordered) = DicomViewerApp::restore_ordered_items_or_log(
+                items.clone(),
+                invalid_indices,
+                Some(2),
+                "test invalid reorder",
+            );
+            assert!(!reordered);
+            assert_eq!(ordered, items);
+            assert_eq!(selected, Some(2));
+        }
+    }
+
+    #[test]
+    fn restore_ordered_items_or_log_consistent_with_group_presence_states() {
         let items = vec![10, 20, 30, 40];
         let valid_indices = vec![1, 0, 3, 2];
         let invalid_indices = vec![0, 1, 1, 3];
-        let expected = Some(vec![20, 10, 40, 30]);
-        let expected_invalid = None::<Vec<i32>>;
+        let expected = vec![20, 10, 40, 30];
 
         let mut app = DicomViewerApp::default();
         assert!(!app.has_mammo_group());
-        assert_eq!(
-            DicomViewerApp::reorder_items_by_indices(items.clone(), valid_indices.clone()),
-            expected
+        let (ordered, selected, reordered) = DicomViewerApp::restore_ordered_items_or_log(
+            items.clone(),
+            valid_indices.clone(),
+            Some(2),
+            "test valid reorder",
         );
-        assert_eq!(
-            DicomViewerApp::reorder_items_by_indices(items.clone(), invalid_indices.clone()),
-            expected_invalid
+        assert!(reordered);
+        assert_eq!(ordered, expected);
+        assert_eq!(selected, Some(3));
+
+        let (ordered, selected, reordered) = DicomViewerApp::restore_ordered_items_or_log(
+            items.clone(),
+            invalid_indices.clone(),
+            Some(2),
+            "test invalid reorder",
         );
+        assert!(!reordered);
+        assert_eq!(ordered, items.clone());
+        assert_eq!(selected, Some(2));
 
         let (_tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
         app.dicomweb_active_group_expected = Some(4);
@@ -3383,14 +3421,24 @@ mod tests {
         assert!(DicomViewerApp::is_supported_multi_view_group_size(4));
         assert_eq!(DicomViewerApp::multi_view_grid_dimensions(4), Some((2, 2)));
         assert_eq!(DicomViewerApp::multi_view_layout_label(4), "2x2");
-        assert_eq!(
-            DicomViewerApp::reorder_items_by_indices(items.clone(), valid_indices.clone()),
-            expected
+        let (ordered, selected, reordered) = DicomViewerApp::restore_ordered_items_or_log(
+            items.clone(),
+            valid_indices.clone(),
+            Some(2),
+            "test valid reorder",
         );
-        assert_eq!(
-            DicomViewerApp::reorder_items_by_indices(items.clone(), invalid_indices.clone()),
-            expected_invalid
+        assert!(reordered);
+        assert_eq!(ordered, expected);
+        assert_eq!(selected, Some(3));
+        let (ordered, selected, reordered) = DicomViewerApp::restore_ordered_items_or_log(
+            items.clone(),
+            invalid_indices.clone(),
+            Some(2),
+            "test invalid reorder",
         );
+        assert!(!reordered);
+        assert_eq!(ordered, items.clone());
+        assert_eq!(selected, Some(2));
 
         app.dicomweb_active_path_receiver = None;
         app.dicomweb_active_pending_paths
@@ -3399,14 +3447,24 @@ mod tests {
         assert!(DicomViewerApp::is_supported_multi_view_group_size(8));
         assert_eq!(DicomViewerApp::multi_view_grid_dimensions(8), Some((2, 4)));
         assert_eq!(DicomViewerApp::multi_view_layout_label(8), "2x4");
-        assert_eq!(
-            DicomViewerApp::reorder_items_by_indices(items.clone(), valid_indices.clone()),
-            expected
+        let (ordered, selected, reordered) = DicomViewerApp::restore_ordered_items_or_log(
+            items.clone(),
+            valid_indices.clone(),
+            Some(2),
+            "test valid reorder",
         );
-        assert_eq!(
-            DicomViewerApp::reorder_items_by_indices(items, invalid_indices),
-            expected_invalid
+        assert!(reordered);
+        assert_eq!(ordered, expected);
+        assert_eq!(selected, Some(3));
+        let (ordered, selected, reordered) = DicomViewerApp::restore_ordered_items_or_log(
+            items,
+            invalid_indices,
+            Some(2),
+            "test invalid reorder",
         );
+        assert!(!reordered);
+        assert_eq!(ordered, vec![10, 20, 30, 40]);
+        assert_eq!(selected, Some(2));
 
         app.dicomweb_active_pending_paths.clear();
         let (_tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
