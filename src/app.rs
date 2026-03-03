@@ -257,7 +257,25 @@ impl DicomViewerApp {
         }
     }
 
-    fn reorder_items_by_indices<T>(items: Vec<T>, ordered_indices: Vec<usize>) -> Vec<T> {
+    fn reorder_indices_cover_all(items_len: usize, ordered_indices: &[usize]) -> bool {
+        if ordered_indices.len() != items_len {
+            return false;
+        }
+        let mut seen = vec![false; items_len];
+        for &index in ordered_indices {
+            if index >= items_len || seen[index] {
+                return false;
+            }
+            seen[index] = true;
+        }
+        seen.iter().all(|flag| *flag)
+    }
+
+    fn reorder_items_by_indices<T>(items: Vec<T>, ordered_indices: Vec<usize>) -> Option<Vec<T>> {
+        if !Self::reorder_indices_cover_all(items.len(), &ordered_indices) {
+            return None;
+        }
+
         let mut pending = items.into_iter().map(Some).collect::<Vec<_>>();
         let mut ordered = Vec::with_capacity(pending.len());
         for index in ordered_indices {
@@ -265,7 +283,7 @@ impl DicomViewerApp {
                 ordered.push(item);
             }
         }
-        ordered
+        Some(ordered)
     }
 
     fn has_mammo_group(&self) -> bool {
@@ -845,11 +863,22 @@ impl DicomViewerApp {
                 self.clear_single_viewer();
                 let ordered_indices =
                     order_mammo_indices(&group.viewports, |viewport| &viewport.image);
-                let selected_index = ordered_indices
-                    .iter()
-                    .position(|index| *index == group.selected_index);
-                let ordered_viewports =
-                    Self::reorder_items_by_indices(group.viewports, ordered_indices);
+                let mut selected_index = group.selected_index;
+                let mut ordered_viewports = group.viewports;
+                if Self::reorder_indices_cover_all(ordered_viewports.len(), &ordered_indices) {
+                    selected_index = ordered_indices
+                        .iter()
+                        .position(|index| *index == group.selected_index)
+                        .unwrap_or(group.selected_index);
+                    ordered_viewports =
+                        Self::reorder_items_by_indices(ordered_viewports, ordered_indices).expect(
+                            "reorder_items_by_indices: prevalidated ordered_indices must succeed",
+                        );
+                } else {
+                    eprintln!(
+                        "reorder_items_by_indices: invalid ordered_indices while restoring history group"
+                    );
+                }
                 self.mammo_group = ordered_viewports
                     .into_iter()
                     .map(|viewport| {
@@ -871,9 +900,8 @@ impl DicomViewerApp {
                     self.status_line = "History entry had no cached group images.".to_string();
                     return;
                 }
-                self.mammo_selected_index = selected_index
-                    .unwrap_or(group.selected_index)
-                    .min(self.mammo_group.len().saturating_sub(1));
+                self.mammo_selected_index =
+                    selected_index.min(self.mammo_group.len().saturating_sub(1));
                 self.status_line.clear();
                 ctx.request_repaint();
             }
@@ -1082,7 +1110,18 @@ impl DicomViewerApp {
         }
 
         let ordered_indices = order_mammo_indices(&viewports, |viewport| &viewport.image);
-        let ordered = Self::reorder_items_by_indices(viewports, ordered_indices);
+        if !Self::reorder_indices_cover_all(viewports.len(), &ordered_indices) {
+            eprintln!(
+                "reorder_items_by_indices: invalid ordered_indices while reordering active group"
+            );
+            self.mammo_group = viewports.into_iter().map(Some).collect::<Vec<_>>();
+            self.mammo_selected_index = self
+                .mammo_selected_index
+                .min(self.mammo_group.len().saturating_sub(1));
+            return;
+        }
+        let ordered = Self::reorder_items_by_indices(viewports, ordered_indices)
+            .expect("reorder_items_by_indices: prevalidated ordered_indices must succeed");
         self.mammo_group = ordered.into_iter().map(Some).collect::<Vec<_>>();
 
         if let Some(selected_path) = selected_path {
@@ -1262,7 +1301,16 @@ impl DicomViewerApp {
                         if Self::is_supported_multi_view_group_size(loaded.len()) {
                             let ordered_indices =
                                 order_mammo_indices(&loaded, |viewport| &viewport.image);
-                            let ordered = Self::reorder_items_by_indices(loaded, ordered_indices);
+                            let mut ordered = loaded;
+                            if Self::reorder_indices_cover_all(ordered.len(), &ordered_indices) {
+                                ordered =
+                                    Self::reorder_items_by_indices(ordered, ordered_indices)
+                                        .expect("reorder_items_by_indices: prevalidated ordered_indices must succeed");
+                            } else {
+                                eprintln!(
+                                    "reorder_items_by_indices: invalid ordered_indices while preloading history group"
+                                );
+                            }
                             self.push_group_history_entry(&ordered, 0, ctx);
                             self.move_current_history_to_front();
                         }
@@ -3248,6 +3296,21 @@ mod tests {
         app.dicomweb_active_group_expected = Some(4);
         app.dicomweb_active_pending_paths
             .push_back(PathBuf::from("streamed.dcm"));
+        assert!(app.has_mammo_group());
+
+        app.dicomweb_active_path_receiver = None;
+        app.dicomweb_active_pending_paths.clear();
+        app.dicomweb_active_group_expected = Some(8);
+        assert!(DicomViewerApp::is_supported_multi_view_group_size(8));
+        assert_eq!(DicomViewerApp::multi_view_grid_dimensions(8), Some((2, 4)));
+        assert_eq!(DicomViewerApp::multi_view_layout_label(8), "2x4");
+        let (_tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        app.dicomweb_active_path_receiver = Some(rx);
+        assert!(app.has_mammo_group());
+
+        app.dicomweb_active_path_receiver = None;
+        app.dicomweb_active_pending_paths
+            .push_back(PathBuf::from("streamed-8-up.dcm"));
         assert!(app.has_mammo_group());
     }
 
