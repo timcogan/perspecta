@@ -286,6 +286,28 @@ impl DicomViewerApp {
         Some(ordered)
     }
 
+    fn restore_ordered_items_or_log<T>(
+        ordered_viewports: Vec<T>,
+        ordered_indices: Vec<usize>,
+        selected_index: Option<usize>,
+        context: &str,
+    ) -> (Vec<T>, Option<usize>, bool) {
+        if !Self::reorder_indices_cover_all(ordered_viewports.len(), &ordered_indices) {
+            eprintln!("reorder_items_by_indices: invalid ordered_indices while {context}");
+            return (ordered_viewports, selected_index, false);
+        }
+
+        let selected_index = selected_index.map(|selected| {
+            ordered_indices
+                .iter()
+                .position(|index| *index == selected)
+                .unwrap_or(selected)
+        });
+        let ordered_viewports = Self::reorder_items_by_indices(ordered_viewports, ordered_indices)
+            .expect("reorder_items_by_indices: prevalidated ordered_indices must succeed");
+        (ordered_viewports, selected_index, true)
+    }
+
     fn has_mammo_group(&self) -> bool {
         !self.mammo_group.is_empty()
             || self.mammo_load_receiver.is_some()
@@ -863,22 +885,12 @@ impl DicomViewerApp {
                 self.clear_single_viewer();
                 let ordered_indices =
                     order_mammo_indices(&group.viewports, |viewport| &viewport.image);
-                let mut selected_index = group.selected_index;
-                let mut ordered_viewports = group.viewports;
-                if Self::reorder_indices_cover_all(ordered_viewports.len(), &ordered_indices) {
-                    selected_index = ordered_indices
-                        .iter()
-                        .position(|index| *index == group.selected_index)
-                        .unwrap_or(group.selected_index);
-                    ordered_viewports =
-                        Self::reorder_items_by_indices(ordered_viewports, ordered_indices).expect(
-                            "reorder_items_by_indices: prevalidated ordered_indices must succeed",
-                        );
-                } else {
-                    eprintln!(
-                        "reorder_items_by_indices: invalid ordered_indices while restoring history group"
-                    );
-                }
+                let (ordered_viewports, selected_index, _) = Self::restore_ordered_items_or_log(
+                    group.viewports,
+                    ordered_indices,
+                    Some(group.selected_index),
+                    "restoring history group",
+                );
                 self.mammo_group = ordered_viewports
                     .into_iter()
                     .map(|viewport| {
@@ -901,7 +913,7 @@ impl DicomViewerApp {
                     return;
                 }
                 self.mammo_selected_index =
-                    selected_index.min(self.mammo_group.len().saturating_sub(1));
+                    selected_index.unwrap_or(group.selected_index).min(self.mammo_group.len().saturating_sub(1));
                 self.status_line.clear();
                 ctx.request_repaint();
             }
@@ -1110,18 +1122,19 @@ impl DicomViewerApp {
         }
 
         let ordered_indices = order_mammo_indices(&viewports, |viewport| &viewport.image);
-        if !Self::reorder_indices_cover_all(viewports.len(), &ordered_indices) {
-            eprintln!(
-                "reorder_items_by_indices: invalid ordered_indices while reordering active group"
-            );
-            self.mammo_group = viewports.into_iter().map(Some).collect::<Vec<_>>();
+        let (ordered, _, reordered) = Self::restore_ordered_items_or_log(
+            viewports,
+            ordered_indices,
+            None,
+            "reordering active group",
+        );
+        if !reordered {
+            self.mammo_group = ordered.into_iter().map(Some).collect::<Vec<_>>();
             self.mammo_selected_index = self
                 .mammo_selected_index
                 .min(self.mammo_group.len().saturating_sub(1));
             return;
         }
-        let ordered = Self::reorder_items_by_indices(viewports, ordered_indices)
-            .expect("reorder_items_by_indices: prevalidated ordered_indices must succeed");
         self.mammo_group = ordered.into_iter().map(Some).collect::<Vec<_>>();
 
         if let Some(selected_path) = selected_path {
@@ -1301,16 +1314,12 @@ impl DicomViewerApp {
                         if Self::is_supported_multi_view_group_size(loaded.len()) {
                             let ordered_indices =
                                 order_mammo_indices(&loaded, |viewport| &viewport.image);
-                            let mut ordered = loaded;
-                            if Self::reorder_indices_cover_all(ordered.len(), &ordered_indices) {
-                                ordered =
-                                    Self::reorder_items_by_indices(ordered, ordered_indices)
-                                        .expect("reorder_items_by_indices: prevalidated ordered_indices must succeed");
-                            } else {
-                                eprintln!(
-                                    "reorder_items_by_indices: invalid ordered_indices while preloading history group"
-                                );
-                            }
+                            let (ordered, _, _) = Self::restore_ordered_items_or_log(
+                                loaded,
+                                ordered_indices,
+                                None,
+                                "preloading history group",
+                            );
                             self.push_group_history_entry(&ordered, 0, ctx);
                             self.move_current_history_to_front();
                         }
