@@ -51,16 +51,7 @@ a {
 }
 
 .nav-toggle {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
+  display: none;
 }
 
 .nav-toggle-button {
@@ -602,6 +593,19 @@ a {
     position: relative;
     flex-wrap: wrap;
     row-gap: 8px;
+  }
+
+  .nav-toggle {
+    display: block;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
   }
 
   .nav-toggle-button {
