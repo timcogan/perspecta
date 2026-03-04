@@ -234,8 +234,12 @@ impl DicomViewerApp {
             || self.pending_local_open_paths.is_some()
     }
 
+    fn is_supported_group_size(count: usize) -> bool {
+        VALID_GROUP_SIZES.contains(&count)
+    }
+
     fn is_supported_multi_view_group_size(count: usize) -> bool {
-        matches!(count, 2..=4 | 8)
+        Self::is_supported_group_size(count) && count != 1
     }
 
     fn multi_view_grid_dimensions(count: usize) -> Option<(usize, usize)> {
@@ -307,7 +311,7 @@ impl DicomViewerApp {
 
     fn format_multi_view_size_error(got: usize) -> String {
         format!(
-            "Multi-view group requires exactly {} DICOM files (got {}).",
+            "Multi-view group must be one of these DICOM file counts: {} (got {}).",
             Self::format_supported_group_sizes_with_layouts(false),
             got
         )
@@ -1038,7 +1042,7 @@ impl DicomViewerApp {
         }
 
         for (index, group) in groups.iter().enumerate() {
-            if !VALID_GROUP_SIZES.contains(&group.len()) {
+            if !Self::is_supported_group_size(group.len()) {
                 self.status_line = Self::format_group_size_error(index + 1, group.len());
                 return;
             }
