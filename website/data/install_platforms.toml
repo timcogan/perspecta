@@ -1,0 +1,26 @@
+[linux]
+source_requirements = [
+  "Linux desktop with OpenGL/Vulkan support",
+  "Rust toolchain (stable)",
+]
+shell = "bash"
+run_cmd = "cargo run"
+release_cmd = "cargo build --release"
+
+[macos]
+source_requirements = [
+  "Rust toolchain (stable)",
+  "Xcode Command Line Tools",
+]
+shell = "bash"
+run_cmd = "cargo run"
+release_cmd = "cargo build --release"
+
+[windows]
+source_requirements = [
+  "Rust toolchain (stable)",
+  "Visual Studio Build Tools (C++ workload)",
+]
+shell = "powershell"
+run_cmd = "cargo run"
+release_cmd = "cargo build --release"

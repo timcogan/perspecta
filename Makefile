@@ -3,7 +3,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 .PHONY: help build build-release run run-release check test fmt fmt-check clippy clean \
-	install-watch watch-check watch-test watch-run watch-all dev install-protocol-linux
+	install-watch watch-check watch-test watch-run watch-all dev site install-protocol-linux
 
 help:
 	@echo "Perspecta Viewer - Make targets"
@@ -25,6 +25,7 @@ help:
 	@echo "  make watch-run      Re-run cargo run on file changes"
 	@echo "  make watch-all      Re-run check + test on file changes"
 	@echo "  make dev            Start watch-run, or show install hint if missing"
+	@echo "  make site           Run website locally with Hugo"
 	@echo "  make install-protocol-linux  Register perspecta:// URL handler (Linux)"
 
 build:
@@ -80,6 +81,10 @@ dev:
 		echo "Run: make install-watch"; \
 		exit 1; \
 	fi
+
+site:
+	@command -v hugo >/dev/null 2>&1 || { echo "hugo is not installed."; echo "Install Hugo and retry."; exit 1; }
+	hugo server --source website
 
 install-protocol-linux:
 	bash scripts/register-protocol-linux.sh

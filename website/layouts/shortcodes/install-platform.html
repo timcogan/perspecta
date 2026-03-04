@@ -1,0 +1,34 @@
+{{- $platform := .Get "platform" -}}
+{{- $cfg := index site.Data.install_platforms $platform -}}
+{{- if not $cfg -}}
+Unknown install platform: `{{ $platform }}`
+{{- else -}}
+## Prebuilt Binary
+
+Download the latest prebuilt binary from
+[GitHub Releases]({{ site.Params.releases }}).
+
+## Build from Source
+
+### Requirements
+
+{{- with $cfg.source_requirements }}
+{{- range . }}
+- {{ . }}
+{{- end }}
+{{- else }}
+- No additional requirements.
+{{- end }}
+
+### Build and Run
+
+```{{ $cfg.shell }}
+{{ $cfg.run_cmd }}
+```
+
+### Release Build
+
+```{{ $cfg.shell }}
+{{ $cfg.release_cmd }}
+```
+{{- end -}}

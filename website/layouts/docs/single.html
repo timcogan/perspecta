@@ -1,0 +1,27 @@
+{{ define "main" }}
+<main class="page">
+  {{ partial "header.html" . }}
+
+  <div class="docs-shell">
+    {{ partial "docs-sidebar.html" . }}
+
+    <article class="doc docs-main">
+      <h1>{{ .Title }}</h1>
+      {{ with .Params.last_updated }}
+      <p class="doc-updated">Last updated: {{ . }}</p>
+      {{ end }}
+
+      {{ if .TableOfContents }}
+      <div class="doc-toc">
+        <p class="doc-toc-title">On this page</p>
+        {{ .TableOfContents }}
+      </div>
+      {{ end }}
+
+      {{ .Content }}
+    </article>
+  </div>
+
+  {{ partial "footer.html" . }}
+</main>
+{{ end }}
