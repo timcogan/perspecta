@@ -258,22 +258,59 @@ impl DicomViewerApp {
         }
     }
 
+    fn join_with_or(parts: &[String]) -> String {
+        match parts.len() {
+            0 => String::new(),
+            1 => parts[0].clone(),
+            2 => format!("{} or {}", parts[0], parts[1]),
+            _ => {
+                let (last, leading) = parts
+                    .split_last()
+                    .expect("join_with_or: expected at least 1 part");
+                format!("{}, or {}", leading.join(", "), last)
+            }
+        }
+    }
+
     fn format_valid_group_sizes_list() -> String {
-        let Some((&last, leading)) = VALID_GROUP_SIZES.split_last() else {
-            return String::new();
-        };
-        if leading.is_empty() {
-            return last.to_string();
-        }
-        if leading.len() == 1 {
-            return format!("{} or {}", leading[0], last);
-        }
-        let prefix = leading
+        let parts = VALID_GROUP_SIZES
             .iter()
             .map(|size| size.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("{prefix}, or {last}")
+            .collect::<Vec<_>>();
+        Self::join_with_or(&parts)
+    }
+
+    fn group_layout_label(size: usize) -> &'static str {
+        match size {
+            1 => "1x1",
+            _ => Self::multi_view_layout_label(size),
+        }
+    }
+
+    fn format_supported_group_sizes_with_layouts(include_single: bool) -> String {
+        let parts = VALID_GROUP_SIZES
+            .iter()
+            .copied()
+            .filter(|size| include_single || *size != 1)
+            .map(|size| format!("{size} ({})", Self::group_layout_label(size)))
+            .collect::<Vec<_>>();
+        Self::join_with_or(&parts)
+    }
+
+    fn format_select_paths_count_error(got: usize) -> String {
+        format!(
+            "Select one of the supported view sizes: {} DICOM files (got {}).",
+            Self::format_supported_group_sizes_with_layouts(true),
+            got
+        )
+    }
+
+    fn format_multi_view_size_error(got: usize) -> String {
+        format!(
+            "Multi-view group requires exactly {} DICOM files (got {}).",
+            Self::format_supported_group_sizes_with_layouts(false),
+            got
+        )
     }
 
     fn format_group_size_error(index: usize, len: usize) -> String {
@@ -1002,7 +1039,7 @@ impl DicomViewerApp {
 
         for (index, group) in groups.iter().enumerate() {
             if !VALID_GROUP_SIZES.contains(&group.len()) {
-                self.status_line = Self::format_group_size_error(index, group.len());
+                self.status_line = Self::format_group_size_error(index + 1, group.len());
                 return;
             }
         }
@@ -1229,12 +1266,13 @@ impl DicomViewerApp {
 
         let expected = self.dicomweb_active_group_expected.unwrap_or(0);
         if let Some(path) = self.dicomweb_active_pending_paths.pop_front() {
-            self.dicomweb_active_group_paths.push(path.clone());
             match expected {
                 1 => {
+                    self.dicomweb_active_group_paths.push(path.clone());
                     self.load_selected_paths(vec![path], ctx);
                 }
                 count if Self::is_supported_multi_view_group_size(count) => {
+                    self.dicomweb_active_group_paths.push(path.clone());
                     if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
                         thread::spawn(move || {
                             let result = match load_dicom(&path) {
@@ -1392,12 +1430,16 @@ impl DicomViewerApp {
                         let active_group_len =
                             groups.get(open_group).map(|group| group.len()).unwrap_or(0);
                         let streamed_count = self.dicomweb_active_group_paths.len();
-                        let streaming_started = streamed_count > 0
-                            || !self.dicomweb_active_pending_paths.is_empty()
-                            || ((Self::is_supported_multi_view_group_size(active_group_len))
-                                && self.dicomweb_active_group_expected == Some(active_group_len));
+                        let streaming_approved =
+                            self.dicomweb_active_group_expected.is_some_and(|expected| {
+                                expected == active_group_len
+                                    && (expected == 1
+                                        || Self::is_supported_multi_view_group_size(expected))
+                            });
+                        let streaming_started = streamed_count > 0 || streaming_approved;
                         let streamed_active_complete = streamed_count >= active_group_len
-                            && Self::is_supported_multi_view_group_size(active_group_len)
+                            && (active_group_len == 1
+                                || Self::is_supported_multi_view_group_size(active_group_len))
                             && self.dicomweb_active_pending_paths.is_empty();
 
                         if !streamed_active_complete && !streaming_started {
@@ -1633,10 +1675,7 @@ impl DicomViewerApp {
                 self.load_mammo_group_paths(paths, ctx)
             }
             other => {
-                self.status_line = format!(
-                    "Select 1 DICOM for 1x1 view, 2 DICOMs for 1x2 view, 3 DICOMs for 1x3 view, 4 DICOMs for 2x2 view, or 8 DICOMs for 2x4 view (got {}).",
-                    other
-                );
+                self.status_line = Self::format_select_paths_count_error(other);
             }
         }
     }
@@ -1698,10 +1737,7 @@ impl DicomViewerApp {
 
     fn load_mammo_group_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
         if !Self::is_supported_multi_view_group_size(paths.len()) {
-            self.status_line = format!(
-                "Multi-view group requires exactly 2 (1x2), 3 (1x3), 4 (2x2), or 8 (2x4) DICOM files (got {}).",
-                paths.len()
-            );
+            self.status_line = Self::format_multi_view_size_error(paths.len());
             return;
         }
 
