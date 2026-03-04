@@ -83,13 +83,8 @@ dev:
 	fi
 
 site:
-	@if command -v hugo >/dev/null 2>&1; then \
-		hugo server --source website; \
-	else \
-		echo "hugo is not installed."; \
-		echo "Install Hugo and retry."; \
-		exit 1; \
-	fi
+	@command -v hugo >/dev/null 2>&1 || { echo "hugo is not installed."; echo "Install Hugo and retry."; exit 1; }
+	hugo server --source website
 
 install-protocol-linux:
 	bash scripts/register-protocol-linux.sh

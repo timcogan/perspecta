@@ -51,7 +51,15 @@ a {
 }
 
 .nav-toggle {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .nav-toggle-button {
@@ -66,6 +74,11 @@ a {
   gap: 4px;
   cursor: pointer;
   background: rgba(255, 255, 255, 0.02);
+}
+
+.nav-toggle:focus-visible + .nav-toggle-button {
+  outline: 2px solid #9fc0ff;
+  outline-offset: 2px;
 }
 
 .nav-toggle-button span {

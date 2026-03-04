@@ -31,7 +31,6 @@ perspecta://open?path=example-data%2FRCC.dcm&path=example-data%2FLCC.dcm&path=ex
 perspecta://open?group=example-data%2FRCC.dcm|example-data%2FLCC.dcm|example-data%2FRMLO.dcm|example-data%2FLMLO.dcm&group=example-data%2Freport.dcm&open_group=0
 perspecta://open?group=example-data%2Fcurrent-RCC.dcm|example-data%2Fcurrent-LCC.dcm|example-data%2Fcurrent-RMLO.dcm|example-data%2Fcurrent-LMLO.dcm|example-data%2Fprior-RCC.dcm|example-data%2Fprior-LCC.dcm|example-data%2Fprior-RMLO.dcm|example-data%2Fprior-LMLO.dcm
 perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042%2Fdicom-web&study=<StudyInstanceUID>&series=<SeriesInstanceUID>
-perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042&study=<StudyInstanceUID>&user=<username>&password=<password>
 ```
 
 ## Launch Parameter Reference
@@ -48,11 +47,12 @@ perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042&study=<StudyInstanceUID>
 | `series` | SeriesInstanceUID (optional) |
 | `instance` | SOPInstanceUID (optional) |
 | `group_series` | DICOMweb grouped preload by series UID lists (each group must contain `1`, `2`, `3`, `4`, or `8`) |
-| `user`, `password` | Optional HTTP basic auth credentials (must be provided together) |
-| `auth` | Alternative auth format: `username:password` (percent-encoded) |
+| `user`, `password` | Optional HTTP basic auth credentials for local/testing only (must be provided together); avoid in shared or production launch URLs |
+| `auth` | Alternative local/testing-only auth format: `username:password` (percent-encoded); avoid in shared or production launch URLs |
 
 ## Notes
 
 - URL values should be percent-encoded.
+- Do not embed credentials or tokens in URLs outside local testing; URLs are commonly logged and persisted.
 - If `dicomweb` is provided as a server root (for example `http://localhost:8042`), Perspecta normalizes it to `/dicom-web`.
 - You cannot mix local grouped launch (`group=...`) with DICOMweb launch in the same URI.
