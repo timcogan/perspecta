@@ -1,0 +1,38 @@
+{{ define "main" }}
+<main class="page">
+  {{ partial "header.html" . }}
+
+  <div class="docs-shell">
+    {{ partial "docs-sidebar.html" . }}
+
+    <article class="doc docs-main">
+      <h1>{{ .Title }}</h1>
+      {{ with .Params.description }}
+      <p>{{ . }}</p>
+      {{ end }}
+      {{ .Content }}
+
+      {{ if eq .Params.children_style "inline-buttons" }}
+      <div class="doc-chip-row" role="list">
+        {{ range .Pages.ByWeight }}
+        <a class="button doc-chip" role="listitem" href="{{ .RelPermalink }}">{{ .Title }}</a>
+        {{ end }}
+      </div>
+      {{ else }}
+      <div class="doc-list" role="list">
+        {{ range .Pages.ByWeight }}
+        <a class="doc-card" role="listitem" href="{{ .RelPermalink }}">
+          <h2>{{ .Title }}</h2>
+          {{ with .Params.description }}
+          <p>{{ . }}</p>
+          {{ end }}
+        </a>
+        {{ end }}
+      </div>
+      {{ end }}
+    </article>
+  </div>
+
+  {{ partial "footer.html" . }}
+</main>
+{{ end }}

@@ -1,9 +1,35 @@
+{{ $current := .RelPermalink }}
+{{ $isDocsPage := eq .Section "docs" }}
+{{ $docs := .Site.GetPage "section" "docs" }}
 <header class="nav">
   <a class="brand" href="{{ "/" | relURL }}" aria-label="Perspecta home">
     <img src="{{ "/brand/perspecta-wordmark.svg" | relURL }}" alt="Perspecta">
   </a>
+  <input class="nav-toggle" type="checkbox" id="nav-toggle" aria-label="Toggle navigation">
+  <label class="nav-toggle-button" for="nav-toggle" aria-label="Toggle navigation menu">
+    <span></span>
+    <span></span>
+    <span></span>
+  </label>
   <nav class="links" aria-label="Primary">
+    <a href="{{ .Site.Params.docs | relURL }}">Docs</a>
     <a href="{{ .Site.Params.releases }}">Releases</a>
     <a href="{{ .Site.Params.github }}">GitHub</a>
+    {{ if and $isDocsPage $docs }}
+    <div class="mobile-docs-links">
+      <a class="docs-nav-link{{ if eq $current $docs.RelPermalink }} is-active{{ end }}" href="{{ $docs.RelPermalink }}">Overview</a>
+      {{ range $docs.Pages.ByWeight }}
+      {{ $parentActive := or (eq $current .RelPermalink) (and .IsSection (hasPrefix $current .RelPermalink)) }}
+      <a class="docs-nav-link{{ if $parentActive }} is-active{{ end }}" href="{{ .RelPermalink }}">{{ .Title }}</a>
+      {{ if .IsSection }}
+      <div class="docs-nav-sub">
+        {{ range .Pages.ByWeight }}
+        <a class="docs-nav-sublink{{ if eq $current .RelPermalink }} is-active{{ end }}" href="{{ .RelPermalink }}">{{ .Title }}</a>
+        {{ end }}
+      </div>
+      {{ end }}
+      {{ end }}
+    </div>
+    {{ end }}
   </nav>
 </header>
