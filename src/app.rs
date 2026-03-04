@@ -1434,13 +1434,7 @@ impl DicomViewerApp {
                         let active_group_len =
                             groups.get(open_group).map(|group| group.len()).unwrap_or(0);
                         let streamed_count = self.dicomweb_active_group_paths.len();
-                        let streaming_approved =
-                            self.dicomweb_active_group_expected.is_some_and(|expected| {
-                                expected == active_group_len
-                                    && (expected == 1
-                                        || Self::is_supported_multi_view_group_size(expected))
-                            });
-                        let streaming_started = streamed_count > 0 || streaming_approved;
+                        let streaming_started = streamed_count > 0;
                         let streamed_active_complete = streamed_count >= active_group_len
                             && (active_group_len == 1
                                 || Self::is_supported_multi_view_group_size(active_group_len))
@@ -3121,11 +3115,8 @@ fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
         return downsample_color_image(&images[0], max_dim);
     }
 
-    let (rows, columns) = match images.len() {
-        8 => (2, 4),
-        4 => (2, 2),
-        count => (1, count),
-    };
+    let (rows, columns) =
+        DicomViewerApp::multi_view_grid_dimensions(images.len()).unwrap_or((1, images.len()));
     let cell_width = (max_dim / columns).max(1);
     let cell_height = (max_dim / rows).max(1);
     let target_width = cell_width * columns;
