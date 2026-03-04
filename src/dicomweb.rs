@@ -105,15 +105,14 @@ where
     let mut selected_instances_by_group = Vec::with_capacity(request.groups.len());
 
     for (group_index, group_series_uids) in request.groups.iter().enumerate() {
-        if !matches!(group_series_uids.len(), 1..=4) {
+        if !matches!(group_series_uids.len(), 1..=4 | 8) {
             bail!(
-                "DICOMweb group {} has {} series UIDs; each group must contain exactly 1, 2, 3, or 4 series UIDs",
+                "DICOMweb group {} has {} series UIDs; each group must contain exactly 1, 2, 3, 4, or 8 series UIDs",
                 group_index,
                 group_series_uids.len()
             );
         }
-
-        let mut selected_instances = Vec::<MetadataInstance>::new();
+        let mut reduced_by_series = Vec::<Vec<MetadataInstance>>::new();
 
         for series_uid in group_series_uids {
             let metadata_instances = fetch_instance_metadata(
@@ -144,17 +143,14 @@ where
                     group_index, series_uid
                 )
             })?;
-
-            if group_series_uids.len() == 1 {
-                selected_instances.append(&mut reduced);
-            } else if let Some(first) = reduced.into_iter().next() {
-                selected_instances.push(first);
-            }
+            reduced_by_series.push(std::mem::take(&mut reduced));
         }
 
-        if !matches!(selected_instances.len(), 1..=4) {
+        let selected_instances = select_group_instances_from_reduced_sets(reduced_by_series);
+
+        if !matches!(selected_instances.len(), 1..=4 | 8) {
             bail!(
-                "DICOMweb group {} resolved to {} instances; each group must resolve to 1, 2, 3, or 4 DICOM instances",
+                "DICOMweb group {} resolved to {} instances; each group must resolve to 1, 2, 3, 4, or 8 DICOM instances",
                 group_index,
                 selected_instances.len()
             );
@@ -213,6 +209,30 @@ where
         groups: downloaded_groups,
         open_group,
     })
+}
+
+fn select_group_instances_from_reduced_sets(
+    reduced_by_series: Vec<Vec<MetadataInstance>>,
+) -> Vec<MetadataInstance> {
+    let mut selected_instances = Vec::<MetadataInstance>::new();
+    if reduced_by_series.len() == 1 {
+        if let Some(mut reduced) = reduced_by_series.into_iter().next() {
+            selected_instances.append(&mut reduced);
+        }
+    } else if reduced_by_series.len() == 2
+        && reduced_by_series.iter().all(|reduced| reduced.len() == 4)
+    {
+        for mut reduced in reduced_by_series {
+            selected_instances.append(&mut reduced);
+        }
+    } else {
+        for reduced in reduced_by_series {
+            if let Some(first) = reduced.into_iter().next() {
+                selected_instances.push(first);
+            }
+        }
+    }
+    selected_instances
 }
 
 fn download_instances_streaming<F>(
@@ -1015,6 +1035,81 @@ mod tests {
             .map(|instance| instance.instance_uid)
             .collect::<Vec<_>>();
         assert_eq!(ordered_uids, vec!["inst_rcc", "inst_rmlo_1", "inst_lmlo_1"]);
+    }
+
+    #[test]
+    fn select_group_instances_single_reduced_set_keeps_all_in_order() {
+        let selected = select_group_instances_from_reduced_sets(vec![vec![
+            metadata_instance("inst_1", Some("CC"), Some("R"), Some(1)),
+            metadata_instance("inst_2", Some("CC"), Some("L"), Some(2)),
+            metadata_instance("inst_3", Some("MLO"), Some("R"), Some(3)),
+        ]]);
+        let uids = selected
+            .into_iter()
+            .map(|instance| instance.instance_uid)
+            .collect::<Vec<_>>();
+        assert_eq!(uids, vec!["inst_1", "inst_2", "inst_3"]);
+
+        let empty_selected = select_group_instances_from_reduced_sets(vec![vec![]]);
+        assert!(empty_selected.is_empty());
+    }
+
+    #[test]
+    fn select_group_instances_two_four_image_series_returns_all_eight() {
+        let selected = select_group_instances_from_reduced_sets(vec![
+            vec![
+                metadata_instance("curr_rcc", Some("CC"), Some("R"), Some(1)),
+                metadata_instance("curr_lcc", Some("CC"), Some("L"), Some(2)),
+                metadata_instance("curr_rmlo", Some("MLO"), Some("R"), Some(3)),
+                metadata_instance("curr_lmlo", Some("MLO"), Some("L"), Some(4)),
+            ],
+            vec![
+                metadata_instance("prior_rcc", Some("CC"), Some("R"), Some(1)),
+                metadata_instance("prior_lcc", Some("CC"), Some("L"), Some(2)),
+                metadata_instance("prior_rmlo", Some("MLO"), Some("R"), Some(3)),
+                metadata_instance("prior_lmlo", Some("MLO"), Some("L"), Some(4)),
+            ],
+        ]);
+        let uids = selected
+            .into_iter()
+            .map(|instance| instance.instance_uid)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            uids,
+            vec![
+                "curr_rcc",
+                "curr_lcc",
+                "curr_rmlo",
+                "curr_lmlo",
+                "prior_rcc",
+                "prior_lcc",
+                "prior_rmlo",
+                "prior_lmlo",
+            ]
+        );
+    }
+
+    #[test]
+    fn select_group_instances_fallback_picks_first_from_each_series() {
+        let selected = select_group_instances_from_reduced_sets(vec![
+            vec![],
+            vec![
+                metadata_instance("series_b_first", Some("CC"), Some("R"), Some(1)),
+                metadata_instance("series_b_second", Some("MLO"), Some("R"), Some(2)),
+            ],
+            vec![metadata_instance(
+                "series_c_first",
+                Some("CC"),
+                Some("L"),
+                Some(1),
+            )],
+            vec![],
+        ]);
+        let uids = selected
+            .into_iter()
+            .map(|instance| instance.instance_uid)
+            .collect::<Vec<_>>();
+        assert_eq!(uids, vec!["series_b_first", "series_c_first"]);
     }
 
     #[test]

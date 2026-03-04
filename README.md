@@ -17,13 +17,13 @@ Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`efram
 ## Highlights
 
 - Open local DICOM files (`.dcm`) in single-image mode.
-- Open 2-image (`1x2`), 3-image (`1x3`), and 4-image (`2x2`) mammography layouts with consistent viewport ordering.
+- Open grouped mammography layouts from 2 up to 8 images (`1x2`, `1x3`, `2x2`, `2x4`) with consistent viewport ordering.
 - Decode DICOM `PixelData` through `dicom-pixeldata` (including encapsulated data).
 - JPEG 2000 support via `openjp2`.
 - Real-time window/level controls for grayscale workflows.
 - Multi-frame cine playback (`C` key or UI control).
-- Mouse-wheel zoom + drag pan in single-image and multi-view (`1x2` / `1x3` / `2x2`) mammo views.
-- Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation, `Shift + drag` for window/level.
+- Mouse-wheel zoom + drag pan in single-image and multi-view (`1x2` / `1x3` / `2x2` / `2x4`) mammo views.
+- Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation and `Shift + drag` for window/level in multi-view layouts.
 - Metadata side panel for quick inspection.
 - Launch through a custom URL scheme (`perspecta://...`).
 - Launch directly from DICOMweb (study/series/instance aware).
@@ -62,12 +62,14 @@ cargo run -- "example-data/image.dcm"
 cargo run -- "example-data/RCC.dcm" "example-data/LCC.dcm"
 cargo run -- "example-data/RCC.dcm" "example-data/RMLO.dcm" "example-data/LMLO.dcm"
 cargo run -- "example-data/RCC.dcm" "example-data/LCC.dcm" "example-data/RMLO.dcm" "example-data/LMLO.dcm"
+cargo run -- "example-data/current-RCC.dcm" "example-data/current-LCC.dcm" "example-data/current-RMLO.dcm" "example-data/current-LMLO.dcm" "example-data/prior-RCC.dcm" "example-data/prior-LCC.dcm" "example-data/prior-RMLO.dcm" "example-data/prior-LMLO.dcm"
 ```
 
 - `1` file: opens the standard single-image view.
 - `2` files: opens the mammography `1x2` layout.
 - `3` files: opens the mammography `1x3` layout.
 - `4` files: opens the mammography `2x2` layout.
+- `8` files: opens the mammography comparison `2x4` layout (current row + prior row).
 
 ### 2. Custom URL Scheme (`perspecta://`)
 
@@ -75,6 +77,7 @@ cargo run -- "example-data/RCC.dcm" "example-data/LCC.dcm" "example-data/RMLO.dc
 perspecta://open?path=example-data%2Fimage.dcm
 perspecta://open?path=example-data%2FRCC.dcm&path=example-data%2FLCC.dcm&path=example-data%2FRMLO.dcm&path=example-data%2FLMLO.dcm
 perspecta://open?group=example-data%2FRCC.dcm|example-data%2FLCC.dcm|example-data%2FRMLO.dcm|example-data%2FLMLO.dcm&group=example-data%2Freport.dcm&open_group=0
+perspecta://open?group=example-data%2Fcurrent-RCC.dcm|example-data%2Fcurrent-LCC.dcm|example-data%2Fcurrent-RMLO.dcm|example-data%2Fcurrent-LMLO.dcm|example-data%2Fprior-RCC.dcm|example-data%2Fprior-LCC.dcm|example-data%2Fprior-RMLO.dcm|example-data%2Fprior-LMLO.dcm
 perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042%2Fdicom-web&study=<StudyInstanceUID>&series=<SeriesInstanceUID>
 perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042&study=<StudyInstanceUID>&user=<username>&password=<password>
 ```
@@ -85,14 +88,14 @@ perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042&study=<StudyInstanceUID>
 | --- | --- |
 | `path`, `file` | Add one local file path |
 | `paths`, `files` | Add multiple local file paths (comma- or pipe-separated) |
-| `group` | Add one local preload group (must contain `1`, `2`, `3`, or `4` paths) |
+| `group` | Add one local preload group (must contain `1`, `2`, `3`, `4`, or `8` paths) |
 | `groups` | Add multiple local preload groups separated by `;` |
 | `open_group` | Select which preloaded group opens first (default `0`) |
 | `dicomweb` | DICOMweb base URL (or full URL containing study/series/instance path segments) |
 | `study` | StudyInstanceUID (required for DICOMweb launch) |
 | `series` | SeriesInstanceUID (optional) |
 | `instance` | SOPInstanceUID (optional) |
-| `group_series` | DICOMweb grouped preload by series UID lists (each group must contain `1`, `2`, `3`, or `4`) |
+| `group_series` | DICOMweb grouped preload by series UID lists (each group must contain `1`, `2`, `3`, `4`, or `8`) |
 | `user`, `password` | Optional HTTP basic auth credentials (must be provided together) |
 | `auth` | Alternative auth format: `username:password` (percent-encoded) |
 
@@ -100,6 +103,7 @@ Notes:
 
 - URL values should be percent-encoded.
 - If `dicomweb` is provided as a server root (for example `http://localhost:8042`), Perspecta normalizes it to `/dicom-web`.
+- Grouped mammography launch supports up to `8` images (`2x4` comparison layout).
 - You cannot mix local grouped launch (`group=...`) with DICOMweb launch in the same URI.
 
 ## Web Integration Example
@@ -134,7 +138,7 @@ This writes a desktop entry under `~/.local/share/applications`.
 
 ## Mouse Controls
 
-- Hover + mouse wheel: zoom in/out (single-image and `1x2` / `1x3` / `2x2` mammo viewports)
+- Hover + mouse wheel: zoom in/out (single-image and `1x2` / `1x3` / `2x2` / `2x4` mammo viewports)
 - `Shift` + mouse wheel: previous/next frame (multi-frame images)
 - `Shift` + drag (monochrome images): adjust window/level
 - Click + drag: pan when zoomed in
