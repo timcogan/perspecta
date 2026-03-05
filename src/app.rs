@@ -278,9 +278,10 @@ impl DicomViewerApp {
                         }
                     }
                 }
-                Ok(DicomPathKind::Image) | Ok(DicomPathKind::Other) | Err(_) => {
+                Ok(DicomPathKind::Image) | Err(_) => {
                     prepared.image_paths.push(path);
                 }
+                Ok(DicomPathKind::Other) => {}
             }
         }
 
@@ -995,6 +996,10 @@ impl DicomViewerApp {
                         cached_viewport.window_width = active_viewport.window_width;
                         cached_viewport.current_frame = active_viewport.current_frame;
                     }
+                    Self::attach_matching_gsps_overlay(
+                        &mut cached_viewport.image,
+                        &self.pending_gsps_overlays,
+                    );
                 }
             }
         }
@@ -1393,6 +1398,7 @@ impl DicomViewerApp {
                                         &self.pending_gsps_overlays,
                                     );
                                 }
+                                self.sync_current_state_to_history();
                             }
                             Err(err) => {
                                 eprintln!(
