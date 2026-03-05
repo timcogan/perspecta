@@ -12,17 +12,17 @@
   </picture>
 </p>
 <p align="center">
-  <a href="https://github.com/timcogan/perspecta/releases">
-    <img alt="Release" src="https://img.shields.io/github/v/release/timcogan/perspecta?display_name=tag&style=for-the-badge" />
+  <a href="https://github.com/timcogan/perspecta/actions/workflows/ci.yml">
+    <img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/timcogan/perspecta/ci.yml?label=tests&style=for-the-badge" />
   </a>
   <a href="https://www.rust-lang.org/">
-    <img alt="MSRV 1.73" src="https://img.shields.io/badge/MSRV-1.73-orange?logo=rust&logoColor=white&style=for-the-badge" />
+    <img alt="MSRV 1.73" src="https://img.shields.io/badge/MSRV-1.73-f39c12?logo=rust&logoColor=white&style=for-the-badge" />
   </a>
   <a href="LICENSE">
-    <img alt="License" src="https://img.shields.io/github/license/timcogan/perspecta?style=for-the-badge" />
+    <img alt="License" src="https://img.shields.io/github/license/timcogan/perspecta?color=0ea5e9&style=for-the-badge" />
   </a>
-  <a href="https://github.com/timcogan/perspecta/actions/workflows/ci.yml">
-    <img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/timcogan/perspecta/ci.yml?branch=master&label=tests&style=for-the-badge" />
+  <a href="https://github.com/timcogan/perspecta/releases">
+    <img alt="Release" src="https://img.shields.io/github/v/release/timcogan/perspecta?display_name=tag&color=0ea5e9&style=for-the-badge" />
   </a>
   <a href="https://perspecta.cogan.dev/">
     <img alt="Website" src="https://img.shields.io/badge/Website-perspecta.cogan.dev-0ea5e9?style=for-the-badge" />
