@@ -50,7 +50,7 @@ struct PendingLoad {
     image: DicomImage,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct PreparedLoadPaths {
     image_paths: Vec<PathBuf>,
     gsps_overlays: HashMap<String, GspsOverlay>,
@@ -882,10 +882,9 @@ impl DicomViewerApp {
     }
 
     fn preload_group_into_history(
-        paths: &[PathBuf],
+        prepared: PreparedLoadPaths,
         tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
     ) {
-        let prepared = Self::prepare_load_paths(paths.to_vec());
         let load_paths = prepared.image_paths;
         let gsps_overlays = prepared.gsps_overlays;
 
@@ -926,7 +925,7 @@ impl DicomViewerApp {
 
     fn preload_non_active_groups_into_history(
         &mut self,
-        groups: &[Vec<PathBuf>],
+        groups: &[PreparedLoadPaths],
         open_group: usize,
     ) {
         let preload_jobs = groups
@@ -944,7 +943,7 @@ impl DicomViewerApp {
         let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
         thread::spawn(move || {
             for group in preload_jobs {
-                Self::preload_group_into_history(&group, &tx);
+                Self::preload_group_into_history(group, &tx);
             }
         });
         self.history_preload_receiver = Some(rx);
@@ -1142,7 +1141,7 @@ impl DicomViewerApp {
                 self.status_line = Self::format_group_size_error(index + 1, image_count);
                 return;
             }
-            preload_groups.push(prepared.image_paths);
+            preload_groups.push(prepared);
         }
 
         let active_group = open_group.min(groups.len().saturating_sub(1));
@@ -1563,7 +1562,14 @@ impl DicomViewerApp {
                         if !streamed_active_complete && !streaming_started {
                             self.load_local_groups(groups, open_group, ctx);
                         } else {
-                            self.preload_non_active_groups_into_history(&groups, open_group);
+                            let prepared_groups = groups
+                                .iter()
+                                .map(|group| Self::prepare_load_paths(group.clone()))
+                                .collect::<Vec<_>>();
+                            self.preload_non_active_groups_into_history(
+                                &prepared_groups,
+                                open_group,
+                            );
                             if Self::is_supported_multi_view_group_size(active_group_len)
                                 && self.mammo_group_complete()
                                 && !self.history_pushed_for_active_group
