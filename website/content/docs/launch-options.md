@@ -2,7 +2,7 @@
 title = "Launch Options"
 description = "Open studies via files, groups, and custom URLs."
 weight = 20
-last_updated = "2026-03-04"
+last_updated = "2026-03-05"
 +++
 
 ## Local Files
@@ -16,6 +16,21 @@ Supported local file counts:
 - `3` files: opens `1x3`
 - `4` files: opens `2x2`
 - `8` files: opens `2x4`
+- GSPS DICOM files can be included alongside image DICOM files in the same selection; GSPS files are used as overlays and do not count as display slots.
+
+## GSPS Overlay
+
+- If a GSPS DICOM references the active image, an overlay is available.
+- Overlay visibility is `off` by default.
+- Use `G` to toggle GSPS overlay on/off.
+
+## Keyboard Shortcuts
+
+- `C`: toggle cine mode
+- `G`: toggle GSPS overlay (when available)
+- `Tab`: next history item
+- `Shift+Tab`: previous history item
+- `Cmd/Ctrl+W`: close window
 
 ## Grouped Local Launch
 

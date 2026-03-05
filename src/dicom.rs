@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -5,7 +6,7 @@ use std::thread;
 use std::{fs, io::Cursor};
 
 use anyhow::{bail, Context, Result};
-use dicom_object::{from_reader, open_file, DefaultDicomObject, ReadError, Tag};
+use dicom_object::{from_reader, open_file, DefaultDicomObject, InMemDicomObject, ReadError, Tag};
 use dicom_pixeldata::PixelDecoder;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,48 @@ pub const METADATA_FIELD_NAMES: &[&str] = &[
     "InstanceNumber",
 ];
 
+pub const GSPS_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.11.1";
+#[cfg(test)]
+pub const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DicomPathKind {
+    Image,
+    Gsps,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GspsUnits {
+    Pixel,
+    Display,
+}
+
+#[derive(Debug, Clone)]
+pub enum GspsGraphic {
+    Point {
+        x: f32,
+        y: f32,
+        units: GspsUnits,
+    },
+    Polyline {
+        points: Vec<(f32, f32)>,
+        units: GspsUnits,
+        closed: bool,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GspsOverlay {
+    pub graphics: Vec<GspsGraphic>,
+}
+
+impl GspsOverlay {
+    pub fn is_empty(&self) -> bool {
+        self.graphics.is_empty()
+    }
+}
+
 type MonoFrameCache = Arc<Mutex<Vec<Option<Arc<[i32]>>>>>;
 type RgbFrameCache = Arc<Mutex<Vec<Option<Arc<[u8]>>>>>;
 
@@ -66,6 +109,8 @@ pub struct DicomImage {
     pub view_position: Option<String>,
     pub image_laterality: Option<String>,
     pub instance_number: Option<i32>,
+    pub sop_instance_uid: Option<String>,
+    pub gsps_overlay: Option<GspsOverlay>,
     pub metadata: Vec<(String, String)>,
 }
 
@@ -187,6 +232,274 @@ impl LazyRgbFrames {
     }
 }
 
+pub fn is_gsps_sop_class_uid(uid: &str) -> bool {
+    uid.trim() == GSPS_SOP_CLASS_UID
+}
+
+pub fn classify_dicom_path(path: &Path) -> Result<DicomPathKind> {
+    let obj = open_dicom_object(path)?;
+    Ok(classify_dicom_object(&obj))
+}
+
+pub fn load_gsps_overlays(path: &Path) -> Result<HashMap<String, GspsOverlay>> {
+    let obj = open_dicom_object(path)?;
+    if classify_dicom_object(&obj) != DicomPathKind::Gsps {
+        let sop_class = read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
+        bail!(
+            "{} is not a GSPS object (SOPClassUID={})",
+            path.display(),
+            sop_class
+        );
+    }
+    Ok(parse_gsps_overlays(&obj))
+}
+
+fn classify_dicom_object(obj: &DefaultDicomObject) -> DicomPathKind {
+    if read_string(obj, "SOPClassUID").is_some_and(|uid| is_gsps_sop_class_uid(&uid)) {
+        return DicomPathKind::Gsps;
+    }
+    if obj.element(Tag(0x7FE0, 0x0010)).is_ok() || obj.element_by_name("PixelData").is_ok() {
+        return DicomPathKind::Image;
+    }
+    DicomPathKind::Other
+}
+
+fn parse_gsps_overlays(obj: &DefaultDicomObject) -> HashMap<String, GspsOverlay> {
+    const REFERENCED_SERIES_SEQUENCE: Tag = Tag(0x0008, 0x1115);
+    const GRAPHIC_ANNOTATION_SEQUENCE: Tag = Tag(0x0070, 0x0001);
+
+    let mut overlays_by_uid = HashMap::<String, GspsOverlay>::new();
+    let default_refs = collect_root_referenced_sop_instance_uids(obj, REFERENCED_SERIES_SEQUENCE);
+
+    let Some(annotations) = sequence_items_from_object(obj, GRAPHIC_ANNOTATION_SEQUENCE) else {
+        return overlays_by_uid;
+    };
+
+    for annotation in annotations {
+        let references = collect_item_referenced_sop_instance_uids(annotation);
+        let target_refs = if references.is_empty() {
+            &default_refs
+        } else {
+            &references
+        };
+        if target_refs.is_empty() {
+            continue;
+        }
+
+        let graphics = collect_graphics_from_annotation(annotation);
+        if graphics.is_empty() {
+            continue;
+        }
+
+        for sop_uid in target_refs {
+            overlays_by_uid
+                .entry(sop_uid.clone())
+                .or_default()
+                .graphics
+                .extend(graphics.clone());
+        }
+    }
+
+    overlays_by_uid.retain(|_, overlay| !overlay.is_empty());
+    overlays_by_uid
+}
+
+fn collect_root_referenced_sop_instance_uids(
+    obj: &DefaultDicomObject,
+    referenced_series_sequence: Tag,
+) -> Vec<String> {
+    const REFERENCED_IMAGE_SEQUENCE: Tag = Tag(0x0008, 0x1140);
+    const REFERENCED_SOP_INSTANCE_UID: Tag = Tag(0x0008, 0x1155);
+
+    let mut uids = Vec::new();
+    if let Some(series_items) = sequence_items_from_object(obj, referenced_series_sequence) {
+        for series_item in series_items {
+            uids.extend(collect_item_referenced_sop_instance_uids(series_item));
+        }
+    }
+    if uids.is_empty() {
+        if let Some(image_items) = sequence_items_from_object(obj, REFERENCED_IMAGE_SEQUENCE) {
+            for image_item in image_items {
+                if let Some(uid) = read_item_string(image_item, REFERENCED_SOP_INSTANCE_UID) {
+                    uids.push(uid);
+                }
+            }
+        }
+    }
+    uids.sort();
+    uids.dedup();
+    uids
+}
+
+fn collect_item_referenced_sop_instance_uids(item: &InMemDicomObject) -> Vec<String> {
+    const REFERENCED_IMAGE_SEQUENCE: Tag = Tag(0x0008, 0x1140);
+    const REFERENCED_SOP_INSTANCE_UID: Tag = Tag(0x0008, 0x1155);
+
+    let mut uids = Vec::new();
+    let Some(image_items) = sequence_items_from_item(item, REFERENCED_IMAGE_SEQUENCE) else {
+        return uids;
+    };
+    for image_item in image_items {
+        if let Some(uid) = read_item_string(image_item, REFERENCED_SOP_INSTANCE_UID) {
+            uids.push(uid);
+        }
+    }
+    uids.sort();
+    uids.dedup();
+    uids
+}
+
+fn collect_graphics_from_annotation(annotation: &InMemDicomObject) -> Vec<GspsGraphic> {
+    const GRAPHIC_OBJECT_SEQUENCE: Tag = Tag(0x0070, 0x0009);
+
+    let mut graphics = Vec::new();
+    let Some(graphic_items) = sequence_items_from_item(annotation, GRAPHIC_OBJECT_SEQUENCE) else {
+        return graphics;
+    };
+
+    for graphic_item in graphic_items {
+        graphics.extend(collect_graphics_from_graphic_object(graphic_item));
+    }
+    graphics
+}
+
+fn collect_graphics_from_graphic_object(graphic_item: &InMemDicomObject) -> Vec<GspsGraphic> {
+    const GRAPHIC_ANNOTATION_UNITS: Tag = Tag(0x0070, 0x0005);
+    const GRAPHIC_DATA: Tag = Tag(0x0070, 0x0022);
+    const GRAPHIC_TYPE: Tag = Tag(0x0070, 0x0023);
+    const GRAPHIC_FILLED: Tag = Tag(0x0070, 0x0024);
+
+    let units = match read_item_string(graphic_item, GRAPHIC_ANNOTATION_UNITS)
+        .map(|value| value.to_ascii_uppercase())
+    {
+        Some(value) if value == "DISPLAY" => GspsUnits::Display,
+        _ => GspsUnits::Pixel,
+    };
+
+    let points = read_item_multi_float(graphic_item, GRAPHIC_DATA)
+        .map(parse_graphic_points)
+        .unwrap_or_default();
+    if points.is_empty() {
+        return Vec::new();
+    }
+
+    let graphic_type = read_item_string(graphic_item, GRAPHIC_TYPE)
+        .unwrap_or_else(|| "POLYLINE".to_string())
+        .to_ascii_uppercase();
+
+    match graphic_type.as_str() {
+        "POINT" => points
+            .into_iter()
+            .map(|(x, y)| GspsGraphic::Point { x, y, units })
+            .collect(),
+        "CIRCLE" if points.len() >= 2 => {
+            let polyline = approximate_circle(points[0], points[1]);
+            vec![GspsGraphic::Polyline {
+                points: polyline,
+                units,
+                closed: true,
+            }]
+        }
+        "ELLIPSE" if points.len() >= 4 => {
+            let polyline = approximate_ellipse(points[0], points[1], points[2], points[3]);
+            vec![GspsGraphic::Polyline {
+                points: polyline,
+                units,
+                closed: true,
+            }]
+        }
+        _ => {
+            let closed = read_item_string(graphic_item, GRAPHIC_FILLED)
+                .is_some_and(|value| value.eq_ignore_ascii_case("Y"));
+            vec![GspsGraphic::Polyline {
+                points,
+                units,
+                closed,
+            }]
+        }
+    }
+}
+
+fn parse_graphic_points(values: Vec<f32>) -> Vec<(f32, f32)> {
+    let mut points = Vec::with_capacity(values.len() / 2);
+    for pair in values.chunks_exact(2) {
+        points.push((pair[0], pair[1]));
+    }
+    points
+}
+
+fn approximate_circle(center: (f32, f32), perimeter: (f32, f32)) -> Vec<(f32, f32)> {
+    const STEPS: usize = 64;
+    let radius = ((perimeter.0 - center.0).powi(2) + (perimeter.1 - center.1).powi(2)).sqrt();
+    if radius <= f32::EPSILON {
+        return vec![center];
+    }
+
+    (0..STEPS)
+        .map(|index| {
+            let t = 2.0_f32 * std::f32::consts::PI * (index as f32 / STEPS as f32);
+            (center.0 + radius * t.cos(), center.1 + radius * t.sin())
+        })
+        .collect()
+}
+
+fn approximate_ellipse(
+    major_start: (f32, f32),
+    major_end: (f32, f32),
+    minor_start: (f32, f32),
+    minor_end: (f32, f32),
+) -> Vec<(f32, f32)> {
+    const STEPS: usize = 64;
+    let center_x = (major_start.0 + major_end.0 + minor_start.0 + minor_end.0) * 0.25;
+    let center_y = (major_start.1 + major_end.1 + minor_start.1 + minor_end.1) * 0.25;
+    let major_vector = (
+        (major_end.0 - major_start.0) * 0.5,
+        (major_end.1 - major_start.1) * 0.5,
+    );
+    let minor_vector = (
+        (minor_end.0 - minor_start.0) * 0.5,
+        (minor_end.1 - minor_start.1) * 0.5,
+    );
+
+    let major_len = (major_vector.0.powi(2) + major_vector.1.powi(2)).sqrt();
+    let minor_len = (minor_vector.0.powi(2) + minor_vector.1.powi(2)).sqrt();
+    if major_len <= f32::EPSILON || minor_len <= f32::EPSILON {
+        return vec![(center_x, center_y)];
+    }
+
+    (0..STEPS)
+        .map(|index| {
+            let t = 2.0_f32 * std::f32::consts::PI * (index as f32 / STEPS as f32);
+            (
+                center_x + major_vector.0 * t.cos() + minor_vector.0 * t.sin(),
+                center_y + major_vector.1 * t.cos() + minor_vector.1 * t.sin(),
+            )
+        })
+        .collect()
+}
+
+fn sequence_items_from_object(obj: &DefaultDicomObject, tag: Tag) -> Option<&[InMemDicomObject]> {
+    obj.element(tag).ok()?.items()
+}
+
+fn sequence_items_from_item(item: &InMemDicomObject, tag: Tag) -> Option<&[InMemDicomObject]> {
+    item.element(tag).ok()?.items()
+}
+
+fn read_item_string(item: &InMemDicomObject, tag: Tag) -> Option<String> {
+    item.element(tag)
+        .ok()
+        .and_then(|element| element.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn read_item_multi_float(item: &InMemDicomObject, tag: Tag) -> Option<Vec<f32>> {
+    item.element(tag)
+        .ok()
+        .and_then(|element| element.to_multi_float32().ok())
+}
+
 pub fn load_dicom(path: &Path) -> Result<DicomImage> {
     let obj = open_dicom_object(path)?;
 
@@ -234,6 +547,7 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
     let view_position = read_view_position(&obj);
     let image_laterality = read_laterality(&obj);
     let instance_number = read_int_first(&obj, "InstanceNumber");
+    let sop_instance_uid = read_string(&obj, "SOPInstanceUID");
     let metadata = collect_metadata(&obj);
 
     match samples_per_pixel {
@@ -291,6 +605,8 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
                 view_position,
                 image_laterality,
                 instance_number,
+                sop_instance_uid,
+                gsps_overlay: None,
                 metadata,
             })
         }
@@ -357,6 +673,8 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
                 view_position,
                 image_laterality,
                 instance_number,
+                sop_instance_uid,
+                gsps_overlay: None,
                 metadata,
             })
         }
@@ -908,6 +1226,37 @@ fn min_max(values: &[i32]) -> Option<(i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dicom_core::value::DataSetSequence;
+    use dicom_core::{DataElement, PrimitiveValue, VR};
+    use dicom_object::FileMetaTableBuilder;
+
+    fn referenced_image_item(sop_instance_uid: &str) -> InMemDicomObject {
+        InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0008, 0x1155),
+            VR::UI,
+            sop_instance_uid,
+        )])
+    }
+
+    fn graphic_object_item(
+        graphic_type: &str,
+        graphic_data: &[f32],
+        units: &str,
+        filled: Option<&str>,
+    ) -> InMemDicomObject {
+        let mut item = InMemDicomObject::new_empty();
+        item.put(DataElement::new(Tag(0x0070, 0x0005), VR::CS, units));
+        item.put(DataElement::new(
+            Tag(0x0070, 0x0022),
+            VR::FL,
+            PrimitiveValue::F32(graphic_data.iter().copied().collect()),
+        ));
+        item.put(DataElement::new(Tag(0x0070, 0x0023), VR::CS, graphic_type));
+        if let Some(flag) = filled {
+            item.put(DataElement::new(Tag(0x0070, 0x0024), VR::CS, flag));
+        }
+        item
+    }
 
     #[test]
     fn repair_inserts_group_length_when_missing() {
@@ -988,5 +1337,147 @@ mod tests {
         let right_obj = open_dicom_object(right_path).expect("sample3 right image should open");
         assert_eq!(read_laterality(&left_obj).as_deref(), Some("L"));
         assert_eq!(read_laterality(&right_obj).as_deref(), Some("R"));
+    }
+
+    #[test]
+    fn parse_graphic_points_reads_xy_pairs() {
+        let points = parse_graphic_points(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+        assert_eq!(points, vec![(10.0, 20.0), (30.0, 40.0), (50.0, 60.0)]);
+    }
+
+    #[test]
+    fn collect_referenced_sops_from_item_deduplicates() {
+        let item = InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0008, 0x1140),
+            VR::SQ,
+            DataSetSequence::from(vec![
+                referenced_image_item("1.2.3"),
+                referenced_image_item("1.2.3"),
+                referenced_image_item("2.4.6"),
+            ]),
+        )]);
+
+        let refs = collect_item_referenced_sop_instance_uids(&item);
+        assert_eq!(refs, vec!["1.2.3".to_string(), "2.4.6".to_string()]);
+    }
+
+    #[test]
+    fn collect_graphic_object_parses_polyline_units_and_closed_flag() {
+        let item = graphic_object_item(
+            "POLYLINE",
+            &[0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
+            "DISPLAY",
+            Some("Y"),
+        );
+        let graphics = collect_graphics_from_graphic_object(&item);
+        assert_eq!(graphics.len(), 1);
+
+        match &graphics[0] {
+            GspsGraphic::Polyline {
+                points,
+                units,
+                closed,
+            } => {
+                assert_eq!(points.len(), 3);
+                assert_eq!(*units, GspsUnits::Display);
+                assert!(*closed);
+            }
+            other => panic!("Expected polyline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gsps_overlays_maps_annotation_reference_to_target_sop() {
+        let annotation = InMemDicomObject::from_element_iter([
+            DataElement::new(
+                Tag(0x0008, 0x1140),
+                VR::SQ,
+                DataSetSequence::from(vec![referenced_image_item("1.2.840.1")]),
+            ),
+            DataElement::new(
+                Tag(0x0070, 0x0009),
+                VR::SQ,
+                DataSetSequence::from(vec![graphic_object_item(
+                    "POINT",
+                    &[100.0, 120.0],
+                    "PIXEL",
+                    None,
+                )]),
+            ),
+        ]);
+
+        let gsps_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, GSPS_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "9.9.9.9"),
+            DataElement::new(
+                Tag(0x0070, 0x0001),
+                VR::SQ,
+                DataSetSequence::from(vec![annotation]),
+            ),
+        ]);
+
+        let gsps_obj = gsps_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(GSPS_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("9.9.9.9"),
+            )
+            .expect("GSPS test object should build file meta");
+
+        let overlays = parse_gsps_overlays(&gsps_obj);
+        let overlay = overlays
+            .get("1.2.840.1")
+            .expect("Overlay should be mapped to referenced SOP instance");
+        assert_eq!(overlay.graphics.len(), 1);
+    }
+
+    #[test]
+    fn parse_gsps_overlays_uses_root_reference_when_annotation_reference_missing() {
+        let series_item = InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0008, 0x1140),
+            VR::SQ,
+            DataSetSequence::from(vec![referenced_image_item("7.7.7.7")]),
+        )]);
+        let annotation = InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0070, 0x0009),
+            VR::SQ,
+            DataSetSequence::from(vec![graphic_object_item(
+                "POLYLINE",
+                &[10.0, 10.0, 20.0, 20.0],
+                "PIXEL",
+                None,
+            )]),
+        )]);
+
+        let gsps_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, GSPS_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "8.8.8.8"),
+            DataElement::new(
+                Tag(0x0008, 0x1115),
+                VR::SQ,
+                DataSetSequence::from(vec![series_item]),
+            ),
+            DataElement::new(
+                Tag(0x0070, 0x0001),
+                VR::SQ,
+                DataSetSequence::from(vec![annotation]),
+            ),
+        ]);
+
+        let gsps_obj = gsps_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(GSPS_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("8.8.8.8"),
+            )
+            .expect("GSPS test object should build file meta");
+
+        let overlays = parse_gsps_overlays(&gsps_obj);
+        assert!(
+            overlays.contains_key("7.7.7.7"),
+            "Root-level references should be used when annotation-level references are absent"
+        );
     }
 }

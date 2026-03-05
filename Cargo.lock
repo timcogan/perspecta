@@ -3056,6 +3056,7 @@ name = "perspecta"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "dicom-core",
  "dicom-object",
  "dicom-pixeldata",
  "eframe",
