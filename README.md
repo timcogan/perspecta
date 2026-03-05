@@ -11,6 +11,23 @@
     <img src="assets/perspecta-wordmark.svg" alt="Perspecta" width="512" />
   </picture>
 </p>
+<p align="center">
+  <a href="https://github.com/timcogan/perspecta/actions/workflows/ci.yml">
+    <img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/timcogan/perspecta/ci.yml?label=tests&style=for-the-badge" />
+  </a>
+  <a href="https://www.rust-lang.org/">
+    <img alt="MSRV 1.73" src="https://img.shields.io/badge/MSRV-1.73-f39c12?logo=rust&logoColor=white&style=for-the-badge" />
+  </a>
+  <a href="LICENSE">
+    <img alt="License" src="https://img.shields.io/github/license/timcogan/perspecta?color=0ea5e9&style=for-the-badge" />
+  </a>
+  <a href="https://github.com/timcogan/perspecta/releases">
+    <img alt="Release" src="https://img.shields.io/github/v/release/timcogan/perspecta?display_name=tag&color=0ea5e9&style=for-the-badge" />
+  </a>
+  <a href="https://perspecta.cogan.dev/">
+    <img alt="Website" src="https://img.shields.io/badge/Website-perspecta.cogan.dev-0ea5e9?style=for-the-badge" />
+  </a>
+</p>
 
 Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`eframe`), focused on fast loading, responsive interaction, and simple launch integration from external systems.
 
