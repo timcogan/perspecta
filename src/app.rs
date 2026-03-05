@@ -1385,6 +1385,14 @@ impl DicomViewerApp {
                                     &mut self.pending_gsps_overlays,
                                     overlays,
                                 );
+                                for viewport in
+                                    self.mammo_group.iter_mut().filter_map(Option::as_mut)
+                                {
+                                    Self::attach_matching_gsps_overlay(
+                                        &mut viewport.image,
+                                        &self.pending_gsps_overlays,
+                                    );
+                                }
                             }
                             Err(err) => {
                                 eprintln!(
@@ -1550,8 +1558,14 @@ impl DicomViewerApp {
                         }
                     }
                     DicomWebDownloadResult::Grouped { groups, open_group } => {
-                        let active_group_len =
-                            groups.get(open_group).map(|group| group.len()).unwrap_or(0);
+                        let prepared_groups = groups
+                            .iter()
+                            .map(|group| Self::prepare_load_paths(group.clone()))
+                            .collect::<Vec<_>>();
+                        let active_group_len = prepared_groups
+                            .get(open_group)
+                            .map(|group| group.image_paths.len())
+                            .unwrap_or(0);
                         let streamed_count = self.dicomweb_active_group_paths.len();
                         let streaming_started = streamed_count > 0;
                         let streamed_active_complete = streamed_count >= active_group_len
@@ -1562,10 +1576,6 @@ impl DicomViewerApp {
                         if !streamed_active_complete && !streaming_started {
                             self.load_local_groups(groups, open_group, ctx);
                         } else {
-                            let prepared_groups = groups
-                                .iter()
-                                .map(|group| Self::prepare_load_paths(group.clone()))
-                                .collect::<Vec<_>>();
                             self.preload_non_active_groups_into_history(
                                 &prepared_groups,
                                 open_group,
