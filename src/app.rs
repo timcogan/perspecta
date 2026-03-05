@@ -1383,8 +1383,8 @@ impl DicomViewerApp {
                     self.load_selected_paths(vec![path], ctx);
                 }
                 count if Self::is_supported_multi_view_group_size(count) => {
-                    if classify_dicom_path(&path).is_ok_and(|kind| kind == DicomPathKind::Gsps) {
-                        match load_gsps_overlays(&path) {
+                    match classify_dicom_path(&path) {
+                        Ok(DicomPathKind::Gsps) => match load_gsps_overlays(&path) {
                             Ok(overlays) => {
                                 Self::merge_gsps_overlays(
                                     &mut self.pending_gsps_overlays,
@@ -1406,32 +1406,36 @@ impl DicomViewerApp {
                                     path.display()
                                 );
                             }
+                        },
+                        Ok(DicomPathKind::Image) | Err(_) => {
+                            self.dicomweb_active_group_paths.push(path.clone());
+                            if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
+                                thread::spawn(move || {
+                                    let result = match load_dicom(&path) {
+                                        Ok(image) => Ok(PendingLoad { path, image }),
+                                        Err(err) => Err(format!(
+                                            "Error opening streamed DICOM {}: {err:#}",
+                                            path.display()
+                                        )),
+                                    };
+                                    let _ = sender.send(result);
+                                });
+                            } else {
+                                self.status_line =
+                                    "Streaming multi-view load channel not available.".to_string();
+                                self.mammo_group.clear();
+                                self.mammo_load_receiver = None;
+                                self.mammo_load_sender = None;
+                                self.history_pushed_for_active_group = false;
+                                self.cine_mode = false;
+                                self.dicomweb_active_group_paths.clear();
+                                self.dicomweb_active_pending_paths.clear();
+                                self.dicomweb_active_group_expected = None;
+                                self.dicomweb_active_path_receiver = None;
+                            }
                         }
-                    } else {
-                        self.dicomweb_active_group_paths.push(path.clone());
-                        if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
-                            thread::spawn(move || {
-                                let result = match load_dicom(&path) {
-                                    Ok(image) => Ok(PendingLoad { path, image }),
-                                    Err(err) => Err(format!(
-                                        "Error opening streamed DICOM {}: {err:#}",
-                                        path.display()
-                                    )),
-                                };
-                                let _ = sender.send(result);
-                            });
-                        } else {
-                            self.status_line =
-                                "Streaming multi-view load channel not available.".to_string();
-                            self.mammo_group.clear();
-                            self.mammo_load_receiver = None;
-                            self.mammo_load_sender = None;
-                            self.history_pushed_for_active_group = false;
-                            self.cine_mode = false;
-                            self.dicomweb_active_group_paths.clear();
-                            self.dicomweb_active_pending_paths.clear();
-                            self.dicomweb_active_group_expected = None;
-                            self.dicomweb_active_path_receiver = None;
+                        Ok(DicomPathKind::Other) => {
+                            eprintln!("Ignoring streamed non-image DICOM {}.", path.display());
                         }
                     }
                 }
