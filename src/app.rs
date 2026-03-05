@@ -1562,8 +1562,13 @@ impl DicomViewerApp {
                             .iter()
                             .map(|group| Self::prepare_load_paths(group.clone()))
                             .collect::<Vec<_>>();
+                        let validated_open_group = if prepared_groups.is_empty() {
+                            0
+                        } else {
+                            open_group.min(prepared_groups.len().saturating_sub(1))
+                        };
                         let active_group_len = prepared_groups
-                            .get(open_group)
+                            .get(validated_open_group)
                             .map(|group| group.image_paths.len())
                             .unwrap_or(0);
                         let streamed_count = self.dicomweb_active_group_paths.len();
@@ -1574,11 +1579,11 @@ impl DicomViewerApp {
                             && self.dicomweb_active_pending_paths.is_empty();
 
                         if !streamed_active_complete && !streaming_started {
-                            self.load_local_groups(groups, open_group, ctx);
+                            self.load_local_groups(groups, validated_open_group, ctx);
                         } else {
                             self.preload_non_active_groups_into_history(
                                 &prepared_groups,
-                                open_group,
+                                validated_open_group,
                             );
                             if Self::is_supported_multi_view_group_size(active_group_len)
                                 && self.mammo_group_complete()
