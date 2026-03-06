@@ -1,11 +1,12 @@
 use std::io::{self, Write};
 use std::sync::OnceLock;
 
-use log::{LevelFilter, Log, Metadata, Record};
+use log::{LevelFilter, Log, Metadata, Record, SetLoggerError};
 
 struct StderrLogger;
 
 static LOGGER: StderrLogger = StderrLogger;
+static INIT: OnceLock<Result<(), SetLoggerError>> = OnceLock::new();
 
 impl Log for StderrLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
@@ -31,19 +32,25 @@ impl Log for StderrLogger {
 }
 
 pub fn init() {
-    static INIT: OnceLock<()> = OnceLock::new();
+    try_init().unwrap();
+}
 
-    INIT.get_or_init(|| {
+pub fn try_init() -> Result<(), SetLoggerError> {
+    match INIT.get_or_init(|| {
         let level = level_from_env();
-        match log::set_logger(&LOGGER) {
-            Ok(()) => log::set_max_level(level),
-            Err(err) => {
-                eprintln!(
-                    "logging::init: failed to register LOGGER (StderrLogger) at level {level:?}: {err}"
-                );
-            }
-        }
-    });
+        log::set_logger(&LOGGER)?;
+        log::set_max_level(level);
+        Ok(())
+    }) {
+        Ok(()) => Ok(()),
+        // SetLoggerError is not Clone, so regenerate an owned error value.
+        Err(_) => match log::set_logger(&LOGGER) {
+            Ok(()) => unreachable!(
+                "logging::try_init: LOGGER registration succeeded after cached failure"
+            ),
+            Err(err) => Err(err),
+        },
+    }
 }
 
 fn level_from_env() -> LevelFilter {
@@ -57,13 +64,26 @@ fn level_from_spec(spec: Option<&str>) -> LevelFilter {
 }
 
 fn parse_level_filter(spec: &str) -> Option<LevelFilter> {
-    spec.split(',')
+    let mut global_level = None;
+
+    for part in spec
+        .split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
-        .find_map(|part| {
-            let level_token = part.rsplit('=').next().unwrap_or(part).trim();
-            parse_level(level_token)
-        })
+    {
+        // Reject per-target directives (e.g. "perspecta=debug"): this logger
+        // currently supports only one global LevelFilter.
+        if part.contains('=') {
+            return None;
+        }
+
+        if let Some(level) = parse_level(part) {
+            global_level = Some(level);
+            break;
+        }
+    }
+
+    global_level
 }
 
 fn parse_level(token: &str) -> Option<LevelFilter> {
@@ -96,15 +116,10 @@ mod tests {
     #[test]
     fn parse_level_filter_supports_directives_and_fallback_entries() {
         assert_eq!(parse_level_filter("warn"), Some(LevelFilter::Warn));
-        assert_eq!(
-            parse_level_filter("perspecta=debug"),
-            Some(LevelFilter::Debug)
-        );
+        assert_eq!(parse_level_filter("perspecta=debug"), None);
+        assert_eq!(parse_level_filter("perspecta=debug,info"), None);
+        assert_eq!(parse_level_filter("perspecta=invalid,other=trace"), None);
         assert_eq!(parse_level_filter("invalid,info"), Some(LevelFilter::Info));
-        assert_eq!(
-            parse_level_filter("perspecta=invalid,other=trace"),
-            Some(LevelFilter::Trace)
-        );
     }
 
     #[test]
