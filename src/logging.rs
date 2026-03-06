@@ -35,8 +35,13 @@ pub fn init() {
 
     INIT.get_or_init(|| {
         let level = level_from_env();
-        if log::set_logger(&LOGGER).is_ok() {
-            log::set_max_level(level);
+        match log::set_logger(&LOGGER) {
+            Ok(()) => log::set_max_level(level),
+            Err(err) => {
+                eprintln!(
+                    "logging::init: failed to register LOGGER (StderrLogger) at level {level:?}: {err}"
+                );
+            }
         }
     });
 }
