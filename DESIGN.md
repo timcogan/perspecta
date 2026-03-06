@@ -52,6 +52,11 @@ Its primary purpose is consistency during development, not full architecture cov
 3. Launch/parsing/selection changes (`launch.rs`, `dicomweb.rs`, selection logic):
    - Run all UI-only checks above.
    - Run `cargo test --all-targets --all-features`.
-4. Streaming/GSPS/history/concurrency changes (`app.rs` load pipeline, GSPS attach, worker channels):
+4. Decode/ordering/rendering changes (`dicom.rs`, `mammo.rs`, `renderer.rs`):
+   - Run all UI-only checks above.
+   - Run `cargo test --all-targets --all-features`.
+   - Run module-specific validations for decode unit tests and renderer render-output checks (where tests exist).
+   - Apply this tier to any PR that modifies `dicom.rs`, `mammo.rs`, or `renderer.rs`.
+5. Streaming/GSPS/history/concurrency changes (`app.rs` load pipeline, GSPS attach, worker channels):
    - Run all launch/parsing checks above.
    - Verify GSPS toggle behavior (default off, `G` works when overlay exists).
