@@ -2355,20 +2355,8 @@ impl DicomViewerApp {
         size: [f32; 2],
         drag_value: egui::DragValue<'a>,
     ) -> egui::Response {
-        let inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
-        let hovered_bg = ui.visuals().widgets.hovered.weak_bg_fill;
-        let active_bg = ui.visuals().widgets.active.weak_bg_fill;
         ui.scope(|ui| {
-            let visuals = ui.visuals_mut();
-            visuals.widgets.inactive.bg_fill = inactive_bg;
-            visuals.widgets.inactive.weak_bg_fill = inactive_bg;
-            visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-            visuals.widgets.hovered.bg_fill = hovered_bg;
-            visuals.widgets.hovered.weak_bg_fill = hovered_bg;
-            visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-            visuals.widgets.active.bg_fill = active_bg;
-            visuals.widgets.active.weak_bg_fill = active_bg;
-            visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+            Self::apply_no_border_visuals(ui.visuals_mut());
             ui.add_sized(size, drag_value)
         })
         .inner
@@ -2379,23 +2367,34 @@ impl DicomViewerApp {
         size: [f32; 2],
         text: impl Into<egui::WidgetText>,
     ) -> egui::Response {
-        let inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
-        let hovered_bg = ui.visuals().widgets.hovered.weak_bg_fill;
-        let active_bg = ui.visuals().widgets.active.weak_bg_fill;
         ui.scope(|ui| {
-            let visuals = ui.visuals_mut();
-            visuals.widgets.inactive.bg_fill = inactive_bg;
-            visuals.widgets.inactive.weak_bg_fill = inactive_bg;
-            visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
-            visuals.widgets.hovered.bg_fill = hovered_bg;
-            visuals.widgets.hovered.weak_bg_fill = hovered_bg;
-            visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
-            visuals.widgets.active.bg_fill = active_bg;
-            visuals.widgets.active.weak_bg_fill = active_bg;
-            visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+            Self::apply_no_border_visuals(ui.visuals_mut());
             ui.add_sized(size, egui::Button::new(text))
         })
         .inner
+    }
+
+    fn apply_no_border_visuals(visuals: &mut egui::Visuals) {
+        let noninteractive_bg = visuals.widgets.noninteractive.weak_bg_fill;
+        let inactive_bg = visuals.widgets.inactive.weak_bg_fill;
+        let hovered_bg = visuals.widgets.hovered.weak_bg_fill;
+        let active_bg = visuals.widgets.active.weak_bg_fill;
+
+        visuals.widgets.noninteractive.bg_fill = noninteractive_bg;
+        visuals.widgets.noninteractive.weak_bg_fill = noninteractive_bg;
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+
+        visuals.widgets.inactive.bg_fill = inactive_bg;
+        visuals.widgets.inactive.weak_bg_fill = inactive_bg;
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+
+        visuals.widgets.hovered.bg_fill = hovered_bg;
+        visuals.widgets.hovered.weak_bg_fill = hovered_bg;
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+
+        visuals.widgets.active.bg_fill = active_bg;
+        visuals.widgets.active.weak_bg_fill = active_bg;
+        visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
     }
 
     fn frame_step_from_scroll(scroll_accum: &mut f32, scroll: f32) -> i32 {
