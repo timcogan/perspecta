@@ -31,8 +31,8 @@ impl Log for StderrLogger {
     fn flush(&self) {}
 }
 
-pub fn init() {
-    try_init().unwrap();
+pub fn init() -> Result<(), SetLoggerError> {
+    try_init()
 }
 
 pub fn try_init() -> Result<(), SetLoggerError> {
@@ -71,10 +71,10 @@ fn parse_level_filter(spec: &str) -> Option<LevelFilter> {
         .map(str::trim)
         .filter(|part| !part.is_empty())
     {
-        // Reject per-target directives (e.g. "perspecta=debug"): this logger
+        // Skip per-target directives (e.g. "perspecta=debug"): this logger
         // currently supports only one global LevelFilter.
         if part.contains('=') {
-            return None;
+            continue;
         }
 
         if let Some(level) = parse_level(part) {
@@ -117,8 +117,15 @@ mod tests {
     fn parse_level_filter_supports_directives_and_fallback_entries() {
         assert_eq!(parse_level_filter("warn"), Some(LevelFilter::Warn));
         assert_eq!(parse_level_filter("perspecta=debug"), None);
-        assert_eq!(parse_level_filter("perspecta=debug,info"), None);
+        assert_eq!(
+            parse_level_filter("perspecta=debug,info"),
+            Some(LevelFilter::Info)
+        );
         assert_eq!(parse_level_filter("perspecta=invalid,other=trace"), None);
+        assert_eq!(
+            parse_level_filter("invalid,perspecta=debug,info"),
+            Some(LevelFilter::Info)
+        );
         assert_eq!(parse_level_filter("invalid,info"), Some(LevelFilter::Info));
     }
 

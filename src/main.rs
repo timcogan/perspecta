@@ -7,7 +7,7 @@ mod mammo;
 mod renderer;
 
 fn main() -> eframe::Result<()> {
-    logging::init();
+    logging::init().map_err(|err| eframe::Error::AppCreation(Box::new(err)))?;
 
     let cli_args = std::env::args().skip(1).collect::<Vec<_>>();
     let (initial_request, initial_status) = match launch::parse_launch_request_from_args(&cli_args)
