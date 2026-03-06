@@ -191,7 +191,7 @@ impl LazyMonoFrames {
         thread::spawn(move || {
             if let Err(err) = preload_mono_frames_from_path(&path, &cache) {
                 preload_started.store(false, Ordering::Relaxed);
-                eprintln!(
+                log::warn!(
                     "preload_mono_frames_from_path failed for {}: {err:#}",
                     path.display()
                 );
@@ -223,7 +223,7 @@ impl LazyRgbFrames {
         thread::spawn(move || {
             if let Err(err) = preload_rgb_frames_from_path(&path, &cache) {
                 preload_started.store(false, Ordering::Relaxed);
-                eprintln!(
+                log::warn!(
                     "preload_rgb_frames_from_path failed for {}: {err:#}",
                     path.display()
                 );

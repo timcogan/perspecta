@@ -3061,6 +3061,7 @@ dependencies = [
  "dicom-pixeldata",
  "eframe",
  "egui",
+ "log",
  "reqwest",
  "rfd",
 ]

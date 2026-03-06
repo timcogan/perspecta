@@ -17,6 +17,7 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/dicom.rs`: DICOM open/classify/decode and GSPS parsing.
 - `src/mammo.rs`: mammography ordering/alignment helpers.
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
+- `src/logging.rs`: logging setup and log-level configuration.
 - `src/app.rs`: UI, app state, worker orchestration, interactions, and history.
 
 ## Core Invariants
@@ -29,6 +30,7 @@ Its primary purpose is consistency during development, not full architecture cov
 6. `open_group` MUST be validated/clamped before use.
 7. Streaming completion logic MUST compare image counts (not total paths including GSPS).
 8. UI state mutations MUST stay on the main thread; workers MUST communicate through channels.
+9. Production diagnostics MUST use logging (`log` macros), not `println!/eprintln!`.
 
 ## Change Rules
 
