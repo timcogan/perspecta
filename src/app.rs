@@ -30,6 +30,8 @@ const HISTORY_LIST_THUMB_MAX_DIM: f32 = 56.0;
 const DEFAULT_CINE_FPS: f32 = 24.0;
 const VALID_GROUP_SIZES: &[usize] = &[1, 2, 3, 4, 8];
 const PERSPECTA_BRAND_BLUE: egui::Color32 = egui::Color32::from_rgb(14, 165, 233);
+const CONTROL_VALUE_WIDTH: f32 = 64.0;
+const CONTROL_ACTION_BUTTON_WIDTH: f32 = 100.0;
 
 #[derive(Clone)]
 struct MammoViewport {
@@ -2348,6 +2350,54 @@ impl DicomViewerApp {
             || (*window_width - old_width).abs() > f32::EPSILON
     }
 
+    fn add_value_control_no_border<'a>(
+        ui: &mut egui::Ui,
+        size: [f32; 2],
+        drag_value: egui::DragValue<'a>,
+    ) -> egui::Response {
+        let inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
+        let hovered_bg = ui.visuals().widgets.hovered.weak_bg_fill;
+        let active_bg = ui.visuals().widgets.active.weak_bg_fill;
+        ui.scope(|ui| {
+            let visuals = ui.visuals_mut();
+            visuals.widgets.inactive.bg_fill = inactive_bg;
+            visuals.widgets.inactive.weak_bg_fill = inactive_bg;
+            visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            visuals.widgets.hovered.bg_fill = hovered_bg;
+            visuals.widgets.hovered.weak_bg_fill = hovered_bg;
+            visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+            visuals.widgets.active.bg_fill = active_bg;
+            visuals.widgets.active.weak_bg_fill = active_bg;
+            visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+            ui.add_sized(size, drag_value)
+        })
+        .inner
+    }
+
+    fn add_action_control_button_no_border(
+        ui: &mut egui::Ui,
+        size: [f32; 2],
+        text: impl Into<egui::WidgetText>,
+    ) -> egui::Response {
+        let inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
+        let hovered_bg = ui.visuals().widgets.hovered.weak_bg_fill;
+        let active_bg = ui.visuals().widgets.active.weak_bg_fill;
+        ui.scope(|ui| {
+            let visuals = ui.visuals_mut();
+            visuals.widgets.inactive.bg_fill = inactive_bg;
+            visuals.widgets.inactive.weak_bg_fill = inactive_bg;
+            visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            visuals.widgets.hovered.bg_fill = hovered_bg;
+            visuals.widgets.hovered.weak_bg_fill = hovered_bg;
+            visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+            visuals.widgets.active.bg_fill = active_bg;
+            visuals.widgets.active.weak_bg_fill = active_bg;
+            visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+            ui.add_sized(size, egui::Button::new(text))
+        })
+        .inner
+    }
+
     fn frame_step_from_scroll(scroll_accum: &mut f32, scroll: f32) -> i32 {
         const DEAD_ZONE: f32 = 0.5;
         const PIXELS_PER_FRAME_STEP: f32 = 30.0;
@@ -2977,7 +3027,8 @@ impl eframe::App for DicomViewerApp {
                                 let row_height = ui.spacing().interact_size.y;
                                 let slider_with_refresh_width = (slider_width
                                     - refresh_button_size
-                                    - ui.spacing().item_spacing.x)
+                                    - CONTROL_VALUE_WIDTH
+                                    - 2.0 * ui.spacing().item_spacing.x)
                                     .max(120.0);
 
                                 ui.allocate_ui_with_layout(
@@ -2989,7 +3040,9 @@ impl eframe::App for DicomViewerApp {
                                                 [refresh_button_size, row_height],
                                                 egui::Button::new(
                                                     egui::RichText::new("↺").size(14.0),
-                                                ),
+                                                )
+                                                .fill(egui::Color32::BLACK)
+                                                .stroke(egui::Stroke::NONE),
                                             )
                                             .on_hover_text("Reset Center")
                                             .clicked()
@@ -2998,13 +3051,24 @@ impl eframe::App for DicomViewerApp {
                                             request_rebuild = true;
                                         }
 
+                                        request_rebuild |= Self::add_value_control_no_border(
+                                            ui,
+                                            [CONTROL_VALUE_WIDTH, row_height],
+                                            egui::DragValue::new(&mut state.window_center)
+                                                .range(center_range.clone())
+                                                .speed(1.0)
+                                                .max_decimals(1),
+                                        )
+                                        .changed();
+
                                         request_rebuild |= ui
                                             .add_sized(
                                                 [slider_with_refresh_width, row_height],
                                                 egui::Slider::new(
                                                     &mut state.window_center,
-                                                    center_range,
+                                                    center_range.clone(),
                                                 )
+                                                .show_value(false)
                                                 .text("Center"),
                                             )
                                             .changed();
@@ -3019,7 +3083,9 @@ impl eframe::App for DicomViewerApp {
                                                 [refresh_button_size, row_height],
                                                 egui::Button::new(
                                                     egui::RichText::new("↺").size(14.0),
-                                                ),
+                                                )
+                                                .fill(egui::Color32::BLACK)
+                                                .stroke(egui::Stroke::NONE),
                                             )
                                             .on_hover_text("Reset Width")
                                             .clicked()
@@ -3028,13 +3094,24 @@ impl eframe::App for DicomViewerApp {
                                             request_rebuild = true;
                                         }
 
+                                        request_rebuild |= Self::add_value_control_no_border(
+                                            ui,
+                                            [CONTROL_VALUE_WIDTH, row_height],
+                                            egui::DragValue::new(&mut state.window_width)
+                                                .range(width_range.clone())
+                                                .speed(1.0)
+                                                .max_decimals(1),
+                                        )
+                                        .changed();
+
                                         request_rebuild |= ui
                                             .add_sized(
                                                 [slider_with_refresh_width, row_height],
                                                 egui::Slider::new(
                                                     &mut state.window_width,
-                                                    width_range,
+                                                    width_range.clone(),
                                                 )
+                                                .show_value(false)
                                                 .text("Width"),
                                             )
                                             .changed();
@@ -3049,7 +3126,8 @@ impl eframe::App for DicomViewerApp {
                                 let row_height = ui.spacing().interact_size.y;
                                 let slider_with_refresh_width = (slider_width
                                     - refresh_button_size
-                                    - ui.spacing().item_spacing.x)
+                                    - CONTROL_VALUE_WIDTH
+                                    - 2.0 * ui.spacing().item_spacing.x)
                                     .max(120.0);
 
                                 ui.allocate_ui_with_layout(
@@ -3061,7 +3139,9 @@ impl eframe::App for DicomViewerApp {
                                                 [refresh_button_size, row_height],
                                                 egui::Button::new(
                                                     egui::RichText::new("↺").size(14.0),
-                                                ),
+                                                )
+                                                .fill(egui::Color32::BLACK)
+                                                .stroke(egui::Stroke::NONE),
                                             )
                                             .on_hover_text("Reset Frame")
                                             .clicked()
@@ -3072,10 +3152,25 @@ impl eframe::App for DicomViewerApp {
                                             request_rebuild = true;
                                         }
 
+                                        if Self::add_value_control_no_border(
+                                            ui,
+                                            [CONTROL_VALUE_WIDTH, row_height],
+                                            egui::DragValue::new(&mut frame_index)
+                                                .range(0..=max_frame)
+                                                .speed(1.0),
+                                        )
+                                        .changed()
+                                        {
+                                            state.current_frame = frame_index as usize;
+                                            self.last_cine_advance = Some(Instant::now());
+                                            request_rebuild = true;
+                                        }
+
                                         if ui
                                             .add_sized(
                                                 [slider_with_refresh_width, row_height],
                                                 egui::Slider::new(&mut frame_index, 0..=max_frame)
+                                                    .show_value(false)
                                                     .text("Frame"),
                                             )
                                             .changed()
@@ -3087,7 +3182,6 @@ impl eframe::App for DicomViewerApp {
                                     },
                                 );
 
-                                let button_width = 128.0;
                                 let refresh_button_size = ui.spacing().interact_size.y;
                                 let row_height = ui.spacing().interact_size.y;
 
@@ -3100,6 +3194,8 @@ impl eframe::App for DicomViewerApp {
                                                 egui::Button::new(
                                                     egui::RichText::new("↺").size(14.0),
                                                 )
+                                                .fill(egui::Color32::BLACK)
+                                                .stroke(egui::Stroke::NONE)
                                                 .min_size(egui::vec2(
                                                     refresh_button_size,
                                                     row_height,
@@ -3113,9 +3209,25 @@ impl eframe::App for DicomViewerApp {
                                             self.last_cine_advance = Some(Instant::now());
                                         }
 
+                                        if Self::add_value_control_no_border(
+                                            ui,
+                                            [CONTROL_VALUE_WIDTH, row_height],
+                                            egui::DragValue::new(&mut self.cine_fps)
+                                                .range(1.0..=120.0)
+                                                .speed(0.5)
+                                                .max_decimals(1),
+                                        )
+                                        .changed()
+                                        {
+                                            self.cine_fps = self.cine_fps.clamp(1.0, 120.0);
+                                            self.last_cine_advance = Some(Instant::now());
+                                        }
+
                                         if ui
-                                            .add(
+                                            .add_sized(
+                                                [slider_with_refresh_width, row_height],
                                                 egui::Slider::new(&mut self.cine_fps, 1.0..=120.0)
+                                                    .show_value(false)
                                                     .text("Cine FPS"),
                                             )
                                             .changed()
@@ -3130,19 +3242,19 @@ impl eframe::App for DicomViewerApp {
                                     egui::vec2(controls_width, 0.0),
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui
-                                            .add(
-                                                egui::Button::new(if self.cine_mode {
-                                                    "Stop Cine (C)"
-                                                } else {
-                                                    "Start Cine (C)"
-                                                })
-                                                .min_size(egui::vec2(
-                                                    button_width,
-                                                    ui.spacing().interact_size.y,
-                                                )),
-                                            )
-                                            .clicked()
+                                        if Self::add_action_control_button_no_border(
+                                            ui,
+                                            [
+                                                CONTROL_ACTION_BUTTON_WIDTH,
+                                                ui.spacing().interact_size.y,
+                                            ],
+                                            if self.cine_mode {
+                                                "Stop Cine (C)"
+                                            } else {
+                                                "Start Cine (C)"
+                                            },
+                                        )
+                                        .clicked()
                                         {
                                             toggle_cine_clicked = true;
                                         }
@@ -3155,19 +3267,19 @@ impl eframe::App for DicomViewerApp {
                                     egui::vec2(controls_width, 0.0),
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui
-                                            .add(
-                                                egui::Button::new(if self.gsps_overlay_visible {
-                                                    "Hide GSPS (G)"
-                                                } else {
-                                                    "Show GSPS (G)"
-                                                })
-                                                .min_size(egui::vec2(
-                                                    128.0,
-                                                    ui.spacing().interact_size.y,
-                                                )),
-                                            )
-                                            .clicked()
+                                        if Self::add_action_control_button_no_border(
+                                            ui,
+                                            [
+                                                CONTROL_ACTION_BUTTON_WIDTH,
+                                                ui.spacing().interact_size.y,
+                                            ],
+                                            if self.gsps_overlay_visible {
+                                                "Hide GSPS (G)"
+                                            } else {
+                                                "Show GSPS (G)"
+                                            },
+                                        )
+                                        .clicked()
                                         {
                                             toggle_gsps_clicked = true;
                                         }
