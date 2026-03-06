@@ -276,7 +276,7 @@ impl DicomViewerApp {
                             Self::merge_gsps_overlays(&mut prepared.gsps_overlays, overlays)
                         }
                         Err(err) => {
-                            eprintln!("Could not parse GSPS {}: {err:#}", path.display());
+                            log::warn!("Could not parse GSPS {}: {err:#}", path.display());
                         }
                     }
                 }
@@ -446,7 +446,7 @@ impl DicomViewerApp {
         context: &str,
     ) -> (Vec<T>, Option<usize>, bool) {
         if !Self::reorder_indices_cover_all(ordered_viewports.len(), &ordered_indices) {
-            eprintln!("reorder_items_by_indices: invalid ordered_indices while {context}");
+            log::warn!("reorder_items_by_indices: invalid ordered_indices while {context}");
             return (ordered_viewports, selected_index, false);
         }
 
@@ -626,7 +626,7 @@ impl DicomViewerApp {
             return;
         };
         if let Err(err) = fs::create_dir_all(parent) {
-            eprintln!(
+            log::warn!(
                 "Could not create settings directory {}: {err}",
                 parent.display()
             );
@@ -636,7 +636,7 @@ impl DicomViewerApp {
         let fields = ordered_visible_metadata_fields(&self.visible_metadata_fields);
         let contents = render_settings_toml(&fields);
         if let Err(err) = fs::write(path, contents) {
-            eprintln!("Could not write settings file {}: {err}", path.display());
+            log::warn!("Could not write settings file {}: {err}", path.display());
         }
     }
 
@@ -1403,7 +1403,7 @@ impl DicomViewerApp {
                                 self.sync_current_state_to_history();
                             }
                             Err(err) => {
-                                eprintln!(
+                                log::warn!(
                                     "Could not parse streamed GSPS {}: {err:#}",
                                     path.display()
                                 );
@@ -1437,7 +1437,7 @@ impl DicomViewerApp {
                             }
                         }
                         Ok(DicomPathKind::Other) => {
-                            eprintln!("Ignoring streamed non-image DICOM {}.", path.display());
+                            log::warn!("Ignoring streamed non-image DICOM {}.", path.display());
                         }
                     }
                 }
@@ -1493,7 +1493,7 @@ impl DicomViewerApp {
                             let Some(color_image) =
                                 Self::render_image_frame(&image, 0, center, width)
                             else {
-                                eprintln!(
+                                log::warn!(
                                     "History preload skipped group viewport {} (instance {:?}).",
                                     path.display(),
                                     image.instance_number
@@ -1532,7 +1532,7 @@ impl DicomViewerApp {
                         break;
                     }
                     Err(err) => {
-                        eprintln!("History preload skipped: {err}");
+                        log::warn!("History preload skipped: {err}");
                     }
                 },
                 Err(TryRecvError::Empty) => break,
