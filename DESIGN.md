@@ -40,6 +40,7 @@ Its primary purpose is consistency during development, not full architecture cov
 
 ## Verification Matrix
 
-1. UI-only changes (layout/style/labels): run `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo check --all-targets --all-features`.
-2. Launch/parsing/selection changes (`launch.rs`, `dicomweb.rs`, selection logic): run the commands above plus `cargo test --all-targets --all-features`.
-3. Streaming/GSPS/history/concurrency changes (`app.rs` load pipeline, GSPS attach, worker channels): run full `cargo test --all-targets --all-features` and verify GSPS toggle behavior (default off, `G` works when overlay exists).
+1. Docs-only changes (`*.md` with no Rust/code changes): run `cargo fmt --all -- --check`; run markdown linting if configured (or apply the docs/no-op CI label flow), and verify markdown links/rendering plus spelling/lint checks pass.
+2. UI-only changes (layout/style/labels): run `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo check --all-targets --all-features`.
+3. Launch/parsing/selection changes (`launch.rs`, `dicomweb.rs`, selection logic): run the commands above plus `cargo test --all-targets --all-features`.
+4. Streaming/GSPS/history/concurrency changes (`app.rs` load pipeline, GSPS attach, worker channels): run full `cargo test --all-targets --all-features` and verify GSPS toggle behavior (default off, `G` works when overlay exists).
