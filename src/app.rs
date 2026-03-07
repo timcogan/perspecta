@@ -302,16 +302,28 @@ impl DicomViewerApp {
             .filter(|overlay| !overlay.is_empty());
     }
 
-    fn active_gsps_overlay(&self) -> Option<&GspsOverlay> {
-        self.active_image()
-            .and_then(|image| image.gsps_overlay.as_ref())
-            .filter(|overlay| !overlay.is_empty())
+    fn has_available_gsps_overlay(&self) -> bool {
+        if let Some(image) = self.image.as_ref() {
+            return image
+                .gsps_overlay
+                .as_ref()
+                .is_some_and(|overlay| !overlay.is_empty());
+        }
+
+        self.loaded_mammo_viewports().any(|viewport| {
+            viewport
+                .image
+                .gsps_overlay
+                .as_ref()
+                .is_some_and(|overlay| !overlay.is_empty())
+        })
     }
 
     fn toggle_gsps_overlay(&mut self) {
-        if self.active_gsps_overlay().is_none() {
+        if !self.has_available_gsps_overlay() {
             self.gsps_overlay_visible = false;
-            self.status_line = "No GSPS overlay available for the active image.".to_string();
+            self.status_line =
+                "No GSPS overlay available for the current image or group.".to_string();
             return;
         }
         self.gsps_overlay_visible = !self.gsps_overlay_visible;
@@ -2995,7 +3007,7 @@ impl eframe::App for DicomViewerApp {
         let mut toggle_cine_clicked = false;
         let mut toggle_gsps_clicked = false;
         let mut request_rebuild = false;
-        let has_active_gsps_overlay = self.active_gsps_overlay().is_some();
+        let has_active_gsps_overlay = self.has_available_gsps_overlay();
 
         if let Some(state) = active_state.as_mut() {
             let overlay_width = (ctx.screen_rect().width() * 0.5).clamp(340.0, 760.0);
@@ -3992,7 +4004,65 @@ mod tests {
         assert!(!app.gsps_overlay_visible);
         assert_eq!(
             app.status_line,
-            "No GSPS overlay available for the active image."
+            "No GSPS overlay available for the current image or group."
         );
+    }
+
+    #[test]
+    fn toggle_gsps_overlay_allows_group_overlay_when_other_viewport_is_selected() {
+        let overlay = GspsOverlay {
+            graphics: vec![GspsGraphic::Point {
+                x: 1.0,
+                y: 1.0,
+                units: GspsUnits::Pixel,
+            }],
+        };
+        let texture_image = ColorImage {
+            size: [1, 1],
+            pixels: vec![egui::Color32::BLACK],
+        };
+        let ctx = egui::Context::default();
+        let texture_a = ctx.load_texture(
+            "test-gsps-toggle-a",
+            texture_image.clone(),
+            TextureOptions::LINEAR,
+        );
+        let texture_b =
+            ctx.load_texture("test-gsps-toggle-b", texture_image, TextureOptions::LINEAR);
+
+        let mut app = DicomViewerApp {
+            mammo_group: vec![
+                Some(MammoViewport {
+                    path: PathBuf::from("a.dcm"),
+                    image: DicomImage::test_stub(None),
+                    texture: texture_a,
+                    label: "A".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+                Some(MammoViewport {
+                    path: PathBuf::from("b.dcm"),
+                    image: DicomImage::test_stub(Some(overlay)),
+                    texture: texture_b,
+                    label: "B".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+            ],
+            mammo_selected_index: 0,
+            ..Default::default()
+        };
+
+        app.toggle_gsps_overlay();
+        assert!(app.gsps_overlay_visible);
+        assert!(app.status_line.is_empty());
     }
 }
