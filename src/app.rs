@@ -1060,6 +1060,7 @@ impl DicomViewerApp {
                         self.current_frame = self.current_frame.min(frame_count.saturating_sub(1));
                     }
                 }
+                self.clear_load_error();
                 self.rebuild_texture(ctx);
                 log::info!("Loaded study from memory cache.");
                 ctx.request_repaint();
@@ -1101,6 +1102,7 @@ impl DicomViewerApp {
                 self.mammo_selected_index = selected_index
                     .unwrap_or(group.selected_index)
                     .min(self.mammo_group.len().saturating_sub(1));
+                self.clear_load_error();
                 log::info!("Loaded grouped study from memory cache.");
                 ctx.request_repaint();
             }
@@ -1599,15 +1601,22 @@ impl DicomViewerApp {
                             .get(validated_open_group)
                             .map(|group| group.image_paths.len())
                             .unwrap_or(0);
+                        let active_group_paths = prepared_groups
+                            .get(validated_open_group)
+                            .map(|group| group.image_paths.clone())
+                            .unwrap_or_default();
                         let streamed_count = self.dicomweb_active_group_paths.len();
                         let streaming_started = streamed_count > 0;
                         let streamed_active_complete = streamed_count >= active_group_len
                             && (active_group_len == 1
                                 || Self::is_supported_multi_view_group_size(active_group_len))
                             && self.dicomweb_active_pending_paths.is_empty();
+                        let grouped_ready;
 
                         if !streamed_active_complete && !streaming_started {
                             self.load_local_groups(groups, validated_open_group, ctx);
+                            grouped_ready =
+                                self.displayed_study_matches_paths(active_group_paths.as_slice());
                         } else {
                             self.preload_non_active_groups_into_history(
                                 &prepared_groups,
@@ -1632,6 +1641,8 @@ impl DicomViewerApp {
                                 self.history_pushed_for_active_group = true;
                             }
                             self.move_current_history_to_front();
+                            grouped_ready =
+                                self.displayed_study_matches_paths(active_group_paths.as_slice());
                         }
 
                         if streamed_active_complete || !streaming_started {
@@ -1642,8 +1653,10 @@ impl DicomViewerApp {
                             self.mammo_load_sender = None;
                             self.history_pushed_for_active_group = false;
                         }
-                        self.clear_load_error();
-                        log::info!("Loaded grouped study from DICOMweb.");
+                        if grouped_ready {
+                            self.clear_load_error();
+                            log::info!("Loaded grouped study from DICOMweb.");
+                        }
                     }
                 },
                 Err(err) => {
@@ -2147,6 +2160,28 @@ impl DicomViewerApp {
         } else {
             self.selected_mammo_viewport()
                 .map(|viewport| &viewport.image)
+        }
+    }
+
+    fn displayed_study_matches_paths(&self, image_paths: &[PathBuf]) -> bool {
+        match image_paths {
+            [path] => self
+                .current_single_path
+                .as_ref()
+                .is_some_and(|current| current == path),
+            paths if Self::is_supported_multi_view_group_size(paths.len()) => {
+                if !self.mammo_group_complete() {
+                    return false;
+                }
+
+                let loaded_paths = self
+                    .loaded_mammo_viewports()
+                    .map(|viewport| viewport.path.clone())
+                    .collect::<HashSet<_>>();
+                loaded_paths.len() == paths.len()
+                    && paths.iter().all(|path| loaded_paths.contains(path))
+            }
+            _ => false,
         }
     }
 
@@ -4122,6 +4157,124 @@ mod tests {
 
         app.toggle_gsps_overlay();
         assert!(app.gsps_overlay_visible);
+    }
+
+    #[test]
+    fn open_history_entry_single_clears_load_error() {
+        let ctx = egui::Context::default();
+        let texture = ctx.load_texture(
+            "history-single-error-clear",
+            ColorImage {
+                size: [1, 1],
+                pixels: vec![egui::Color32::BLACK],
+            },
+            TextureOptions::LINEAR,
+        );
+        let mut app = DicomViewerApp {
+            load_error_message: Some("Previous load failed.".to_string()),
+            history_entries: vec![HistoryEntry {
+                id: "single".to_string(),
+                kind: HistoryKind::Single(Box::new(HistorySingleData {
+                    path: PathBuf::from("cached-single.dcm"),
+                    image: DicomImage::test_stub(None),
+                    texture,
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    cine_fps: DEFAULT_CINE_FPS,
+                })),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        app.open_history_entry(0, &ctx);
+
+        assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn open_history_entry_group_clears_load_error() {
+        let ctx = egui::Context::default();
+        let texture_image = ColorImage {
+            size: [1, 1],
+            pixels: vec![egui::Color32::BLACK],
+        };
+        let texture_a = ctx.load_texture(
+            "history-group-error-clear-a",
+            texture_image.clone(),
+            TextureOptions::LINEAR,
+        );
+        let texture_b = ctx.load_texture(
+            "history-group-error-clear-b",
+            texture_image,
+            TextureOptions::LINEAR,
+        );
+        let mut app = DicomViewerApp {
+            load_error_message: Some("Previous load failed.".to_string()),
+            history_entries: vec![HistoryEntry {
+                id: "group".to_string(),
+                kind: HistoryKind::Group(HistoryGroupData {
+                    viewports: vec![
+                        HistoryGroupViewportData {
+                            path: PathBuf::from("cached-a.dcm"),
+                            image: DicomImage::test_stub(None),
+                            texture: texture_a,
+                            label: "A".to_string(),
+                            window_center: 0.0,
+                            window_width: 1.0,
+                            current_frame: 0,
+                        },
+                        HistoryGroupViewportData {
+                            path: PathBuf::from("cached-b.dcm"),
+                            image: DicomImage::test_stub(None),
+                            texture: texture_b,
+                            label: "B".to_string(),
+                            window_center: 0.0,
+                            window_width: 1.0,
+                            current_frame: 0,
+                        },
+                    ],
+                    selected_index: 0,
+                }),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        app.open_history_entry(0, &ctx);
+
+        assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn poll_dicomweb_grouped_keeps_load_error_until_active_group_is_ready() {
+        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        tx.send(Ok(DicomWebDownloadResult::Grouped {
+            groups: vec![vec![
+                PathBuf::from("group-a.dcm"),
+                PathBuf::from("group-b.dcm"),
+            ]],
+            open_group: 0,
+        }))
+        .expect("grouped result should send");
+
+        let mut app = DicomViewerApp {
+            dicomweb_receiver: Some(rx),
+            dicomweb_active_group_paths: vec![PathBuf::from("group-a.dcm")],
+            load_error_message: Some(
+                "Streaming multi-view load channel was not available.".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_dicomweb_download(&ctx);
+
+        assert_eq!(
+            app.load_error_message.as_deref(),
+            Some("Streaming multi-view load channel was not available.")
+        );
     }
 
     #[test]
