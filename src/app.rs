@@ -2338,7 +2338,12 @@ impl DicomViewerApp {
         )
     }
 
-    fn draw_gsps_overlay(painter: &egui::Painter, image_rect: egui::Rect, image: &DicomImage) {
+    fn draw_gsps_overlay(
+        painter: &egui::Painter,
+        image_rect: egui::Rect,
+        image: &DicomImage,
+        frame_index: usize,
+    ) {
         let Some(overlay) = image.gsps_overlay.as_ref() else {
             return;
         };
@@ -2349,7 +2354,7 @@ impl DicomViewerApp {
         let stroke = egui::Stroke::new(1.6, PERSPECTA_BRAND_BLUE);
         let marker_half = (image_rect.width().min(image_rect.height()) * 0.008).clamp(2.0, 5.0);
 
-        for graphic in &overlay.graphics {
+        for graphic in overlay.graphics_for_frame(frame_index) {
             match graphic {
                 GspsGraphic::Point { x, y, units } => {
                     let center = Self::gsps_point_to_screen(
@@ -2746,6 +2751,7 @@ impl DicomViewerApp {
                                                     &painter,
                                                     image_rect,
                                                     &viewport.image,
+                                                    viewport.current_frame,
                                                 );
                                             }
                                         }
@@ -3505,7 +3511,12 @@ impl eframe::App for DicomViewerApp {
                     );
                     if self.gsps_overlay_visible {
                         if let Some(image) = self.image.as_ref() {
-                            Self::draw_gsps_overlay(&painter, image_rect, image);
+                            Self::draw_gsps_overlay(
+                                &painter,
+                                image_rect,
+                                image,
+                                self.current_frame,
+                            );
                         }
                     }
                 }
@@ -4059,35 +4070,29 @@ mod tests {
         let mut destination = HashMap::new();
         destination.insert(
             "1.2.3".to_string(),
-            GspsOverlay {
-                graphics: vec![GspsGraphic::Point {
-                    x: 1.0,
-                    y: 2.0,
-                    units: GspsUnits::Pixel,
-                }],
-            },
+            GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+                x: 1.0,
+                y: 2.0,
+                units: GspsUnits::Pixel,
+            }]),
         );
 
         let mut source = HashMap::new();
         source.insert(
             "1.2.3".to_string(),
-            GspsOverlay {
-                graphics: vec![GspsGraphic::Polyline {
-                    points: vec![(0.0, 0.0), (1.0, 1.0)],
-                    units: GspsUnits::Display,
-                    closed: false,
-                }],
-            },
+            GspsOverlay::from_graphics(vec![GspsGraphic::Polyline {
+                points: vec![(0.0, 0.0), (1.0, 1.0)],
+                units: GspsUnits::Display,
+                closed: false,
+            }]),
         );
         source.insert(
             "9.9.9".to_string(),
-            GspsOverlay {
-                graphics: vec![GspsGraphic::Point {
-                    x: 9.0,
-                    y: 9.0,
-                    units: GspsUnits::Pixel,
-                }],
-            },
+            GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+                x: 9.0,
+                y: 9.0,
+                units: GspsUnits::Pixel,
+            }]),
         );
 
         DicomViewerApp::merge_gsps_overlays(&mut destination, source);
@@ -4117,13 +4122,11 @@ mod tests {
 
     #[test]
     fn toggle_gsps_overlay_allows_group_overlay_when_other_viewport_is_selected() {
-        let overlay = GspsOverlay {
-            graphics: vec![GspsGraphic::Point {
-                x: 1.0,
-                y: 1.0,
-                units: GspsUnits::Pixel,
-            }],
-        };
+        let overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 1.0,
+            y: 1.0,
+            units: GspsUnits::Pixel,
+        }]);
         let texture_image = ColorImage {
             size: [1, 1],
             pixels: vec![egui::Color32::BLACK],
