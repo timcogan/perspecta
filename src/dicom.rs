@@ -77,15 +77,54 @@ pub enum GspsGraphic {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct GspsOverlayGraphic {
+    pub graphic: GspsGraphic,
+    pub referenced_frames: Option<Vec<usize>>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GspsOverlay {
-    pub graphics: Vec<GspsGraphic>,
+    pub graphics: Vec<GspsOverlayGraphic>,
 }
 
 impl GspsOverlay {
     pub fn is_empty(&self) -> bool {
         self.graphics.is_empty()
     }
+
+    #[cfg(test)]
+    pub fn from_graphics(graphics: Vec<GspsGraphic>) -> Self {
+        Self {
+            graphics: graphics
+                .into_iter()
+                .map(|graphic| GspsOverlayGraphic {
+                    graphic,
+                    referenced_frames: None,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn graphics_for_frame(
+        &self,
+        frame_index: usize,
+    ) -> impl Iterator<Item = &GspsGraphic> + '_ {
+        let dicom_frame_number = frame_index.saturating_add(1);
+        self.graphics.iter().filter_map(move |graphic| {
+            let applies = match graphic.referenced_frames.as_ref() {
+                Some(frames) => frames.contains(&dicom_frame_number),
+                None => true,
+            };
+            applies.then_some(&graphic.graphic)
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ReferencedImageTarget {
+    sop_instance_uid: String,
+    referenced_frames: Option<Vec<usize>>,
 }
 
 type MonoFrameCache = Arc<Mutex<Vec<Option<Arc<[i32]>>>>>;
@@ -269,14 +308,14 @@ fn parse_gsps_overlays(obj: &DefaultDicomObject) -> HashMap<String, GspsOverlay>
     const GRAPHIC_ANNOTATION_SEQUENCE: Tag = Tag(0x0070, 0x0001);
 
     let mut overlays_by_uid = HashMap::<String, GspsOverlay>::new();
-    let default_refs = collect_root_referenced_sop_instance_uids(obj, REFERENCED_SERIES_SEQUENCE);
+    let default_refs = collect_root_referenced_image_targets(obj, REFERENCED_SERIES_SEQUENCE);
 
     let Some(annotations) = sequence_items_from_object(obj, GRAPHIC_ANNOTATION_SEQUENCE) else {
         return overlays_by_uid;
     };
 
     for annotation in annotations {
-        let references = collect_item_referenced_sop_instance_uids(annotation);
+        let references = collect_item_referenced_image_targets(annotation);
         let target_refs = if references.is_empty() {
             &default_refs
         } else {
@@ -291,12 +330,15 @@ fn parse_gsps_overlays(obj: &DefaultDicomObject) -> HashMap<String, GspsOverlay>
             continue;
         }
 
-        for sop_uid in target_refs {
+        for target in target_refs {
             overlays_by_uid
-                .entry(sop_uid.clone())
+                .entry(target.sop_instance_uid.clone())
                 .or_default()
                 .graphics
-                .extend(graphics.clone());
+                .extend(graphics.iter().cloned().map(|graphic| GspsOverlayGraphic {
+                    graphic,
+                    referenced_frames: target.referenced_frames.clone(),
+                }));
         }
     }
 
@@ -304,49 +346,73 @@ fn parse_gsps_overlays(obj: &DefaultDicomObject) -> HashMap<String, GspsOverlay>
     overlays_by_uid
 }
 
-fn collect_root_referenced_sop_instance_uids(
+fn collect_root_referenced_image_targets(
     obj: &DefaultDicomObject,
     referenced_series_sequence: Tag,
-) -> Vec<String> {
+) -> Vec<ReferencedImageTarget> {
     const REFERENCED_IMAGE_SEQUENCE: Tag = Tag(0x0008, 0x1140);
-    const REFERENCED_SOP_INSTANCE_UID: Tag = Tag(0x0008, 0x1155);
 
-    let mut uids = Vec::new();
+    let mut targets = Vec::new();
     if let Some(series_items) = sequence_items_from_object(obj, referenced_series_sequence) {
         for series_item in series_items {
-            uids.extend(collect_item_referenced_sop_instance_uids(series_item));
+            targets.extend(collect_item_referenced_image_targets(series_item));
         }
     }
-    if uids.is_empty() {
+    if targets.is_empty() {
         if let Some(image_items) = sequence_items_from_object(obj, REFERENCED_IMAGE_SEQUENCE) {
             for image_item in image_items {
-                if let Some(uid) = read_item_string(image_item, REFERENCED_SOP_INSTANCE_UID) {
-                    uids.push(uid);
+                if let Some(target) = referenced_image_target_from_item(image_item) {
+                    targets.push(target);
                 }
             }
         }
     }
-    uids.sort();
-    uids.dedup();
-    uids
+    targets.sort();
+    targets.dedup();
+    targets
 }
 
-fn collect_item_referenced_sop_instance_uids(item: &InMemDicomObject) -> Vec<String> {
+fn collect_item_referenced_image_targets(item: &InMemDicomObject) -> Vec<ReferencedImageTarget> {
     const REFERENCED_IMAGE_SEQUENCE: Tag = Tag(0x0008, 0x1140);
-    const REFERENCED_SOP_INSTANCE_UID: Tag = Tag(0x0008, 0x1155);
 
-    let mut uids = Vec::new();
+    let mut targets = Vec::new();
     let Some(image_items) = sequence_items_from_item(item, REFERENCED_IMAGE_SEQUENCE) else {
-        return uids;
+        return targets;
     };
     for image_item in image_items {
-        if let Some(uid) = read_item_string(image_item, REFERENCED_SOP_INSTANCE_UID) {
-            uids.push(uid);
+        if let Some(target) = referenced_image_target_from_item(image_item) {
+            targets.push(target);
         }
     }
-    uids.sort();
-    uids.dedup();
-    uids
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn referenced_image_target_from_item(item: &InMemDicomObject) -> Option<ReferencedImageTarget> {
+    const REFERENCED_SOP_INSTANCE_UID: Tag = Tag(0x0008, 0x1155);
+    const REFERENCED_FRAME_NUMBER: Tag = Tag(0x0008, 0x1160);
+
+    let sop_instance_uid = read_item_string(item, REFERENCED_SOP_INSTANCE_UID)?;
+    let referenced_frames = read_item_multi_int(item, REFERENCED_FRAME_NUMBER)
+        .map(|frames| {
+            frames
+                .into_iter()
+                .filter_map(|frame| usize::try_from(frame).ok())
+                .filter(|frame| *frame > 0)
+                .collect::<Vec<_>>()
+        })
+        .filter(|frames| !frames.is_empty())
+        .map(|mut frames| {
+            frames.sort_unstable();
+            frames.dedup();
+            frames
+        });
+
+    Some(ReferencedImageTarget {
+        sop_instance_uid,
+        referenced_frames,
+    })
 }
 
 fn collect_graphics_from_annotation(annotation: &InMemDicomObject) -> Vec<GspsGraphic> {
@@ -498,6 +564,19 @@ fn read_item_multi_float(item: &InMemDicomObject, tag: Tag) -> Option<Vec<f32>> 
     item.element(tag)
         .ok()
         .and_then(|element| element.to_multi_float32().ok())
+}
+
+fn read_item_multi_int(item: &InMemDicomObject, tag: Tag) -> Option<Vec<i32>> {
+    item.element(tag)
+        .ok()
+        .and_then(|element| element.to_str().ok())
+        .map(|value| {
+            value
+                .split('\\')
+                .filter_map(|part| part.trim().parse::<i32>().ok())
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
 }
 
 pub fn load_dicom(path: &Path) -> Result<DicomImage> {
@@ -1265,6 +1344,23 @@ mod tests {
         )])
     }
 
+    fn referenced_image_item_with_frames(
+        sop_instance_uid: &str,
+        referenced_frames: &[i32],
+    ) -> InMemDicomObject {
+        let mut item = referenced_image_item(sop_instance_uid);
+        item.put(DataElement::new(
+            Tag(0x0008, 0x1160),
+            VR::IS,
+            referenced_frames
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join("\\"),
+        ));
+        item
+    }
+
     fn graphic_object_item(
         graphic_type: &str,
         graphic_data: &[f32],
@@ -1373,19 +1469,37 @@ mod tests {
     }
 
     #[test]
-    fn collect_referenced_sops_from_item_deduplicates() {
+    fn collect_referenced_image_targets_deduplicates_exact_matches() {
         let item = InMemDicomObject::from_element_iter([DataElement::new(
             Tag(0x0008, 0x1140),
             VR::SQ,
             DataSetSequence::from(vec![
                 referenced_image_item("1.2.3"),
                 referenced_image_item("1.2.3"),
+                referenced_image_item_with_frames("1.2.3", &[1, 3]),
+                referenced_image_item_with_frames("1.2.3", &[1, 3]),
                 referenced_image_item("2.4.6"),
             ]),
         )]);
 
-        let refs = collect_item_referenced_sop_instance_uids(&item);
-        assert_eq!(refs, vec!["1.2.3".to_string(), "2.4.6".to_string()]);
+        let refs = collect_item_referenced_image_targets(&item);
+        assert_eq!(
+            refs,
+            vec![
+                ReferencedImageTarget {
+                    sop_instance_uid: "1.2.3".to_string(),
+                    referenced_frames: None,
+                },
+                ReferencedImageTarget {
+                    sop_instance_uid: "1.2.3".to_string(),
+                    referenced_frames: Some(vec![1, 3]),
+                },
+                ReferencedImageTarget {
+                    sop_instance_uid: "2.4.6".to_string(),
+                    referenced_frames: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1457,6 +1571,60 @@ mod tests {
             .get("1.2.840.1")
             .expect("Overlay should be mapped to referenced SOP instance");
         assert_eq!(overlay.graphics.len(), 1);
+        assert!(overlay.graphics[0].referenced_frames.is_none());
+    }
+
+    #[test]
+    fn parse_gsps_overlays_tracks_annotation_referenced_frames() {
+        let annotation = InMemDicomObject::from_element_iter([
+            DataElement::new(
+                Tag(0x0008, 0x1140),
+                VR::SQ,
+                DataSetSequence::from(vec![referenced_image_item_with_frames(
+                    "1.2.840.1",
+                    &[2, 4],
+                )]),
+            ),
+            DataElement::new(
+                Tag(0x0070, 0x0009),
+                VR::SQ,
+                DataSetSequence::from(vec![graphic_object_item(
+                    "POINT",
+                    &[100.0, 120.0],
+                    "PIXEL",
+                    None,
+                )]),
+            ),
+        ]);
+
+        let gsps_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, GSPS_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "9.9.9.10"),
+            DataElement::new(
+                Tag(0x0070, 0x0001),
+                VR::SQ,
+                DataSetSequence::from(vec![annotation]),
+            ),
+        ]);
+
+        let gsps_obj = gsps_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(GSPS_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("9.9.9.10"),
+            )
+            .expect("GSPS test object should build file meta");
+
+        let overlays = parse_gsps_overlays(&gsps_obj);
+        let overlay = overlays
+            .get("1.2.840.1")
+            .expect("Overlay should be mapped to referenced SOP instance");
+        assert_eq!(overlay.graphics.len(), 1);
+        assert_eq!(overlay.graphics[0].referenced_frames, Some(vec![2, 4]));
+        assert_eq!(overlay.graphics_for_frame(0).count(), 0);
+        assert_eq!(overlay.graphics_for_frame(1).count(), 1);
+        assert_eq!(overlay.graphics_for_frame(3).count(), 1);
     }
 
     #[test]
@@ -1464,7 +1632,7 @@ mod tests {
         let series_item = InMemDicomObject::from_element_iter([DataElement::new(
             Tag(0x0008, 0x1140),
             VR::SQ,
-            DataSetSequence::from(vec![referenced_image_item("7.7.7.7")]),
+            DataSetSequence::from(vec![referenced_image_item_with_frames("7.7.7.7", &[3])]),
         )]);
         let annotation = InMemDicomObject::from_element_iter([DataElement::new(
             Tag(0x0070, 0x0009),
@@ -1506,5 +1674,9 @@ mod tests {
             overlays.contains_key("7.7.7.7"),
             "Root-level references should be used when annotation-level references are absent"
         );
+        let overlay = overlays
+            .get("7.7.7.7")
+            .expect("Overlay should exist for root-level referenced SOP instance");
+        assert_eq!(overlay.graphics[0].referenced_frames, Some(vec![3]));
     }
 }
