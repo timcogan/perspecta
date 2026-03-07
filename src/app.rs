@@ -426,8 +426,7 @@ impl DicomViewerApp {
         };
 
         let target_index = match targets.iter().position(|target| *target == current_target) {
-            Some(index) if self.gsps_overlay_visible => (index + 1) % targets.len(),
-            Some(index) => index,
+            Some(index) => (index + 1) % targets.len(),
             None => targets
                 .iter()
                 .position(|target| *target > current_target)
@@ -4365,6 +4364,31 @@ mod tests {
 
         app.jump_to_next_gsps_overlay(&ctx);
         assert_eq!(app.current_frame, 1);
+    }
+
+    #[test]
+    fn jump_to_next_gsps_overlay_advances_when_current_target_is_hidden() {
+        let overlay = GspsOverlay {
+            graphics: vec![crate::dicom::GspsOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 1.0,
+                    y: 1.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: Some(vec![2, 4]),
+            }],
+        };
+        let mut app = DicomViewerApp {
+            image: Some(DicomImage::test_stub_with_mono_frames(Some(overlay), 4)),
+            current_frame: 1,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+
+        app.jump_to_next_gsps_overlay(&ctx);
+
+        assert!(app.gsps_overlay_visible);
+        assert_eq!(app.current_frame, 3);
     }
 
     #[test]
