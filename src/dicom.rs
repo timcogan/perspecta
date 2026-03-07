@@ -1305,12 +1305,28 @@ fn min_max(values: &[i32]) -> Option<(i32, i32)> {
 #[cfg(test)]
 impl DicomImage {
     pub(crate) fn test_stub(gsps_overlay: Option<GspsOverlay>) -> Self {
+        Self::test_stub_with_mono_frames(gsps_overlay, 0)
+    }
+
+    pub(crate) fn test_stub_with_mono_frames(
+        gsps_overlay: Option<GspsOverlay>,
+        frame_count: usize,
+    ) -> Self {
+        let mono_frames = if frame_count == 0 {
+            MonoFrames::None
+        } else {
+            let frames = (0..frame_count)
+                .map(|frame_index| Arc::<[i32]>::from([frame_index as i32]))
+                .collect();
+            MonoFrames::Eager(frames)
+        };
+
         Self {
             width: 1,
             height: 1,
-            mono_frames: MonoFrames::None,
+            mono_frames,
             rgb_frames: RgbFrames::None,
-            frame_count: 0,
+            frame_count,
             color_mode: ImageColorMode::Monochrome,
             samples_per_pixel: 1,
             invert: false,

@@ -127,6 +127,12 @@ struct ActiveViewportState {
     current_frame: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GspsNavigationTarget {
+    viewport_index: usize,
+    frame_index: usize,
+}
+
 pub struct DicomViewerApp {
     image: Option<DicomImage>,
     current_single_path: Option<PathBuf>,
@@ -329,6 +335,129 @@ impl DicomViewerApp {
             return;
         }
         self.gsps_overlay_visible = !self.gsps_overlay_visible;
+    }
+
+    fn gsps_target_frames(image: &DicomImage, frame_limit: usize) -> Vec<usize> {
+        let frame_count = frame_limit.min(image.frame_count());
+        if frame_count == 0 {
+            return Vec::new();
+        }
+
+        let Some(overlay) = image.gsps_overlay.as_ref() else {
+            return Vec::new();
+        };
+        if overlay.is_empty() {
+            return Vec::new();
+        }
+
+        let mut frame_targets = Vec::new();
+        for graphic in &overlay.graphics {
+            match graphic.referenced_frames.as_ref() {
+                None => return (0..frame_count).collect(),
+                Some(referenced_frames) => {
+                    for frame_number in referenced_frames {
+                        let Some(frame_index) = frame_number.checked_sub(1) else {
+                            continue;
+                        };
+                        if frame_index < frame_count {
+                            frame_targets.push(frame_index);
+                        }
+                    }
+                }
+            }
+        }
+
+        frame_targets.sort_unstable();
+        frame_targets.dedup();
+        frame_targets
+    }
+
+    fn gsps_navigation_targets(&self) -> Vec<GspsNavigationTarget> {
+        if let Some(image) = self.image.as_ref() {
+            return Self::gsps_target_frames(image, image.frame_count())
+                .into_iter()
+                .map(|frame_index| GspsNavigationTarget {
+                    viewport_index: 0,
+                    frame_index,
+                })
+                .collect();
+        }
+
+        let common_frame_count = self.mammo_group_common_frame_count();
+        let mut targets = Vec::new();
+        for (viewport_index, viewport) in self.mammo_group.iter().enumerate() {
+            let Some(viewport) = viewport.as_ref() else {
+                continue;
+            };
+
+            for frame_index in Self::gsps_target_frames(&viewport.image, common_frame_count) {
+                targets.push(GspsNavigationTarget {
+                    viewport_index,
+                    frame_index,
+                });
+            }
+        }
+
+        targets
+    }
+
+    fn next_gsps_navigation_target(&self) -> Option<GspsNavigationTarget> {
+        let targets = self.gsps_navigation_targets();
+        if targets.is_empty() {
+            return None;
+        }
+
+        let current_target = if self.image.is_some() {
+            GspsNavigationTarget {
+                viewport_index: 0,
+                frame_index: self.current_frame,
+            }
+        } else {
+            let current_frame = self
+                .mammo_group
+                .get(self.mammo_selected_index)
+                .and_then(Option::as_ref)
+                .map(|viewport| viewport.current_frame)
+                .unwrap_or(0);
+            GspsNavigationTarget {
+                viewport_index: self.mammo_selected_index,
+                frame_index: current_frame,
+            }
+        };
+
+        let target_index = match targets.iter().position(|target| *target == current_target) {
+            Some(index) if self.gsps_overlay_visible => (index + 1) % targets.len(),
+            Some(index) => index,
+            None => targets
+                .iter()
+                .position(|target| *target > current_target)
+                .unwrap_or(0),
+        };
+        targets.get(target_index).copied()
+    }
+
+    fn jump_to_next_gsps_overlay(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.next_gsps_navigation_target() else {
+            log::debug!("No GSPS overlay target available for the current image or group.");
+            return;
+        };
+
+        self.gsps_overlay_visible = true;
+        self.last_cine_advance = Some(Instant::now());
+
+        if self.image.is_some() {
+            self.current_frame = target.frame_index;
+            self.rebuild_texture(ctx);
+            ctx.request_repaint();
+            return;
+        }
+
+        self.mammo_selected_index = target.viewport_index;
+        if self.set_mammo_group_frame(target.frame_index) {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else {
+            ctx.request_repaint();
+        }
     }
 
     fn is_supported_group_size(count: usize) -> bool {
@@ -2916,6 +3045,7 @@ impl eframe::App for DicomViewerApp {
         let mut close_requested = false;
         let mut c_pressed = false;
         let mut g_pressed = false;
+        let mut n_pressed = false;
         ctx.input_mut(|input| {
             if input.consume_key(egui::Modifiers::COMMAND, egui::Key::W) {
                 close_requested = true;
@@ -2926,6 +3056,7 @@ impl eframe::App for DicomViewerApp {
             }
             c_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::C);
             g_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::G);
+            n_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::N);
         });
         if close_requested {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -2940,6 +3071,9 @@ impl eframe::App for DicomViewerApp {
         }
         if g_pressed && !history_transition_pending {
             self.toggle_gsps_overlay();
+        }
+        if n_pressed && !history_transition_pending {
+            self.jump_to_next_gsps_overlay(ctx);
         }
 
         let mut open_dicoms_clicked = false;
@@ -3083,8 +3217,10 @@ impl eframe::App for DicomViewerApp {
         let mut active_state = self.active_viewport_state();
         let mut toggle_cine_clicked = false;
         let mut toggle_gsps_clicked = false;
+        let mut next_gsps_clicked = false;
         let mut request_rebuild = false;
         let has_active_gsps_overlay = self.has_available_gsps_overlay();
+        let has_gsps_navigation_target = self.next_gsps_navigation_target().is_some();
 
         if let Some(state) = active_state.as_mut() {
             let overlay_width = (ctx.screen_rect().width() * 0.5).clamp(340.0, 760.0);
@@ -3373,6 +3509,30 @@ impl eframe::App for DicomViewerApp {
                                         }
                                     },
                                 );
+
+                                if has_gsps_navigation_target {
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(controls_width, 0.0),
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if Self::add_action_control_button_no_border(
+                                                ui,
+                                                [
+                                                    CONTROL_ACTION_BUTTON_WIDTH,
+                                                    ui.spacing().interact_size.y,
+                                                ],
+                                                "Next GSPS (N)",
+                                            )
+                                            .on_hover_text(
+                                                "Jump to the next GSPS overlay and corresponding frame.",
+                                            )
+                                            .clicked()
+                                            {
+                                                next_gsps_clicked = true;
+                                            }
+                                        },
+                                    );
+                                }
                             }
                         });
                     });
@@ -3385,9 +3545,12 @@ impl eframe::App for DicomViewerApp {
         if toggle_gsps_clicked {
             self.toggle_gsps_overlay();
         }
+        if next_gsps_clicked {
+            self.jump_to_next_gsps_overlay(ctx);
+        }
 
         // Avoid applying stale W/L UI state while cycling history quickly with Tab.
-        if request_rebuild {
+        if request_rebuild && !next_gsps_clicked {
             if let Some(state) = active_state.as_ref() {
                 self.apply_active_viewport_state(state, ctx);
             }
@@ -4173,6 +4336,113 @@ mod tests {
 
         app.toggle_gsps_overlay();
         assert!(app.gsps_overlay_visible);
+    }
+
+    #[test]
+    fn jump_to_next_gsps_overlay_cycles_single_view_frames() {
+        let overlay = GspsOverlay {
+            graphics: vec![crate::dicom::GspsOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 1.0,
+                    y: 1.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: Some(vec![2, 4]),
+            }],
+        };
+        let mut app = DicomViewerApp {
+            image: Some(DicomImage::test_stub_with_mono_frames(Some(overlay), 4)),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+
+        app.jump_to_next_gsps_overlay(&ctx);
+        assert!(app.gsps_overlay_visible);
+        assert_eq!(app.current_frame, 1);
+
+        app.jump_to_next_gsps_overlay(&ctx);
+        assert_eq!(app.current_frame, 3);
+
+        app.jump_to_next_gsps_overlay(&ctx);
+        assert_eq!(app.current_frame, 1);
+    }
+
+    #[test]
+    fn jump_to_next_gsps_overlay_cycles_group_viewports_and_frames() {
+        let overlay_a = GspsOverlay {
+            graphics: vec![crate::dicom::GspsOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 1.0,
+                    y: 1.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: Some(vec![2]),
+            }],
+        };
+        let overlay_b = GspsOverlay {
+            graphics: vec![crate::dicom::GspsOverlayGraphic {
+                graphic: GspsGraphic::Polyline {
+                    points: vec![(0.0, 0.0), (1.0, 1.0)],
+                    units: GspsUnits::Display,
+                    closed: false,
+                },
+                referenced_frames: Some(vec![1]),
+            }],
+        };
+        let texture_image = ColorImage {
+            size: [1, 1],
+            pixels: vec![egui::Color32::BLACK],
+        };
+        let ctx = egui::Context::default();
+        let texture_a = ctx.load_texture(
+            "test-gsps-next-a",
+            texture_image.clone(),
+            TextureOptions::LINEAR,
+        );
+        let texture_b = ctx.load_texture("test-gsps-next-b", texture_image, TextureOptions::LINEAR);
+        let mut app = DicomViewerApp {
+            mammo_group: vec![
+                Some(MammoViewport {
+                    path: PathBuf::from("a.dcm"),
+                    image: DicomImage::test_stub_with_mono_frames(Some(overlay_a), 3),
+                    texture: texture_a,
+                    label: "A".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+                Some(MammoViewport {
+                    path: PathBuf::from("b.dcm"),
+                    image: DicomImage::test_stub_with_mono_frames(Some(overlay_b), 3),
+                    texture: texture_b,
+                    label: "B".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+            ],
+            mammo_selected_index: 0,
+            ..Default::default()
+        };
+
+        app.jump_to_next_gsps_overlay(&ctx);
+        assert!(app.gsps_overlay_visible);
+        assert_eq!(app.mammo_selected_index, 0);
+        assert_eq!(app.selected_mammo_frame_index(), 1);
+
+        app.jump_to_next_gsps_overlay(&ctx);
+        assert_eq!(app.mammo_selected_index, 1);
+        assert_eq!(app.selected_mammo_frame_index(), 0);
+
+        app.jump_to_next_gsps_overlay(&ctx);
+        assert_eq!(app.mammo_selected_index, 0);
+        assert_eq!(app.selected_mammo_frame_index(), 1);
     }
 
     #[test]
