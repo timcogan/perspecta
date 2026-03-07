@@ -1224,6 +1224,33 @@ fn min_max(values: &[i32]) -> Option<(i32, i32)> {
 }
 
 #[cfg(test)]
+impl DicomImage {
+    pub(crate) fn test_stub(gsps_overlay: Option<GspsOverlay>) -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            mono_frames: MonoFrames::None,
+            rgb_frames: RgbFrames::None,
+            frame_count: 0,
+            color_mode: ImageColorMode::Monochrome,
+            samples_per_pixel: 1,
+            invert: false,
+            window_center: 0.0,
+            window_width: 1.0,
+            min_value: 0,
+            max_value: 0,
+            recommended_cine_fps: None,
+            view_position: None,
+            image_laterality: None,
+            instance_number: None,
+            sop_instance_uid: None,
+            gsps_overlay,
+            metadata: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use dicom_core::value::DataSetSequence;
