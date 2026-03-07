@@ -57,6 +57,7 @@ struct PreparedLoadPaths {
     image_paths: Vec<PathBuf>,
     gsps_overlays: HashMap<String, GspsOverlay>,
     gsps_files_found: usize,
+    other_files_found: usize,
 }
 
 enum HistoryPreloadResult {
@@ -283,7 +284,9 @@ impl DicomViewerApp {
                 Ok(DicomPathKind::Image) | Err(_) => {
                     prepared.image_paths.push(path);
                 }
-                Ok(DicomPathKind::Other) => {}
+                Ok(DicomPathKind::Other) => {
+                    prepared.other_files_found = prepared.other_files_found.saturating_add(1);
+                }
             }
         }
 
@@ -698,7 +701,7 @@ impl DicomViewerApp {
             return;
         };
         self.pending_local_open_armed = false;
-        self.load_selected_paths(paths, ctx);
+        let _ = self.load_selected_paths(paths, ctx);
     }
 
     fn clear_single_viewer(&mut self) {
@@ -1176,7 +1179,7 @@ impl DicomViewerApp {
         }
 
         let active_group = open_group.min(groups.len().saturating_sub(1));
-        self.load_selected_paths(groups[active_group].clone(), ctx);
+        let _ = self.load_selected_paths(groups[active_group].clone(), ctx);
         self.preload_non_active_groups_into_history(&preload_groups, active_group);
     }
 
@@ -1404,7 +1407,7 @@ impl DicomViewerApp {
             match expected {
                 1 => {
                     self.dicomweb_active_group_paths.push(path.clone());
-                    self.load_selected_paths(vec![path], ctx);
+                    let _ = self.load_selected_paths(vec![path], ctx);
                 }
                 count if Self::is_supported_multi_view_group_size(count) => {
                     match classify_dicom_path(&path) {
@@ -1577,15 +1580,7 @@ impl DicomViewerApp {
             Ok(result) => match result {
                 Ok(download_result) => match download_result {
                     DicomWebDownloadResult::Single(paths) => {
-                        self.load_selected_paths(paths, ctx);
-                        self.dicomweb_active_group_expected = None;
-                        self.dicomweb_active_group_paths.clear();
-                        self.dicomweb_active_pending_paths.clear();
-                        self.dicomweb_active_path_receiver = None;
-                        self.mammo_load_sender = None;
-                        self.history_pushed_for_active_group = false;
-                        self.clear_load_error();
-                        log::info!("Loaded study from DICOMweb.");
+                        let _ = self.load_selected_paths(paths, ctx);
                     }
                     DicomWebDownloadResult::Grouped { groups, open_group } => {
                         let prepared_groups = groups
@@ -1844,9 +1839,11 @@ impl DicomViewerApp {
         }
     }
 
-    fn load_selected_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
-        self.clear_load_error();
-        let prepared = Self::prepare_load_paths(paths);
+    fn apply_prepared_load_paths(
+        &mut self,
+        prepared: PreparedLoadPaths,
+        ctx: &egui::Context,
+    ) -> Result<(), ()> {
         let paths = prepared.image_paths;
         if !paths.is_empty() || prepared.gsps_files_found > 0 {
             self.sync_current_state_to_history();
@@ -1860,12 +1857,19 @@ impl DicomViewerApp {
                 self.set_load_error("GSPS detected, but no displayable DICOM image was selected.");
                 log::warn!("GSPS detected, but no displayable DICOM image was selected.");
                 ctx.request_repaint();
+                return Err(());
             }
-            return;
+            if prepared.other_files_found > 0 {
+                self.set_load_error("Selected DICOM objects are not displayable images.");
+                log::warn!("Selected DICOM objects are not displayable images.");
+                ctx.request_repaint();
+                return Err(());
+            }
+            return Err(());
         }
 
         match paths.len() {
-            0 => {}
+            0 => Err(()),
             1 => {
                 self.single_load_receiver = None;
                 self.mammo_load_receiver = None;
@@ -1874,17 +1878,26 @@ impl DicomViewerApp {
                 if let Some(path) = paths.into_iter().next() {
                     self.load_path(path, ctx);
                 }
+                Ok(())
             }
             count if Self::is_supported_multi_view_group_size(count) => {
-                self.load_mammo_group_paths(paths, ctx)
+                self.load_mammo_group_paths(paths, ctx);
+                Ok(())
             }
             other => {
                 let err = Self::format_select_paths_count_error(other);
                 self.set_load_error(err.clone());
                 log::warn!("{err}");
                 ctx.request_repaint();
+                Err(())
             }
         }
+    }
+
+    fn load_selected_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) -> Result<(), ()> {
+        self.clear_load_error();
+        let prepared = Self::prepare_load_paths(paths);
+        self.apply_prepared_load_paths(prepared, ctx)
     }
 
     fn load_path(&mut self, path: PathBuf, ctx: &egui::Context) {
@@ -4329,8 +4342,66 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = DicomViewerApp::format_select_paths_count_error(5);
 
-        app.load_selected_paths(paths, &ctx);
+        let result = app.load_selected_paths(paths, &ctx);
+
+        assert!(result.is_err());
+        assert_eq!(app.load_error_message.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn apply_prepared_load_paths_with_other_only_sets_user_visible_error() {
+        let mut app = DicomViewerApp::default();
+        let ctx = egui::Context::default();
+
+        let result = app.apply_prepared_load_paths(
+            PreparedLoadPaths {
+                other_files_found: 1,
+                ..Default::default()
+            },
+            &ctx,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            app.load_error_message.as_deref(),
+            Some("Selected DICOM objects are not displayable images.")
+        );
+    }
+
+    #[test]
+    fn poll_dicomweb_single_preserves_error_on_sync_rejection() {
+        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        tx.send(Ok(DicomWebDownloadResult::Single(
+            (0..5)
+                .map(|index| PathBuf::from(format!("invalid-{index}.dcm")))
+                .collect::<Vec<_>>(),
+        )))
+        .expect("single result should send");
+
+        let mut app = DicomViewerApp {
+            dicomweb_receiver: Some(rx),
+            dicomweb_active_group_expected: Some(3),
+            dicomweb_active_group_paths: vec![PathBuf::from("active-a.dcm")],
+            dicomweb_active_pending_paths: VecDeque::from(vec![PathBuf::from("pending.dcm")]),
+            history_pushed_for_active_group: true,
+            load_error_message: Some("Previous load failed.".to_string()),
+            ..Default::default()
+        };
+        let expected = DicomViewerApp::format_select_paths_count_error(5);
+
+        let ctx = egui::Context::default();
+        app.poll_dicomweb_download(&ctx);
 
         assert_eq!(app.load_error_message.as_deref(), Some(expected.as_str()));
+        assert_eq!(app.dicomweb_active_group_expected, Some(3));
+        assert_eq!(
+            app.dicomweb_active_group_paths,
+            vec![PathBuf::from("active-a.dcm")]
+        );
+        assert_eq!(
+            app.dicomweb_active_pending_paths,
+            VecDeque::from(vec![PathBuf::from("pending.dcm")])
+        );
+        assert!(app.history_pushed_for_active_group);
     }
 }
