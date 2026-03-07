@@ -1231,7 +1231,7 @@ impl DicomImage {
             height: 1,
             mono_frames: MonoFrames::None,
             rgb_frames: RgbFrames::None,
-            frame_count: 1,
+            frame_count: 0,
             color_mode: ImageColorMode::Monochrome,
             samples_per_pixel: 1,
             invert: false,

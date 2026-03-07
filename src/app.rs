@@ -326,6 +326,7 @@ impl DicomViewerApp {
                 "No GSPS overlay available for the current image or group.".to_string();
             return;
         }
+        self.status_line.clear();
         self.gsps_overlay_visible = !self.gsps_overlay_visible;
     }
 
@@ -4058,6 +4059,26 @@ mod tests {
                 }),
             ],
             mammo_selected_index: 0,
+            ..Default::default()
+        };
+
+        app.toggle_gsps_overlay();
+        assert!(app.gsps_overlay_visible);
+        assert!(app.status_line.is_empty());
+    }
+
+    #[test]
+    fn toggle_gsps_overlay_clears_stale_error_on_success() {
+        let overlay = GspsOverlay {
+            graphics: vec![GspsGraphic::Point {
+                x: 1.0,
+                y: 1.0,
+                units: GspsUnits::Pixel,
+            }],
+        };
+        let mut app = DicomViewerApp {
+            image: Some(DicomImage::test_stub(Some(overlay))),
+            status_line: "No GSPS overlay available for the current image or group.".to_string(),
             ..Default::default()
         };
 
