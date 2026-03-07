@@ -394,20 +394,21 @@ fn referenced_image_target_from_item(item: &InMemDicomObject) -> Option<Referenc
     const REFERENCED_FRAME_NUMBER: Tag = Tag(0x0008, 0x1160);
 
     let sop_instance_uid = read_item_string(item, REFERENCED_SOP_INSTANCE_UID)?;
-    let referenced_frames = read_item_multi_int(item, REFERENCED_FRAME_NUMBER)
-        .map(|frames| {
-            frames
-                .into_iter()
-                .filter_map(|frame| usize::try_from(frame).ok())
-                .filter(|frame| *frame > 0)
-                .collect::<Vec<_>>()
-        })
-        .filter(|frames| !frames.is_empty())
-        .map(|mut frames| {
-            frames.sort_unstable();
-            frames.dedup();
-            frames
-        });
+    let referenced_frames = read_item_multi_int(item, REFERENCED_FRAME_NUMBER).map(|frames| {
+        let mut frames = frames
+            .into_iter()
+            .filter_map(|frame| usize::try_from(frame).ok())
+            .filter(|frame| *frame > 0)
+            .collect::<Vec<_>>();
+        frames.sort_unstable();
+        frames.dedup();
+        if frames.is_empty() {
+            log::warn!(
+                "GSPS ReferencedFrameNumber was present but did not contain any usable frames."
+            );
+        }
+        frames
+    });
 
     Some(ReferencedImageTarget {
         sop_instance_uid,
@@ -576,7 +577,6 @@ fn read_item_multi_int(item: &InMemDicomObject, tag: Tag) -> Option<Vec<i32>> {
                 .filter_map(|part| part.trim().parse::<i32>().ok())
                 .collect::<Vec<_>>()
         })
-        .filter(|values| !values.is_empty())
 }
 
 pub fn load_dicom(path: &Path) -> Result<DicomImage> {
@@ -1625,6 +1625,58 @@ mod tests {
         assert_eq!(overlay.graphics_for_frame(0).count(), 0);
         assert_eq!(overlay.graphics_for_frame(1).count(), 1);
         assert_eq!(overlay.graphics_for_frame(3).count(), 1);
+    }
+
+    #[test]
+    fn parse_gsps_overlays_preserves_invalid_referenced_frames_as_empty() {
+        let annotation = InMemDicomObject::from_element_iter([
+            DataElement::new(
+                Tag(0x0008, 0x1140),
+                VR::SQ,
+                DataSetSequence::from(vec![referenced_image_item_with_frames(
+                    "1.2.840.1",
+                    &[0, -1],
+                )]),
+            ),
+            DataElement::new(
+                Tag(0x0070, 0x0009),
+                VR::SQ,
+                DataSetSequence::from(vec![graphic_object_item(
+                    "POINT",
+                    &[100.0, 120.0],
+                    "PIXEL",
+                    None,
+                )]),
+            ),
+        ]);
+
+        let gsps_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, GSPS_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "9.9.9.11"),
+            DataElement::new(
+                Tag(0x0070, 0x0001),
+                VR::SQ,
+                DataSetSequence::from(vec![annotation]),
+            ),
+        ]);
+
+        let gsps_obj = gsps_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(GSPS_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("9.9.9.11"),
+            )
+            .expect("GSPS test object should build file meta");
+
+        let overlays = parse_gsps_overlays(&gsps_obj);
+        let overlay = overlays
+            .get("1.2.840.1")
+            .expect("Overlay should be mapped to referenced SOP instance");
+        assert_eq!(overlay.graphics.len(), 1);
+        assert_eq!(overlay.graphics[0].referenced_frames, Some(Vec::new()));
+        assert_eq!(overlay.graphics_for_frame(0).count(), 0);
+        assert_eq!(overlay.graphics_for_frame(1).count(), 0);
     }
 
     #[test]
