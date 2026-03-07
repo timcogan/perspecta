@@ -163,6 +163,7 @@ pub struct DicomViewerApp {
     single_view_pan: egui::Vec2,
     single_view_frame_scroll_accum: f32,
     frame_wait_pending: bool,
+    load_error_message: Option<String>,
 }
 
 impl Default for DicomViewerApp {
@@ -216,6 +217,7 @@ impl DicomViewerApp {
             single_view_pan: egui::Vec2::ZERO,
             single_view_frame_scroll_accum: 0.0,
             frame_wait_pending: false,
+            load_error_message: None,
         }
     }
 
@@ -274,7 +276,7 @@ impl DicomViewerApp {
                             Self::merge_gsps_overlays(&mut prepared.gsps_overlays, overlays)
                         }
                         Err(err) => {
-                            log::warn!("Could not parse GSPS {}: {err:#}", path.display());
+                            log::warn!("Could not parse GSPS input: {err:#}");
                         }
                     }
                 }
@@ -645,7 +647,7 @@ impl DicomViewerApp {
         let fields = ordered_visible_metadata_fields(&self.visible_metadata_fields);
         let contents = render_settings_toml(&fields);
         if let Err(err) = fs::write(path, contents) {
-            log::warn!("Could not write settings file {}: {err}", path.display());
+            log::warn!("Could not write settings file: {err}");
         }
     }
 
@@ -716,6 +718,14 @@ impl DicomViewerApp {
     fn reset_single_view_transform(&mut self) {
         self.single_view_zoom = 1.0;
         self.single_view_pan = egui::Vec2::ZERO;
+    }
+
+    fn clear_load_error(&mut self) {
+        self.load_error_message = None;
+    }
+
+    fn set_load_error(&mut self, message: impl Into<String>) {
+        self.load_error_message = Some(message.into());
     }
 
     fn next_history_texture_name(&mut self, prefix: &str) -> String {
@@ -1144,16 +1154,20 @@ impl DicomViewerApp {
         ctx: &egui::Context,
     ) {
         if groups.is_empty() {
+            self.set_load_error("Launch request had no groups to open.");
             log::warn!("Launch request had no groups to open.");
             return;
         }
 
+        self.clear_load_error();
         let mut preload_groups = Vec::with_capacity(groups.len());
         for (index, group) in groups.iter().enumerate() {
             let prepared = Self::prepare_load_paths(group.clone());
             let image_count = prepared.image_paths.len();
             if !Self::is_supported_group_size(image_count) {
-                log::warn!("{}", Self::format_group_size_error(index + 1, image_count));
+                let err = Self::format_group_size_error(index + 1, image_count);
+                self.set_load_error(err.clone());
+                log::warn!("{err}");
                 return;
             }
             preload_groups.push(prepared);
@@ -1170,6 +1184,7 @@ impl DicomViewerApp {
             return;
         }
 
+        self.clear_load_error();
         self.sync_current_state_to_history();
         self.history_preload_receiver = None;
         self.mammo_load_receiver = None;
@@ -1196,6 +1211,7 @@ impl DicomViewerApp {
             return;
         }
 
+        self.clear_load_error();
         self.sync_current_state_to_history();
         self.history_preload_receiver = None;
         self.mammo_load_receiver = None;
@@ -1236,8 +1252,7 @@ impl DicomViewerApp {
 
         let Some(slot_index) = slot else {
             return Err(format!(
-                "Discarded streamed image {}: no available mammo slot (loaded={}, capacity={})",
-                pending.path.display(),
+                "Discarded streamed image: no available mammo slot (loaded={}, capacity={})",
                 self.loaded_mammo_count(),
                 self.mammo_group.len()
             ));
@@ -1250,10 +1265,7 @@ impl DicomViewerApp {
         let Some(color_image) =
             Self::render_image_frame(&pending.image, 0, default_center, default_width)
         else {
-            return Err(format!(
-                "Could not prepare preview for {} (no decodable frame).",
-                pending.path.display()
-            ));
+            return Err("Could not prepare preview for image (no decodable frame).".to_string());
         };
 
         let texture_name = format!("mammo-group:{}", pending.path.display());
@@ -1411,10 +1423,7 @@ impl DicomViewerApp {
                                 self.sync_current_state_to_history();
                             }
                             Err(err) => {
-                                log::warn!(
-                                    "Could not parse streamed GSPS {}: {err:#}",
-                                    path.display()
-                                );
+                                log::warn!("Could not parse streamed GSPS input: {err:#}");
                             }
                         },
                         Ok(DicomPathKind::Image) | Err(_) => {
@@ -1423,14 +1432,16 @@ impl DicomViewerApp {
                                 thread::spawn(move || {
                                     let result = match load_dicom(&path) {
                                         Ok(image) => Ok(PendingLoad { path, image }),
-                                        Err(err) => Err(format!(
-                                            "Error opening streamed DICOM {}: {err:#}",
-                                            path.display()
-                                        )),
+                                        Err(err) => {
+                                            Err(format!("Error opening streamed DICOM: {err:#}"))
+                                        }
                                     };
                                     let _ = sender.send(result);
                                 });
                             } else {
+                                self.set_load_error(
+                                    "Streaming multi-view load channel was not available.",
+                                );
                                 log::error!("Streaming multi-view load channel not available.");
                                 self.mammo_group.clear();
                                 self.mammo_load_receiver = None;
@@ -1444,7 +1455,7 @@ impl DicomViewerApp {
                             }
                         }
                         Ok(DicomPathKind::Other) => {
-                            log::warn!("Ignoring streamed non-image DICOM {}.", path.display());
+                            log::warn!("Ignoring streamed non-image DICOM input.");
                         }
                     }
                 }
@@ -1501,8 +1512,7 @@ impl DicomViewerApp {
                                 Self::render_image_frame(&image, 0, center, width)
                             else {
                                 log::warn!(
-                                    "History preload skipped group viewport {} (instance {:?}).",
-                                    path.display(),
+                                    "History preload skipped group viewport (instance {:?}).",
                                     image.instance_number
                                 );
                                 continue;
@@ -1572,6 +1582,7 @@ impl DicomViewerApp {
                         self.dicomweb_active_path_receiver = None;
                         self.mammo_load_sender = None;
                         self.history_pushed_for_active_group = false;
+                        self.clear_load_error();
                         log::info!("Loaded study from DICOMweb.");
                     }
                     DicomWebDownloadResult::Grouped { groups, open_group } => {
@@ -1631,10 +1642,12 @@ impl DicomViewerApp {
                             self.mammo_load_sender = None;
                             self.history_pushed_for_active_group = false;
                         }
+                        self.clear_load_error();
                         log::info!("Loaded grouped study from DICOMweb.");
                     }
                 },
                 Err(err) => {
+                    self.set_load_error("DICOMweb request failed.");
                     log::error!("DICOMweb error: {err}");
                     self.dicomweb_active_group_expected = None;
                     self.dicomweb_active_group_paths.clear();
@@ -1649,6 +1662,7 @@ impl DicomViewerApp {
                 ctx.request_repaint_after(Duration::from_millis(16));
             }
             Err(TryRecvError::Disconnected) => {
+                self.set_load_error("DICOMweb download worker disconnected.");
                 log::error!("DICOMweb download worker disconnected.");
                 self.dicomweb_active_group_expected = None;
                 self.dicomweb_active_group_paths.clear();
@@ -1671,6 +1685,7 @@ impl DicomViewerApp {
             Ok(result) => match result {
                 Ok(pending) => {
                     if let Err(err) = self.insert_loaded_mammo(pending, ctx) {
+                        self.set_load_error("Failed to load multi-view DICOM group.");
                         log::error!("{err}");
                         self.mammo_group.clear();
                         self.mammo_load_receiver = None;
@@ -1689,6 +1704,7 @@ impl DicomViewerApp {
                         return;
                     }
                     self.reorder_complete_mammo_group();
+                    self.clear_load_error();
                     if self.mammo_group_complete()
                         && (self
                             .dicomweb_active_group_expected
@@ -1709,6 +1725,7 @@ impl DicomViewerApp {
                     ctx.request_repaint();
                 }
                 Err(err) => {
+                    self.set_load_error("Failed to load multi-view DICOM group.");
                     log::error!("{err}");
                     self.mammo_group.clear();
                     self.history_pushed_for_active_group = false;
@@ -1748,6 +1765,7 @@ impl DicomViewerApp {
         self.mammo_load_sender = None;
         if self.mammo_group_complete() {
             self.reorder_complete_mammo_group();
+            self.clear_load_error();
             if !self.history_pushed_for_active_group {
                 let loaded = self
                     .mammo_group
@@ -1758,6 +1776,9 @@ impl DicomViewerApp {
                 self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
             }
         } else {
+            self.set_load_error(
+                "Multi-view group load incomplete: worker exited before all images were received.",
+            );
             log::warn!(
                 "Multi-view group load incomplete: worker exited before all images were received."
             );
@@ -1773,8 +1794,12 @@ impl DicomViewerApp {
         match receiver.try_recv() {
             Ok(result) => {
                 match result {
-                    Ok(pending) => self.apply_loaded_single(pending.path, pending.image, ctx),
+                    Ok(pending) => {
+                        self.apply_loaded_single(pending.path, pending.image, ctx);
+                        self.clear_load_error();
+                    }
                     Err(err) => {
+                        self.set_load_error("Failed to load selected DICOM.");
                         log::error!("{err}");
                     }
                 }
@@ -1787,6 +1812,7 @@ impl DicomViewerApp {
             }
             Err(TryRecvError::Disconnected) => {
                 self.single_load_receiver = None;
+                self.set_load_error("Selected DICOM load did not complete.");
                 log::error!("Single-image load incomplete: worker exited before sending a result.");
                 ctx.request_repaint();
             }
@@ -1806,6 +1832,7 @@ impl DicomViewerApp {
     }
 
     fn load_selected_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        self.clear_load_error();
         let prepared = Self::prepare_load_paths(paths);
         let paths = prepared.image_paths;
         if !paths.is_empty() || prepared.gsps_files_found > 0 {
@@ -1817,7 +1844,9 @@ impl DicomViewerApp {
 
         if paths.is_empty() {
             if prepared.gsps_files_found > 0 {
+                self.set_load_error("GSPS detected, but no displayable DICOM image was selected.");
                 log::warn!("GSPS detected, but no displayable DICOM image was selected.");
+                ctx.request_repaint();
             }
             return;
         }
@@ -1837,7 +1866,10 @@ impl DicomViewerApp {
                 self.load_mammo_group_paths(paths, ctx)
             }
             other => {
-                log::warn!("{}", Self::format_select_paths_count_error(other));
+                let err = Self::format_select_paths_count_error(other);
+                self.set_load_error(err.clone());
+                log::warn!("{err}");
+                ctx.request_repaint();
             }
         }
     }
@@ -1847,12 +1879,13 @@ impl DicomViewerApp {
         self.mammo_load_sender = None;
         self.single_load_receiver = None;
         self.history_pushed_for_active_group = false;
-        log::info!("Loading {}...", path.display());
+        self.clear_load_error();
+        log::info!("Loading selected DICOM...");
         let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
         thread::spawn(move || {
             let result = match load_dicom(&path) {
                 Ok(image) => Ok(PendingLoad { path, image }),
-                Err(err) => Err(format!("Error opening {}: {err:#}", path.display())),
+                Err(err) => Err(format!("Error opening selected DICOM: {err:#}")),
             };
             let _ = tx.send(result);
         });
@@ -1864,6 +1897,7 @@ impl DicomViewerApp {
         let mut image = image;
         Self::attach_matching_gsps_overlay(&mut image, &self.pending_gsps_overlays);
         self.gsps_overlay_visible = false;
+        self.clear_load_error();
 
         self.window_center = image.window_center;
         self.window_width = image.window_width;
@@ -1898,12 +1932,14 @@ impl DicomViewerApp {
                 ctx,
             );
         }
-        log::info!("Loaded {}.", path.display());
+        log::info!("Loaded selected DICOM.");
     }
 
     fn load_mammo_group_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
         if !Self::is_supported_multi_view_group_size(paths.len()) {
-            log::warn!("{}", Self::format_multi_view_size_error(paths.len()));
+            let err = Self::format_multi_view_size_error(paths.len());
+            self.set_load_error(err.clone());
+            log::warn!("{err}");
             return;
         }
 
@@ -1913,6 +1949,7 @@ impl DicomViewerApp {
         self.single_load_receiver = None;
         self.history_pushed_for_active_group = false;
         self.clear_single_viewer();
+        self.clear_load_error();
         self.mammo_group = (0..group_len).map(|_| None).collect();
         self.mammo_selected_index = 0;
         self.cine_mode = false;
@@ -1930,7 +1967,7 @@ impl DicomViewerApp {
                         let _ = tx.send(Ok(PendingLoad { path, image }));
                     }
                     Err(err) => {
-                        let _ = tx.send(Err(format!("Error opening {}: {err:#}", path.display())));
+                        let _ = tx.send(Err(format!("Error opening DICOM in group: {err:#}")));
                         return;
                     }
                 }
@@ -3485,6 +3522,46 @@ impl eframe::App for DicomViewerApp {
                 });
         }
 
+        if let Some(message) = self.load_error_message.clone() {
+            let mut dismiss_error = false;
+            egui::Area::new(egui::Id::new("load-error-overlay"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 36.0))
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_black_alpha(220))
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(72)))
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(message)
+                                        .color(egui::Color32::from_rgb(224, 96, 96)),
+                                );
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("×")
+                                                .color(egui::Color32::from_gray(190)),
+                                        )
+                                        .small()
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::NONE),
+                                    )
+                                    .clicked()
+                                {
+                                    dismiss_error = true;
+                                }
+                            });
+                        });
+                });
+            if dismiss_error {
+                self.clear_load_error();
+                ctx.request_repaint();
+            }
+        }
+
         if let Some(index) = open_history_index {
             self.queue_history_open(index);
         }
@@ -4045,5 +4122,62 @@ mod tests {
 
         app.toggle_gsps_overlay();
         assert!(app.gsps_overlay_visible);
+    }
+
+    #[test]
+    fn poll_single_load_sets_user_visible_error_on_failure() {
+        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        tx.send(Err(
+            "Error opening selected DICOM: decode failed".to_string()
+        ))
+        .expect("failure should send");
+
+        let mut app = DicomViewerApp {
+            single_load_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_single_load(&ctx);
+
+        assert_eq!(
+            app.load_error_message.as_deref(),
+            Some("Failed to load selected DICOM.")
+        );
+    }
+
+    #[test]
+    fn poll_single_load_clears_user_visible_error_on_success() {
+        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        tx.send(Ok(PendingLoad {
+            path: PathBuf::from("selected.dcm"),
+            image: DicomImage::test_stub(None),
+        }))
+        .expect("success should send");
+
+        let mut app = DicomViewerApp {
+            single_load_receiver: Some(rx),
+            load_error_message: Some("Previous load failed.".to_string()),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_single_load(&ctx);
+
+        assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn load_selected_paths_with_invalid_count_sets_user_visible_error() {
+        let mut app = DicomViewerApp::default();
+        let ctx = egui::Context::default();
+        let paths = (0..5)
+            .map(|index| PathBuf::from(format!("invalid-{index}.dcm")))
+            .collect::<Vec<_>>();
+        let expected = DicomViewerApp::format_select_paths_count_error(5);
+
+        app.load_selected_paths(paths, &ctx);
+
+        assert_eq!(app.load_error_message.as_deref(), Some(expected.as_str()));
     }
 }

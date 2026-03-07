@@ -6,17 +6,18 @@ mod logging;
 mod mammo;
 mod renderer;
 
+use std::io;
+
 fn main() -> eframe::Result<()> {
     logging::init().map_err(|err| eframe::Error::AppCreation(Box::new(err)))?;
 
     let cli_args = std::env::args().skip(1).collect::<Vec<_>>();
-    let initial_request = match launch::parse_launch_request_from_args(&cli_args) {
-        Ok(request) => request,
-        Err(err) => {
-            log::error!("Launch URL/args error: {err}");
-            None
-        }
-    };
+    let initial_request = launch::parse_launch_request_from_args(&cli_args).map_err(|err| {
+        eframe::Error::AppCreation(Box::new(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Launch URL/args error: {err}"),
+        )))
+    })?;
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
