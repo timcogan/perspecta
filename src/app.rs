@@ -32,6 +32,7 @@ const VALID_GROUP_SIZES: &[usize] = &[1, 2, 3, 4, 8];
 const PERSPECTA_BRAND_BLUE: egui::Color32 = egui::Color32::from_rgb(14, 165, 233);
 const CONTROL_VALUE_WIDTH: f32 = 64.0;
 const CONTROL_ACTION_BUTTON_WIDTH: f32 = 100.0;
+const FILE_DROP_OVERLAY_WIDTH: f32 = 420.0;
 
 #[derive(Clone)]
 struct MammoViewport {
@@ -811,6 +812,58 @@ impl DicomViewerApp {
         }
         self.pending_local_open_paths = Some(paths);
         self.pending_local_open_armed = false;
+    }
+
+    fn local_paths_from_dropped_files(dropped_files: &[egui::DroppedFile]) -> Vec<PathBuf> {
+        dropped_files
+            .iter()
+            .filter_map(|file| file.path.clone())
+            .collect()
+    }
+
+    fn hovered_file_count(hovered_files: &[egui::HoveredFile]) -> usize {
+        let local_path_count = hovered_files
+            .iter()
+            .filter(|file| file.path.is_some())
+            .count();
+        if local_path_count > 0 {
+            local_path_count
+        } else {
+            hovered_files.len()
+        }
+    }
+
+    fn file_drop_overlay_heading(hovered_files: &[egui::HoveredFile]) -> String {
+        if !hovered_files.is_empty() && hovered_files.iter().all(|file| file.path.is_none()) {
+            return "Only local files can be dropped here".to_string();
+        }
+
+        match Self::hovered_file_count(hovered_files) {
+            0 => "Drop DICOM files to open them".to_string(),
+            1 => "Drop 1 file to open it".to_string(),
+            count => format!("Drop {count} files to open them"),
+        }
+    }
+
+    fn apply_dropped_files(&mut self, dropped_files: &[egui::DroppedFile], ctx: &egui::Context) {
+        if dropped_files.is_empty() {
+            return;
+        }
+
+        let paths = Self::local_paths_from_dropped_files(dropped_files);
+        if paths.is_empty() {
+            let message = "Dropped items did not include readable local file paths.";
+            self.set_load_error(message);
+            log::warn!("{message}");
+            ctx.request_repaint();
+            return;
+        }
+
+        log::info!("Opening {} dropped file(s).", paths.len());
+        self.clear_load_error();
+        self.queue_local_paths_open(paths);
+        ctx.set_cursor_icon(egui::CursorIcon::Progress);
+        ctx.request_repaint();
     }
 
     fn process_pending_local_open(&mut self, ctx: &egui::Context) {
@@ -1967,6 +2020,43 @@ impl DicomViewerApp {
         }
     }
 
+    fn show_file_drop_overlay(&self, ctx: &egui::Context, hovered_files: &[egui::HoveredFile]) {
+        if hovered_files.is_empty() {
+            return;
+        }
+
+        let overlay_rect = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("file-drop-backdrop"),
+        ));
+        painter.rect_filled(overlay_rect, 0.0, egui::Color32::from_black_alpha(168));
+
+        let heading = Self::file_drop_overlay_heading(hovered_files);
+        egui::Area::new(egui::Id::new("file-drop-overlay"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(egui::Color32::from_black_alpha(228))
+                    .stroke(egui::Stroke::NONE)
+                    .rounding(egui::Rounding::same(12.0))
+                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(FILE_DROP_OVERLAY_WIDTH);
+                        ui.set_max_width(FILE_DROP_OVERLAY_WIDTH);
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new(heading).strong().size(24.0));
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new("Drop DICOM files anywhere in the window.")
+                                    .color(egui::Color32::from_gray(196)),
+                            );
+                        });
+                    });
+            });
+    }
+
     fn apply_prepared_load_paths(
         &mut self,
         prepared: PreparedLoadPaths,
@@ -3013,6 +3103,8 @@ impl eframe::App for DicomViewerApp {
         } else {
             ctx.set_cursor_icon(egui::CursorIcon::Default);
         }
+        let dropped_files = ctx.input(|input| input.raw.dropped_files.clone());
+        self.apply_dropped_files(&dropped_files, ctx);
         self.process_pending_history_open(ctx);
         self.process_pending_local_open(ctx);
 
@@ -3076,6 +3168,7 @@ impl eframe::App for DicomViewerApp {
         }
 
         let mut open_dicoms_clicked = false;
+        let hovered_files = ctx.input(|input| input.raw.hovered_files.clone());
 
         let is_maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
         let title_text = format!("{APP_TITLE} v{APP_VERSION}");
@@ -3787,6 +3880,7 @@ impl eframe::App for DicomViewerApp {
             self.queue_history_open(index);
         }
 
+        self.show_file_drop_overlay(ctx, &hovered_files);
         self.show_resize_grip(ctx);
 
         if self.is_loading() {
@@ -4053,6 +4147,126 @@ mod tests {
         assert!(!loaded.contains("UnknownField"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn local_paths_from_dropped_files_ignores_entries_without_paths() {
+        let dropped_files = vec![
+            egui::DroppedFile {
+                path: Some(PathBuf::from("first.dcm")),
+                ..Default::default()
+            },
+            egui::DroppedFile {
+                name: "browser-upload.dcm".to_string(),
+                ..Default::default()
+            },
+            egui::DroppedFile {
+                path: Some(PathBuf::from("second.dcm")),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            DicomViewerApp::local_paths_from_dropped_files(&dropped_files),
+            vec![PathBuf::from("first.dcm"), PathBuf::from("second.dcm")]
+        );
+    }
+
+    #[test]
+    fn apply_dropped_files_queues_local_paths_for_open() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp::default();
+        let dropped_files = vec![egui::DroppedFile {
+            path: Some(PathBuf::from("dropped.dcm")),
+            ..Default::default()
+        }];
+
+        app.apply_dropped_files(&dropped_files, &ctx);
+
+        assert_eq!(
+            app.pending_local_open_paths,
+            Some(vec![PathBuf::from("dropped.dcm")])
+        );
+        assert!(!app.pending_local_open_armed);
+        assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn apply_dropped_files_without_paths_sets_user_visible_error() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp::default();
+        let dropped_files = vec![egui::DroppedFile {
+            name: "web-upload.dcm".to_string(),
+            ..Default::default()
+        }];
+
+        app.apply_dropped_files(&dropped_files, &ctx);
+
+        assert_eq!(
+            app.load_error_message.as_deref(),
+            Some("Dropped items did not include readable local file paths.")
+        );
+        assert!(app.pending_local_open_paths.is_none());
+    }
+
+    #[test]
+    fn file_drop_overlay_heading_matches_hovered_file_count() {
+        assert_eq!(
+            DicomViewerApp::file_drop_overlay_heading(&[]),
+            "Drop DICOM files to open them"
+        );
+
+        let single = vec![egui::HoveredFile {
+            path: Some(PathBuf::from("single.dcm")),
+            ..Default::default()
+        }];
+        assert_eq!(
+            DicomViewerApp::file_drop_overlay_heading(&single),
+            "Drop 1 file to open it"
+        );
+
+        let portal_drag = vec![egui::HoveredFile {
+            path: None,
+            ..Default::default()
+        }];
+        assert_eq!(
+            DicomViewerApp::file_drop_overlay_heading(&portal_drag),
+            "Only local files can be dropped here"
+        );
+
+        let mixed_drag = vec![
+            egui::HoveredFile {
+                path: Some(PathBuf::from("local.dcm")),
+                ..Default::default()
+            },
+            egui::HoveredFile {
+                path: None,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            DicomViewerApp::file_drop_overlay_heading(&mixed_drag),
+            "Drop 1 file to open it"
+        );
+
+        let multi = vec![
+            egui::HoveredFile {
+                path: Some(PathBuf::from("one.dcm")),
+                ..Default::default()
+            },
+            egui::HoveredFile {
+                path: Some(PathBuf::from("two.dcm")),
+                ..Default::default()
+            },
+            egui::HoveredFile {
+                path: Some(PathBuf::from("three.dcm")),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            DicomViewerApp::file_drop_overlay_heading(&multi),
+            "Drop 3 files to open them"
+        );
     }
 
     #[test]
