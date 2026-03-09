@@ -2045,10 +2045,8 @@ impl DicomViewerApp {
                             ui.label(egui::RichText::new(heading).strong().size(24.0));
                             ui.add_space(6.0);
                             ui.label(
-                                egui::RichText::new(
-                                    "Drop DICOM files anywhere in the window.",
-                                )
-                                .color(egui::Color32::from_gray(196)),
+                                egui::RichText::new("Drop DICOM files anywhere in the window.")
+                                    .color(egui::Color32::from_gray(196)),
                             );
                         });
                     });
