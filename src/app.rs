@@ -834,6 +834,10 @@ impl DicomViewerApp {
     }
 
     fn file_drop_overlay_heading(hovered_files: &[egui::HoveredFile]) -> String {
+        if !hovered_files.is_empty() && hovered_files.iter().all(|file| file.path.is_none()) {
+            return "Only local files can be dropped here".to_string();
+        }
+
         match Self::hovered_file_count(hovered_files) {
             0 => "Drop DICOM files to open them".to_string(),
             1 => "Drop 1 file to open it".to_string(),
@@ -4227,6 +4231,21 @@ mod tests {
         }];
         assert_eq!(
             DicomViewerApp::file_drop_overlay_heading(&portal_drag),
+            "Only local files can be dropped here"
+        );
+
+        let mixed_drag = vec![
+            egui::HoveredFile {
+                path: Some(PathBuf::from("local.dcm")),
+                ..Default::default()
+            },
+            egui::HoveredFile {
+                path: None,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            DicomViewerApp::file_drop_overlay_heading(&mixed_drag),
             "Drop 1 file to open it"
         );
 
