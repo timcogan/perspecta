@@ -4221,6 +4221,15 @@ mod tests {
             "Drop 1 file to open it"
         );
 
+        let portal_drag = vec![egui::HoveredFile {
+            path: None,
+            ..Default::default()
+        }];
+        assert_eq!(
+            DicomViewerApp::file_drop_overlay_heading(&portal_drag),
+            "Drop 1 file to open it"
+        );
+
         let multi = vec![
             egui::HoveredFile {
                 path: Some(PathBuf::from("one.dcm")),
