@@ -1,5 +1,6 @@
 # AGENTS Rules
 
+- Do not add private information, secrets, local filesystem paths, PHI, or real patient data to code, docs, tests, fixtures, logs, screenshots, or any other version-controlled file; use placeholders or sanitized examples instead.
 - Treat "large code changes" as refactors, behavior changes across multiple functions/modules, or edits affecting multiple call sites.
 - Run `cargo fmt --all -- --check` before sending the final response.
 - Run `cargo clippy --all-targets --all-features -- -D warnings` before sending the final response.
