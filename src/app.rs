@@ -1068,6 +1068,85 @@ impl DicomViewerApp {
         Some(history_id_from_paths(&paths))
     }
 
+    fn has_open_study(&self) -> bool {
+        self.image.is_some()
+            || self.current_single_path.is_some()
+            || self.has_mammo_group()
+            || self.single_load_receiver.is_some()
+            || self.dicomweb_receiver.is_some()
+            || self.dicomweb_active_path_receiver.is_some()
+            || !self.dicomweb_active_pending_paths.is_empty()
+    }
+
+    fn clear_active_study(&mut self) {
+        self.pending_launch_request = None;
+        self.pending_local_open_paths = None;
+        self.pending_local_open_armed = false;
+        self.pending_history_open_index = None;
+        self.pending_history_open_armed = false;
+        self.dicomweb_receiver = None;
+        self.dicomweb_active_path_receiver = None;
+        self.dicomweb_active_group_expected = None;
+        self.dicomweb_active_group_paths.clear();
+        self.dicomweb_active_pending_paths.clear();
+        self.single_load_receiver = None;
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.history_preload_receiver = None;
+        self.history_pushed_for_active_group = false;
+        self.pending_gsps_overlays.clear();
+        self.clear_single_viewer();
+        self.mammo_group.clear();
+        self.mammo_selected_index = 0;
+        self.clear_load_error();
+    }
+
+    fn close_current_group(&mut self, ctx: &egui::Context) {
+        if !self.has_open_study() {
+            return;
+        }
+
+        self.sync_current_state_to_history();
+        let next_history_index = if let Some(current_id) = self.current_history_id() {
+            if let Some(index) = self
+                .history_entries
+                .iter()
+                .position(|entry| entry.id == current_id)
+            {
+                self.history_entries.remove(index);
+                if self.history_entries.is_empty() {
+                    None
+                } else {
+                    Some(index.min(self.history_entries.len().saturating_sub(1)))
+                }
+            } else if self.history_entries.is_empty() {
+                None
+            } else {
+                Some(0)
+            }
+        } else if self.history_entries.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+
+        self.clear_active_study();
+        if let Some(index) = next_history_index {
+            self.open_history_entry(index, ctx);
+        } else {
+            ctx.request_repaint();
+        }
+    }
+
+    fn handle_close_group_shortcut(&mut self, ctx: &egui::Context) -> bool {
+        if self.has_open_study() {
+            self.close_current_group(ctx);
+            false
+        } else {
+            true
+        }
+    }
+
     fn move_current_history_to_front(&mut self) {
         let Some(current_id) = self.current_history_id() else {
             return;
@@ -3133,13 +3212,19 @@ impl eframe::App for DicomViewerApp {
         self.advance_cine_if_needed(ctx);
 
         let mut history_cycle_direction = None;
-        let mut close_requested = false;
+        let mut close_app_requested = false;
+        let mut close_group_requested = false;
         let mut c_pressed = false;
         let mut g_pressed = false;
         let mut n_pressed = false;
         ctx.input_mut(|input| {
-            if input.consume_key(egui::Modifiers::COMMAND, egui::Key::W) {
-                close_requested = true;
+            if input.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::W,
+            ) {
+                close_app_requested = true;
+            } else if input.consume_key(egui::Modifiers::COMMAND, egui::Key::W) {
+                close_group_requested = true;
             } else if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
                 history_cycle_direction = Some(-1);
             } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
@@ -3149,7 +3234,7 @@ impl eframe::App for DicomViewerApp {
             g_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::G);
             n_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::N);
         });
-        if close_requested {
+        if close_app_requested {
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
@@ -3157,6 +3242,13 @@ impl eframe::App for DicomViewerApp {
             self.cycle_history_entry(direction);
         }
         let history_transition_pending = self.pending_history_open_index.is_some();
+        if close_group_requested
+            && !history_transition_pending
+            && self.handle_close_group_shortcut(ctx)
+        {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
         if c_pressed && !history_transition_pending {
             self.toggle_cine_mode();
         }
@@ -4117,6 +4209,34 @@ fn history_id_from_paths(paths: &[PathBuf]) -> String {
 mod tests {
     use super::*;
 
+    fn test_texture(ctx: &egui::Context, name: &str) -> TextureHandle {
+        ctx.load_texture(
+            name,
+            ColorImage {
+                size: [1, 1],
+                pixels: vec![egui::Color32::BLACK],
+            },
+            TextureOptions::LINEAR,
+        )
+    }
+
+    fn single_history_entry(ctx: &egui::Context, path: &str, texture_name: &str) -> HistoryEntry {
+        let path_buf = PathBuf::from(path);
+        HistoryEntry {
+            id: history_id_from_paths(std::slice::from_ref(&path_buf)),
+            kind: HistoryKind::Single(Box::new(HistorySingleData {
+                path: path_buf,
+                image: DicomImage::test_stub(None),
+                texture: test_texture(ctx, texture_name),
+                window_center: 0.0,
+                window_width: 1.0,
+                current_frame: 0,
+                cine_fps: DEFAULT_CINE_FPS,
+            })),
+            thumbs: Vec::new(),
+        }
+    }
+
     #[test]
     fn metadata_settings_toml_roundtrip() {
         let selected = vec![
@@ -4769,6 +4889,56 @@ mod tests {
         app.open_history_entry(0, &ctx);
 
         assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn close_current_group_removes_active_entry_and_opens_next_history_item() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            image: Some(DicomImage::test_stub(None)),
+            current_single_path: Some(PathBuf::from("current.dcm")),
+            texture: Some(test_texture(&ctx, "active-current")),
+            history_entries: vec![
+                single_history_entry(&ctx, "current.dcm", "history-current"),
+                single_history_entry(&ctx, "next.dcm", "history-next"),
+            ],
+            ..Default::default()
+        };
+
+        app.close_current_group(&ctx);
+
+        assert_eq!(app.current_single_path, Some(PathBuf::from("next.dcm")));
+        assert_eq!(app.history_entries.len(), 1);
+        assert_eq!(
+            app.history_entries[0].id,
+            history_id_from_paths(&[PathBuf::from("next.dcm")])
+        );
+    }
+
+    #[test]
+    fn close_current_group_without_history_clears_viewer_state() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            image: Some(DicomImage::test_stub(None)),
+            current_single_path: Some(PathBuf::from("lonely.dcm")),
+            texture: Some(test_texture(&ctx, "active-lonely")),
+            ..Default::default()
+        };
+
+        app.close_current_group(&ctx);
+
+        assert!(app.image.is_none());
+        assert!(app.current_single_path.is_none());
+        assert!(app.texture.is_none());
+        assert!(!app.has_open_study());
+    }
+
+    #[test]
+    fn handle_close_group_shortcut_requests_window_close_when_viewer_is_empty() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp::default();
+
+        assert!(app.handle_close_group_shortcut(&ctx));
     }
 
     #[test]

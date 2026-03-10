@@ -30,7 +30,8 @@ Supported local file counts:
 - `G`: toggle GSPS overlay (when available)
 - `Tab`: next history item
 - `Shift+Tab`: previous history item
-- `Cmd/Ctrl+W`: close window
+- `Cmd/Ctrl+W`: close the active study/group; if the window is already empty, close the window
+- `Cmd/Ctrl+Shift+W`: close the window
 
 ## Grouped Local Launch
 
