@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,6 +14,7 @@ const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
 const SYNTHETIC_PIXEL_BYTES: u64 = std::mem::size_of::<u16>() as u64;
 const MAX_SYNTHETIC_DICOM_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SYNTHETIC_DICOM_PIXELS: u64 = MAX_SYNTHETIC_DICOM_BYTES / SYNTHETIC_PIXEL_BYTES;
+const MAX_TEMP_DIR_ATTEMPTS: usize = 32;
 
 pub struct TempBenchmarkDir {
     path: PathBuf,
@@ -20,21 +22,41 @@ pub struct TempBenchmarkDir {
 
 impl TempBenchmarkDir {
     pub fn new(prefix: &str) -> Result<Self> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = env::temp_dir().join(format!(
-            "perspecta-{prefix}-{}-{timestamp}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path)
-            .with_context(|| format!("could not create temporary directory {}", path.display()))?;
-        Ok(Self { path })
+        Self::new_with_timestamp_source(prefix, current_timestamp_nanos)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn new_with_timestamp_source<F>(prefix: &str, mut timestamp_source: F) -> Result<Self>
+    where
+        F: FnMut() -> u128,
+    {
+        let mut last_path = None::<PathBuf>;
+
+        for attempt in 0..MAX_TEMP_DIR_ATTEMPTS {
+            let path = temp_benchmark_dir_path(prefix, timestamp_source(), attempt);
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    last_path = Some(path);
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("could not create temporary directory {}", path.display())
+                    });
+                }
+            }
+        }
+
+        let path =
+            last_path.unwrap_or_else(|| temp_benchmark_dir_path(prefix, timestamp_source(), 0));
+        Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!("temporary benchmark directory path kept colliding after {MAX_TEMP_DIR_ATTEMPTS} attempts"),
+        ))
+        .with_context(|| format!("could not create temporary directory {}", path.display()))
     }
 }
 
@@ -102,7 +124,26 @@ pub fn write_synthetic_dicom(path: &Path, rows: usize, cols: usize) -> Result<()
     Ok(())
 }
 
+fn current_timestamp_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+fn temp_benchmark_dir_path(prefix: &str, timestamp: u128, attempt: usize) -> PathBuf {
+    env::temp_dir().join(format!(
+        "perspecta-{prefix}-{}-{timestamp}-{attempt}",
+        std::process::id()
+    ))
+}
+
 fn checked_synthetic_pixel_count(rows: usize, cols: usize) -> Result<usize> {
+    if rows == 0 || cols == 0 {
+        bail!(
+            "synthetic benchmark image dimensions must be greater than zero (requested {rows}x{cols}; limit is {MAX_SYNTHETIC_DICOM_BYTES} bytes / {MAX_SYNTHETIC_DICOM_PIXELS} pixels)"
+        );
+    }
     let rows_u64 = u64::try_from(rows).context("rows exceed u64 range")?;
     let cols_u64 = u64::try_from(cols).context("cols exceed u64 range")?;
     let pixel_count = rows_u64
@@ -157,5 +198,32 @@ mod tests {
             format!("{err:#}").contains("exceeding the limit"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn checked_synthetic_pixel_count_rejects_zero_dimensions() {
+        let err = checked_synthetic_pixel_count(0, 1024).expect_err("zero rows should fail");
+
+        assert!(
+            format!("{err:#}").contains("must be greater than zero"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn temp_benchmark_dir_new_retries_on_collision() {
+        let prefix = "temp-dir-retry";
+        let timestamp = 123_456_u128;
+        let colliding_path = temp_benchmark_dir_path(prefix, timestamp, 0);
+        fs::create_dir(&colliding_path).expect("first temp dir should be created");
+
+        let temp_dir = TempBenchmarkDir::new_with_timestamp_source(prefix, || timestamp)
+            .expect("second temp dir should retry with a new candidate");
+        let expected_retry_path = temp_benchmark_dir_path(prefix, timestamp, 1);
+
+        assert_eq!(temp_dir.path(), expected_retry_path.as_path());
+
+        drop(temp_dir);
+        fs::remove_dir(&colliding_path).expect("colliding temp dir should be removed");
     }
 }

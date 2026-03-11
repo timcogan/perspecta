@@ -522,7 +522,7 @@ fn run_once(
 }
 
 fn metric_stats(values: &[f64]) -> Option<(f64, f64, f64)> {
-    let first = *values.first()?;
+    values.first()?;
     let mut sorted = values.to_vec();
     sorted.sort_by(|left, right| left.total_cmp(right));
     let median = if sorted.len() % 2 == 1 {
@@ -531,8 +531,8 @@ fn metric_stats(values: &[f64]) -> Option<(f64, f64, f64)> {
         let upper = sorted.len() / 2;
         (sorted[upper - 1] + sorted[upper]) / 2.0
     };
-    let min = first.min(*sorted.first().unwrap_or(&first));
-    let max = first.max(*sorted.last().unwrap_or(&first));
+    let min = *sorted.first().unwrap();
+    let max = *sorted.last().unwrap();
     Some((median, min, max))
 }
 

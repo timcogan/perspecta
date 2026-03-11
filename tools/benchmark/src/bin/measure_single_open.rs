@@ -38,8 +38,13 @@ fn parse_log_line(line: &str) -> Option<(f64, &str)> {
     let rest = line.strip_prefix('[')?;
     let (timestamp, rest) = rest.split_once(']')?;
     let timestamp = timestamp.parse::<f64>().ok()?;
-    let (_, event) = rest.split_once(" perf: ")?;
-    Some((timestamp, event))
+    let rest = rest.trim();
+    let (prefix, event) = rest.split_once(':')?;
+    let target = prefix.split_whitespace().last()?;
+    if target != "perf" {
+        return None;
+    }
+    Some((timestamp, event.trim()))
 }
 
 fn parse_runs<I>(lines: I) -> (Vec<SingleOpenRun>, Vec<String>)
@@ -198,6 +203,13 @@ mod tests {
         let line = "[1762361234.101] [INFO ] perf: single-open started";
         let parsed = parse_log_line(line);
         assert_eq!(parsed, Some((1762361234.101, START_EVENT)));
+    }
+
+    #[test]
+    fn parse_log_line_ignores_non_perf_target() {
+        let line = "[1762361234.101] [INFO ] app: perf: single-open started";
+        let parsed = parse_log_line(line);
+        assert_eq!(parsed, None);
     }
 
     #[test]
