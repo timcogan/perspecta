@@ -54,10 +54,10 @@ Its primary purpose is consistency during development, not full architecture cov
    - Run `cargo check --workspace --all-targets --all-features`.
 3. Launch/parsing/selection changes (`launch.rs`, `dicomweb.rs`, selection logic):
    - Run all UI-only checks above.
-   - Run `cargo test --workspace --all-targets --all-features`.
+   - Run `cargo test --workspace --all-targets --all-features --locked`.
 4. Decode/ordering/rendering changes (`dicom.rs`, `mammo.rs`, `renderer.rs`):
    - Run all UI-only checks above.
-   - Run `cargo test --workspace --all-targets --all-features`.
+   - Run `cargo test --workspace --all-targets --all-features --locked`.
    - Run module-specific validations for decode and renderer output tests.
 5. Streaming/GSPS/history/concurrency changes (`app.rs` load pipeline, GSPS attach, worker channels):
    - Run all launch/parsing checks above.
