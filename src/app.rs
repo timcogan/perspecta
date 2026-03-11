@@ -2204,10 +2204,14 @@ impl DicomViewerApp {
         self.history_pushed_for_active_group = false;
         self.clear_load_error();
         log::info!("Loading selected DICOM...");
+        log::info!(target: "perf", "single-open started");
         let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
         thread::spawn(move || {
             let result = match load_dicom(&path) {
-                Ok(image) => Ok(PendingLoad { path, image }),
+                Ok(image) => {
+                    log::info!(target: "perf", "single-open dicom-load completed");
+                    Ok(PendingLoad { path, image })
+                }
                 Err(err) => Err(format!("Error opening selected DICOM: {err:#}")),
             };
             let _ = tx.send(result);
@@ -2240,6 +2244,7 @@ impl DicomViewerApp {
         self.reset_single_view_transform();
         self.single_view_frame_scroll_accum = 0.0;
         self.rebuild_texture(ctx);
+        log::info!(target: "perf", "single-open completed");
         let history_texture = self.texture.clone();
         if let Some(texture) = history_texture.as_ref() {
             self.push_single_history_entry(

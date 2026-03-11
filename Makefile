@@ -3,7 +3,13 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 .PHONY: help build build-release run run-release check test fmt fmt-check clippy clean \
-	install-watch watch-check watch-test watch-run watch-all dev site install-protocol-linux
+	install-watch watch-check watch-test watch-run watch-all dev site install-protocol-linux benchmark
+
+BENCH_RUNS ?= 5
+BENCH_WARMUP ?= 1
+BENCH_ROWS ?= 1024
+BENCH_COLS ?= 1024
+BENCH_TIMEOUT_SECS ?= 15
 
 help:
 	@echo "Perspecta Viewer - Make targets"
@@ -18,6 +24,7 @@ help:
 	@echo "  make fmt-check      cargo fmt --check"
 	@echo "  make clippy         cargo clippy -- -D warnings"
 	@echo "  make clean          cargo clean"
+	@echo "  make benchmark      Run full single-image benchmark (release)"
 	@echo ""
 	@echo "  make install-watch  Install cargo-watch"
 	@echo "  make watch-check    Re-run cargo check on file changes"
@@ -88,3 +95,7 @@ site:
 
 install-protocol-linux:
 	bash scripts/register-protocol-linux.sh
+
+benchmark:
+	@cargo build --quiet --release --features dev-tools --bin perspecta --bin benchmark_full_single_open
+	@./target/release/benchmark_full_single_open --runs $(BENCH_RUNS) --warmup $(BENCH_WARMUP) --rows $(BENCH_ROWS) --cols $(BENCH_COLS) --timeout-secs $(BENCH_TIMEOUT_SECS)
