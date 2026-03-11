@@ -108,7 +108,7 @@ fn parse_runs_from_reader<R: BufRead>(reader: R) -> io::Result<(Vec<SingleOpenRu
 }
 
 fn print_usage() {
-    eprintln!("Usage: cargo run --features dev-tools --bin measure_single_open -- [logfile]");
+    eprintln!("Usage: cargo run -p benchmark-tools --bin measure_single_open -- [logfile]");
     eprintln!("Pass '-' or omit logfile to read from stdin.");
 }
 

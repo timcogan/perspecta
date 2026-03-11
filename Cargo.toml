@@ -1,3 +1,7 @@
+[workspace]
+members = ["tools/benchmark"]
+resolver = "2"
+
 [package]
 name = "perspecta"
 version = "0.3.0"
@@ -7,12 +11,8 @@ repository = "https://github.com/timcogan/perspecta"
 autobins = false
 default-run = "perspecta"
 
-[features]
-dev-tools = ["dep:dicom-core"]
-
 [dependencies]
 anyhow = "1.0"
-dicom-core = { version = "0.7", optional = true }
 dicom-object = "0.7"
 dicom-pixeldata = { version = "0.7", features = ["openjp2"] }
 eframe = "0.30"
@@ -21,19 +21,12 @@ log = "0.4"
 rfd = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
+[dev-dependencies]
+dicom-core = "0.7"
+
 [[bin]]
 name = "perspecta"
 path = "src/main.rs"
-
-[[bin]]
-name = "benchmark_full_single_open"
-path = "src/bin/benchmark_full_single_open.rs"
-required-features = ["dev-tools"]
-
-[[bin]]
-name = "measure_single_open"
-path = "src/bin/measure_single_open.rs"
-required-features = ["dev-tools"]
 
 [profile.dist]
 inherits = "release"

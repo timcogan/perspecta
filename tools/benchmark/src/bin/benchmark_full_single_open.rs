@@ -1,11 +1,10 @@
-#[path = "../benchmark_support.rs"]
-mod benchmark_support;
-
 use std::collections::VecDeque;
 use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -13,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
-use benchmark_support::{write_synthetic_dicom, TempBenchmarkDir};
+use benchmark_tools::benchmark_support::{write_synthetic_dicom, TempBenchmarkDir};
 
 const LOG_CONTEXT_LINES: usize = 24;
 const START_EVENT: &str = "single-open started";
@@ -65,7 +64,7 @@ enum ColumnAlign {
 
 fn print_usage() {
     eprintln!(
-        "Usage: cargo run --features dev-tools --bin benchmark_full_single_open -- [--app PATH] [--runs N] [--warmup N] [--rows N] [--cols N] [--timeout-secs N]"
+        "Usage: cargo run -p benchmark-tools --bin benchmark_full_single_open -- [--app PATH] [--runs N] [--warmup N] [--rows N] [--cols N] [--timeout-secs N]"
     );
     eprintln!(
         "If no display is available, the benchmark will try to use `xvfb-run -a` automatically."
@@ -204,11 +203,19 @@ fn find_executable_in_path(name: &str) -> Option<PathBuf> {
 }
 
 fn resolve_launch_mode() -> Result<LaunchMode> {
-    if has_display() {
+    if !cfg!(target_os = "linux") {
         return Ok(LaunchMode::Direct);
     }
 
-    if let Some(path) = find_executable_in_path("xvfb-run") {
+    resolve_linux_launch_mode(has_display(), find_executable_in_path("xvfb-run"))
+}
+
+fn resolve_linux_launch_mode(has_display: bool, xvfb_path: Option<PathBuf>) -> Result<LaunchMode> {
+    if has_display {
+        return Ok(LaunchMode::Direct);
+    }
+
+    if let Some(path) = xvfb_path {
         return Ok(LaunchMode::Xvfb(path));
     }
 
@@ -230,10 +237,19 @@ fn build_app_command(launch_mode: &LaunchMode, app_path: &Path, dicom_path: &Pat
                 .arg("-a")
                 .arg(app_path)
                 .arg(dicom_path);
+            configure_xvfb_process_group(&mut command);
             command
         }
     }
 }
+
+#[cfg(unix)]
+fn configure_xvfb_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_xvfb_process_group(_command: &mut Command) {}
 
 fn launch_mode_label(launch_mode: &LaunchMode) -> &'static str {
     match launch_mode {
@@ -331,18 +347,35 @@ fn format_log_context(last_lines: &VecDeque<String>) -> String {
     last_lines.iter().cloned().collect::<Vec<_>>().join("\n")
 }
 
-fn kill_child(child: &mut std::process::Child) {
+fn kill_child(child: &mut std::process::Child, launch_mode: &LaunchMode) {
     match child.try_wait() {
         Ok(Some(_)) => {}
         Ok(None) => {
-            let _ = child.kill();
+            terminate_child(child, launch_mode);
             let _ = child.wait();
         }
         Err(_) => {
-            let _ = child.kill();
+            terminate_child(child, launch_mode);
             let _ = child.wait();
         }
     }
+}
+
+fn terminate_child(child: &mut std::process::Child, launch_mode: &LaunchMode) {
+    #[cfg(unix)]
+    {
+        if matches!(launch_mode, LaunchMode::Xvfb(_)) {
+            if let Ok(pid) = i32::try_from(child.id()) {
+                // Safety: `xvfb-run` is spawned in its own process group, so signaling `-pid`
+                // targets that group and terminates the wrapper and its children together.
+                if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
+                    return;
+                }
+            }
+        }
+    }
+
+    let _ = child.kill();
 }
 
 fn compute_run(
@@ -394,7 +427,7 @@ fn run_once(
 
     loop {
         if Instant::now() >= deadline {
-            kill_child(&mut child);
+            kill_child(&mut child, launch_mode);
             bail!(
                 "timed out waiting for full-app benchmark completion after {:.1}s\nlast stderr lines:\n{}",
                 timeout.as_secs_f64(),
@@ -415,7 +448,7 @@ fn run_once(
                         DICOM_DONE_EVENT => dicom_done_ms = Some(timestamp * 1000.0),
                         COMPLETE_EVENT => {
                             completed_ms = Some(timestamp * 1000.0);
-                            kill_child(&mut child);
+                            kill_child(&mut child, launch_mode);
                             break;
                         }
                         _ => {}
@@ -423,7 +456,7 @@ fn run_once(
                 }
             }
             Ok(Err(err)) => {
-                kill_child(&mut child);
+                kill_child(&mut child, launch_mode);
                 bail!("{err}");
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -467,7 +500,7 @@ fn run_once(
                         format_log_context(&last_lines)
                     );
                 }
-                kill_child(&mut child);
+                kill_child(&mut child, launch_mode);
                 bail!(
                     "stderr reader disconnected before benchmark completion\nlast stderr lines:\n{}",
                     format_log_context(&last_lines)
@@ -623,6 +656,10 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::time::Duration;
 
     #[test]
     fn compute_run_splits_full_app_time() {
@@ -676,6 +713,33 @@ mod tests {
     }
 
     #[test]
+    fn resolve_linux_launch_mode_prefers_direct_with_display() {
+        let mode = resolve_linux_launch_mode(true, Some(PathBuf::from("/usr/bin/xvfb-run")))
+            .expect("display should use direct mode");
+
+        assert_eq!(mode, LaunchMode::Direct);
+    }
+
+    #[test]
+    fn resolve_linux_launch_mode_uses_xvfb_without_display() {
+        let mode = resolve_linux_launch_mode(false, Some(PathBuf::from("/usr/bin/xvfb-run")))
+            .expect("xvfb should be used when display is absent");
+
+        assert_eq!(mode, LaunchMode::Xvfb(PathBuf::from("/usr/bin/xvfb-run")));
+    }
+
+    #[test]
+    fn resolve_linux_launch_mode_errors_without_display_or_xvfb() {
+        let err =
+            resolve_linux_launch_mode(false, None).expect_err("missing display and xvfb must fail");
+
+        assert!(
+            format!("{err:#}").contains("xvfb-run"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
     fn build_app_command_uses_xvfb_when_requested() {
         let app_path = Path::new("/tmp/perspecta");
         let dicom_path = Path::new("/tmp/test.dcm");
@@ -692,5 +756,66 @@ mod tests {
             args,
             vec!["-e", "/dev/stderr", "-a", "/tmp/perspecta", "/tmp/test.dcm"]
         );
+    }
+
+    #[test]
+    fn resolve_launch_mode_prefers_direct_on_non_linux() {
+        if cfg!(target_os = "linux") {
+            return;
+        }
+
+        let mode = resolve_launch_mode().expect("non-Linux should use direct mode");
+        assert_eq!(mode, LaunchMode::Direct);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_child_terminates_xvfb_process_group() {
+        let temp_dir = TempBenchmarkDir::new("kill-child-group").expect("temp dir should exist");
+        let pid_path = temp_dir.path().join("sleep.pid");
+        let command_text = format!("sleep 1000 & echo $! > '{}'; wait", pid_path.display());
+
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(command_text).process_group(0);
+        let mut child = command.spawn().expect("shell should spawn");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let sleep_pid = loop {
+            if let Ok(pid_text) = fs::read_to_string(&pid_path) {
+                break pid_text
+                    .trim()
+                    .parse::<i32>()
+                    .expect("background pid should parse");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for child pid file"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        kill_child(
+            &mut child,
+            &LaunchMode::Xvfb(PathBuf::from("/usr/bin/xvfb-run")),
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unix_process_exists(sleep_pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !unix_process_exists(sleep_pid),
+            "background process {sleep_pid} should be gone after group kill"
+        );
+    }
+
+    #[cfg(unix)]
+    fn unix_process_exists(pid: i32) -> bool {
+        // Safety: `kill(pid, 0)` does not send a signal; it only asks the kernel whether the
+        // process exists and is visible to this user.
+        let result = unsafe { libc::kill(pid, 0) };
+        if result == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
 }

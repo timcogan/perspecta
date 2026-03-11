@@ -19,6 +19,7 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
 - `src/logging.rs`: logging setup and log-level configuration.
 - `src/app.rs`: UI, app state, worker orchestration, interactions, and history.
+- `tools/benchmark`: development-only end-to-end benchmark tools and synthetic DICOM generation.
 
 ## Core Invariants
 

@@ -3,13 +3,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use dicom_core::value::PrimitiveValue;
 use dicom_core::{dicom_value, DataElement, Tag, VR};
 use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 
 const SECONDARY_CAPTURE_IMAGE_STORAGE_UID: &str = "1.2.840.10008.5.1.4.1.1.7";
 const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
+const SYNTHETIC_PIXEL_BYTES: u64 = std::mem::size_of::<u16>() as u64;
+const MAX_SYNTHETIC_DICOM_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SYNTHETIC_DICOM_PIXELS: u64 = MAX_SYNTHETIC_DICOM_BYTES / SYNTHETIC_PIXEL_BYTES;
 
 pub struct TempBenchmarkDir {
     path: PathBuf,
@@ -49,9 +52,10 @@ pub fn write_synthetic_dicom(path: &Path, rows: usize, cols: usize) -> Result<()
             .unwrap_or_default()
             .as_nanos()
     );
+    let pixel_count = checked_synthetic_pixel_count(rows, cols)?;
     let rows_u16 = u16::try_from(rows).context("rows exceed u16 range")?;
     let cols_u16 = u16::try_from(cols).context("cols exceed u16 range")?;
-    let pixels = generate_pixels(rows, cols);
+    let pixels = generate_pixels(cols, pixel_count);
 
     let obj = InMemDicomObject::from_element_iter([
         DataElement::new(
@@ -98,8 +102,25 @@ pub fn write_synthetic_dicom(path: &Path, rows: usize, cols: usize) -> Result<()
     Ok(())
 }
 
-fn generate_pixels(rows: usize, cols: usize) -> Vec<u16> {
-    let pixel_count = rows.saturating_mul(cols);
+fn checked_synthetic_pixel_count(rows: usize, cols: usize) -> Result<usize> {
+    let rows_u64 = u64::try_from(rows).context("rows exceed u64 range")?;
+    let cols_u64 = u64::try_from(cols).context("cols exceed u64 range")?;
+    let pixel_count = rows_u64
+        .checked_mul(cols_u64)
+        .context("synthetic benchmark image pixel count overflowed")?;
+    let byte_count = pixel_count
+        .checked_mul(SYNTHETIC_PIXEL_BYTES)
+        .context("synthetic benchmark image byte size overflowed")?;
+    if byte_count > MAX_SYNTHETIC_DICOM_BYTES {
+        bail!(
+            "synthetic benchmark image would allocate {byte_count} bytes ({pixel_count} pixels), exceeding the limit of {MAX_SYNTHETIC_DICOM_BYTES} bytes ({MAX_SYNTHETIC_DICOM_PIXELS} pixels)"
+        );
+    }
+    usize::try_from(pixel_count)
+        .context("synthetic benchmark image pixel count exceeds usize range")
+}
+
+fn generate_pixels(cols: usize, pixel_count: usize) -> Vec<u16> {
     let mut pixels = Vec::with_capacity(pixel_count);
     for index in 0..pixel_count {
         let row = index / cols.max(1);
@@ -108,4 +129,33 @@ fn generate_pixels(rows: usize, cols: usize) -> Vec<u16> {
         pixels.push(value);
     }
     pixels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_synthetic_pixel_count_rejects_overflow() {
+        let err = checked_synthetic_pixel_count(usize::MAX, 2).expect_err("overflow should fail");
+
+        assert!(
+            format!("{err:#}").contains("pixel count overflowed"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn checked_synthetic_pixel_count_rejects_images_over_limit() {
+        let rows = usize::from(u16::MAX);
+        let cols = usize::try_from((MAX_SYNTHETIC_DICOM_PIXELS / u64::from(u16::MAX)) + 1)
+            .expect("test dimensions should fit usize");
+        let err =
+            checked_synthetic_pixel_count(rows, cols).expect_err("oversized image should fail");
+
+        assert!(
+            format!("{err:#}").contains("exceeding the limit"),
+            "unexpected error: {err:#}"
+        );
+    }
 }
