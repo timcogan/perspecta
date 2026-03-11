@@ -19,6 +19,7 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
 - `src/logging.rs`: logging setup and log-level configuration.
 - `src/app.rs`: UI, app state, worker orchestration, interactions, and history.
+- `tools/benchmark`: development-only end-to-end benchmark tools and synthetic DICOM generation.
 
 ## Core Invariants
 
@@ -49,15 +50,20 @@ Its primary purpose is consistency during development, not full architecture cov
    - Verify spelling/lint checks pass.
 2. UI-only changes (layout/style/labels):
    - Run `cargo fmt --all -- --check`.
-   - Run `cargo clippy --all-targets --all-features -- -D warnings`.
-   - Run `cargo check --all-targets --all-features`.
+   - Run `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+   - Run `cargo check --workspace --all-targets --all-features`.
 3. Launch/parsing/selection changes (`launch.rs`, `dicomweb.rs`, selection logic):
    - Run all UI-only checks above.
-   - Run `cargo test --all-targets --all-features`.
+   - Run `cargo test --workspace --all-targets --all-features --locked`.
 4. Decode/ordering/rendering changes (`dicom.rs`, `mammo.rs`, `renderer.rs`):
    - Run all UI-only checks above.
-   - Run `cargo test --all-targets --all-features`.
+   - Run `cargo test --workspace --all-targets --all-features --locked`.
    - Run module-specific validations for decode and renderer output tests.
 5. Streaming/GSPS/history/concurrency changes (`app.rs` load pipeline, GSPS attach, worker channels):
    - Run all launch/parsing checks above.
    - Verify GSPS toggle behavior (default off, `G` works when overlay exists).
+6. Tooling/benchmark changes (`tools/benchmark`, workspace manifests, Makefile/CI command wiring):
+   - Run `cargo fmt --all -- --check`.
+   - Run `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+   - Run `cargo test --workspace --all-targets --all-features --locked`.
+   - If benchmark launch flow changed, build both `cargo build --release -p perspecta --bin perspecta` and `cargo build --release -p benchmark-tools --bin benchmark_full_single_open`.

@@ -1,9 +1,15 @@
+[workspace]
+members = ["tools/benchmark"]
+resolver = "2"
+
 [package]
 name = "perspecta"
 version = "0.3.0"
 edition = "2021"
 rust-version = "1.73"
 repository = "https://github.com/timcogan/perspecta"
+autobins = false
+default-run = "perspecta"
 
 [dependencies]
 anyhow = "1.0"
@@ -17,6 +23,10 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 
 [dev-dependencies]
 dicom-core = "0.7"
+
+[[bin]]
+name = "perspecta"
+path = "src/main.rs"
 
 [profile.dist]
 inherits = "release"

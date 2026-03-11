@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::{LevelFilter, Log, Metadata, Record, SetLoggerError};
 
@@ -19,9 +20,11 @@ impl Log for StderrLogger {
         }
 
         let mut stderr = io::stderr().lock();
+        let timestamp = current_log_timestamp();
         let _ = writeln!(
             stderr,
-            "[{level:<5}] {target}: {message}",
+            "[{timestamp}] [{level:<5}] {target}: {message}",
+            timestamp = timestamp,
             level = record.level(),
             target = record.target(),
             message = record.args()
@@ -33,6 +36,13 @@ impl Log for StderrLogger {
 
 pub fn init() -> Result<(), SetLoggerError> {
     try_init()
+}
+
+fn current_log_timestamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:03}", now.as_secs(), now.subsec_millis())
 }
 
 pub fn try_init() -> Result<(), SetLoggerError> {
@@ -134,5 +144,17 @@ mod tests {
         assert_eq!(level_from_spec(None), LevelFilter::Info);
         assert_eq!(level_from_spec(Some("")), LevelFilter::Info);
         assert_eq!(level_from_spec(Some("invalid")), LevelFilter::Info);
+    }
+
+    #[test]
+    fn current_log_timestamp_includes_milliseconds() {
+        let timestamp = current_log_timestamp();
+        let parts = timestamp.split('.').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 2);
+        assert!(!parts[0].is_empty());
+        assert_eq!(parts[1].len(), 3);
+        assert!(parts
+            .iter()
+            .all(|part| part.chars().all(|ch| ch.is_ascii_digit())));
     }
 }

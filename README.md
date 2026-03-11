@@ -181,6 +181,7 @@ make dev
 - `src/dicomweb.rs`: DICOMweb metadata/download bridge
 - `src/renderer.rs`: grayscale and RGB rendering paths
 - `src/launch.rs`: CLI + `perspecta://` parser
+- `tools/benchmark`: end-to-end benchmark tools and synthetic DICOM helpers
 - `scripts/register-protocol-linux.sh`: Linux URL scheme registration helper
 
 ## Current Limitations

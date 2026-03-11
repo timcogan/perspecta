@@ -3,7 +3,13 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 .PHONY: help build build-release run run-release check test fmt fmt-check clippy clean \
-	install-watch watch-check watch-test watch-run watch-all dev site install-protocol-linux
+	install-watch watch-check watch-test watch-run watch-all dev site install-protocol-linux benchmark
+
+BENCH_RUNS ?= 5
+BENCH_WARMUP ?= 1
+BENCH_ROWS ?= 1024
+BENCH_COLS ?= 1024
+BENCH_TIMEOUT_SECS ?= 15
 
 help:
 	@echo "Perspecta Viewer - Make targets"
@@ -18,6 +24,7 @@ help:
 	@echo "  make fmt-check      cargo fmt --check"
 	@echo "  make clippy         cargo clippy -- -D warnings"
 	@echo "  make clean          cargo clean"
+	@echo "  make benchmark      Run full single-image benchmark (release)"
 	@echo ""
 	@echo "  make install-watch  Install cargo-watch"
 	@echo "  make watch-check    Re-run cargo check on file changes"
@@ -41,19 +48,19 @@ run-release:
 	cargo run --release
 
 check:
-	cargo check
+	cargo check --workspace --all-targets --all-features
 
 test:
-	cargo test
+	cargo test --workspace --all-targets --all-features
 
 fmt:
-	cargo fmt
+	cargo fmt --all
 
 fmt-check:
-	cargo fmt -- --check
+	cargo fmt --all -- --check
 
 clippy:
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 clean:
 	cargo clean
@@ -62,16 +69,16 @@ install-watch:
 	cargo install cargo-watch
 
 watch-check:
-	cargo watch -x check
+	cargo watch -x 'check --workspace --all-targets --all-features'
 
 watch-test:
-	cargo watch -x test
+	cargo watch -x 'test --workspace --all-targets --all-features'
 
 watch-run:
 	cargo watch -x run
 
 watch-all:
-	cargo watch -x check -x test
+	cargo watch -x 'check --workspace --all-targets --all-features' -x 'test --workspace --all-targets --all-features'
 
 dev:
 	@if cargo watch --version >/dev/null 2>&1; then \
@@ -88,3 +95,8 @@ site:
 
 install-protocol-linux:
 	bash scripts/register-protocol-linux.sh
+
+benchmark:
+	@cargo build --quiet --release -p perspecta --bin perspecta
+	@cargo build --quiet --release -p benchmark-tools --bin benchmark_full_single_open
+	@./target/release/benchmark_full_single_open --app ./target/release/perspecta --runs $(BENCH_RUNS) --warmup $(BENCH_WARMUP) --rows $(BENCH_ROWS) --cols $(BENCH_COLS) --timeout-secs $(BENCH_TIMEOUT_SECS)
