@@ -5,7 +5,7 @@ Its primary purpose is consistency during development, not full architecture cov
 
 ## Design Intent
 
-- Keep behavior predictable across local load, DICOMweb load, GSPS overlays, and history.
+- Keep behavior predictable across local load, DICOMweb load, GSPS overlays, SR documents, and history.
 - Keep module responsibilities clear to avoid logic drift.
 - Prefer incremental, test-backed changes over broad rewrites.
 
@@ -14,7 +14,7 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/main.rs`: app bootstrap and initial launch request wiring only.
 - `src/launch.rs`: parse/validate CLI and `perspecta://` launch inputs.
 - `src/dicomweb.rs`: DICOMweb metadata selection and instance download.
-- `src/dicom.rs`: DICOM open/classify/decode and GSPS parsing.
+- `src/dicom.rs`: DICOM open/classify/decode and GSPS/SR parsing.
 - `src/mammo.rs`: mammography ordering/alignment helpers.
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
 - `src/logging.rs`: logging setup and log-level configuration.
@@ -25,13 +25,15 @@ Its primary purpose is consistency during development, not full architecture cov
 
 1. Supported group sizes MUST be exactly `1`, `2`, `3`, `4`, or `8`.
 2. Multi-view rendering paths MUST apply only to `2`, `3`, `4`, or `8`.
-3. Non-image DICOM objects (`DicomPathKind::Other`) MUST NOT be passed to `load_dicom`.
-4. GSPS visibility MUST default to off and MUST be user-toggled (`G`).
-5. GSPS overlays MUST attach by SOP Instance UID match only.
-6. `open_group` MUST be validated/clamped before use.
-7. Streaming completion logic MUST compare image counts (not total paths including GSPS).
-8. UI state mutations MUST stay on the main thread; workers MUST communicate through channels.
-9. Production diagnostics MUST use logging (`log` macros), not `println!/eprintln!`.
+3. Non-image DICOM objects (`DicomPathKind::Other`) and Structured Reports MUST NOT be passed to `load_dicom`.
+4. Structured Reports MUST load through the dedicated SR parser and single-document UI path.
+5. Mixed image+SR selections MUST stage SR documents as separate history entries, not image viewports.
+6. GSPS visibility MUST default to off and MUST be user-toggled (`G`).
+7. GSPS overlays MUST attach by SOP Instance UID match only.
+8. `open_group` MUST be validated/clamped before use.
+9. Streaming completion logic MUST compare image counts (not total paths including GSPS/SR).
+10. UI state mutations MUST stay on the main thread; workers MUST communicate through channels.
+11. Production diagnostics MUST use logging (`log` macros), not `println!/eprintln!`.
 
 ## Change Rules
 

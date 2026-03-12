@@ -30,6 +30,7 @@ Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`efram
 - Real-time window/level controls for grayscale workflows.
 - Multi-frame cine playback (`C` key or UI control).
 - GSPS (Grayscale Softcopy Presentation State) overlay support with manual toggle (`G` key, off by default).
+- Structured Report (SR) DICOM support with a dedicated text/document view.
 - Mouse-wheel zoom + drag pan in single-image and multi-view (`1x2` / `1x3` / `2x2` / `2x4`) mammo views.
 - Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation and `Shift + drag` for window/level in multi-view layouts.
 - Metadata side panel for quick inspection.
@@ -79,6 +80,8 @@ cargo run -- "example-data/current-RCC.dcm" "example-data/current-LCC.dcm" "exam
 - `4` files: opens the mammography `2x2` layout.
 - `8` files: opens the mammography comparison `2x4` layout (current row + prior row).
 - GSPS DICOM files can be included in the same selection; overlays are available with `G` (off by default).
+- Structured Report (SR) DICOM files can be opened directly in a single-document view.
+- If images and SR objects are selected together, Perspecta opens the images first and adds each SR as a separate history entry.
 
 ### 2. Custom URL Scheme (`perspecta://`)
 

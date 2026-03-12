@@ -11,8 +11,9 @@ use eframe::egui::{
 };
 
 use crate::dicom::{
-    classify_dicom_path, load_dicom, load_gsps_overlays, DicomImage, DicomPathKind, GspsGraphic,
-    GspsOverlay, GspsUnits, METADATA_FIELD_NAMES,
+    classify_dicom_path, load_dicom, load_gsps_overlays, load_structured_report, DicomImage,
+    DicomPathKind, GspsGraphic, GspsOverlay, GspsUnits, StructuredReportDocument,
+    StructuredReportNode, METADATA_FIELD_NAMES,
 };
 use crate::dicomweb::{
     download_dicomweb_group_request, download_dicomweb_request, DicomWebDownloadResult,
@@ -53,9 +54,18 @@ struct PendingLoad {
     image: DicomImage,
 }
 
+enum PendingSingleLoad {
+    Image(PendingLoad),
+    StructuredReport {
+        path: PathBuf,
+        report: StructuredReportDocument,
+    },
+}
+
 #[derive(Default, Clone)]
 struct PreparedLoadPaths {
     image_paths: Vec<PathBuf>,
+    structured_report_paths: Vec<PathBuf>,
     gsps_overlays: HashMap<String, GspsOverlay>,
     gsps_files_found: usize,
     other_files_found: usize,
@@ -68,6 +78,10 @@ enum HistoryPreloadResult {
     },
     Group {
         viewports: Vec<(PathBuf, DicomImage)>,
+    },
+    Report {
+        path: PathBuf,
+        report: Box<StructuredReportDocument>,
     },
 }
 
@@ -100,9 +114,16 @@ struct HistoryGroupData {
 }
 
 #[derive(Clone)]
+struct HistoryReportData {
+    path: PathBuf,
+    report: StructuredReportDocument,
+}
+
+#[derive(Clone)]
 enum HistoryKind {
     Single(Box<HistorySingleData>),
     Group(HistoryGroupData),
+    Report(Box<HistoryReportData>),
 }
 
 struct HistoryThumb {
@@ -136,6 +157,7 @@ struct GspsNavigationTarget {
 
 pub struct DicomViewerApp {
     image: Option<DicomImage>,
+    report: Option<StructuredReportDocument>,
     current_single_path: Option<PathBuf>,
     texture: Option<TextureHandle>,
     mammo_group: Vec<Option<MammoViewport>>,
@@ -154,7 +176,7 @@ pub struct DicomViewerApp {
     dicomweb_active_group_expected: Option<usize>,
     dicomweb_active_group_paths: Vec<PathBuf>,
     dicomweb_active_pending_paths: VecDeque<PathBuf>,
-    single_load_receiver: Option<Receiver<Result<PendingLoad, String>>>,
+    single_load_receiver: Option<Receiver<Result<PendingSingleLoad, String>>>,
     mammo_load_receiver: Option<Receiver<Result<PendingLoad, String>>>,
     mammo_load_sender: Option<Sender<Result<PendingLoad, String>>>,
     history_pushed_for_active_group: bool,
@@ -190,6 +212,7 @@ impl DicomViewerApp {
 
         Self {
             image: None,
+            report: None,
             current_single_path: None,
             texture: None,
             mammo_group: Vec::new(),
@@ -287,6 +310,9 @@ impl DicomViewerApp {
                             log::warn!("Could not parse GSPS input: {err:#}");
                         }
                     }
+                }
+                Ok(DicomPathKind::StructuredReport) => {
+                    prepared.structured_report_paths.push(path);
                 }
                 Ok(DicomPathKind::Image) | Err(_) => {
                     prepared.image_paths.push(path);
@@ -550,6 +576,11 @@ impl DicomViewerApp {
             len,
             Self::format_valid_group_sizes_list()
         )
+    }
+
+    fn is_supported_prepared_group(prepared: &PreparedLoadPaths) -> bool {
+        Self::is_supported_group_size(prepared.image_paths.len())
+            || (prepared.image_paths.is_empty() && prepared.structured_report_paths.len() == 1)
     }
 
     fn reorder_indices_cover_all(items_len: usize, ordered_indices: &[usize]) -> bool {
@@ -887,6 +918,7 @@ impl DicomViewerApp {
 
     fn clear_single_viewer(&mut self) {
         self.image = None;
+        self.report = None;
         self.current_single_path = None;
         self.texture = None;
         self.gsps_overlay_visible = false;
@@ -975,6 +1007,97 @@ impl DicomViewerApp {
         Some(ctx.load_texture(texture_name, thumb, TextureOptions::LINEAR))
     }
 
+    fn build_report_history_thumb(
+        &mut self,
+        _report: &StructuredReportDocument,
+        texture_key_prefix: &str,
+        ctx: &egui::Context,
+    ) -> TextureHandle {
+        const OUTER_WIDTH: usize = 60;
+        const OUTER_HEIGHT: usize = 76;
+        const BORDER_INSET: usize = 2;
+        const INNER_X: usize = BORDER_INSET;
+        const INNER_Y: usize = BORDER_INSET;
+        const INNER_WIDTH: usize = OUTER_WIDTH - (BORDER_INSET * 2);
+        const INNER_HEIGHT: usize = OUTER_HEIGHT - (BORDER_INSET * 2);
+        const HEADER_HEIGHT: usize = 8;
+        const MAX_LINE_WIDTH: usize = 40;
+        const TEXT_PAD: usize = (INNER_WIDTH - MAX_LINE_WIDTH) / 2;
+        const TEXT_START_X: usize = INNER_X + TEXT_PAD;
+        const TEXT_START_Y: usize = INNER_Y + HEADER_HEIGHT + TEXT_PAD;
+        const TEXT_LINE_HEIGHT: usize = 4;
+        const TEXT_LINE_GAP: usize = 7;
+        const TEXT_LINE_STEP_Y: usize = TEXT_LINE_HEIGHT + TEXT_LINE_GAP;
+        const TEXT_LINE_WIDTHS: &[usize] = &[
+            MAX_LINE_WIDTH,
+            MAX_LINE_WIDTH - 4,
+            MAX_LINE_WIDTH - 10,
+            MAX_LINE_WIDTH - 6,
+            MAX_LINE_WIDTH - 18,
+        ];
+
+        let background = egui::Color32::TRANSPARENT;
+        let border = egui::Color32::from_rgb(40, 49, 60);
+        let header = border;
+        let paper = egui::Color32::from_rgb(20, 27, 34);
+        let text_line = egui::Color32::from_rgb(142, 152, 164);
+        let mut pixels = vec![background; OUTER_WIDTH * OUTER_HEIGHT];
+
+        let fill_rect = |pixels: &mut [egui::Color32],
+                         x: usize,
+                         y: usize,
+                         rect_width: usize,
+                         rect_height: usize,
+                         color: egui::Color32| {
+            let clamped_x1 = (x + rect_width).min(OUTER_WIDTH);
+            let clamped_y1 = (y + rect_height).min(OUTER_HEIGHT);
+            for row_y in y.min(OUTER_HEIGHT)..clamped_y1 {
+                let row = row_y * OUTER_WIDTH;
+                for col_x in x.min(OUTER_WIDTH)..clamped_x1 {
+                    pixels[row + col_x] = color;
+                }
+            }
+        };
+
+        fill_rect(&mut pixels, 0, 0, OUTER_WIDTH, OUTER_HEIGHT, border);
+        fill_rect(
+            &mut pixels,
+            INNER_X,
+            INNER_Y,
+            INNER_WIDTH,
+            INNER_HEIGHT,
+            paper,
+        );
+        fill_rect(
+            &mut pixels,
+            INNER_X,
+            INNER_Y,
+            INNER_WIDTH,
+            HEADER_HEIGHT,
+            header,
+        );
+        for (line_index, &line_width) in TEXT_LINE_WIDTHS.iter().enumerate() {
+            fill_rect(
+                &mut pixels,
+                TEXT_START_X,
+                TEXT_START_Y + (line_index * TEXT_LINE_STEP_Y),
+                line_width,
+                TEXT_LINE_HEIGHT,
+                text_line,
+            );
+        }
+
+        let texture_name = self.next_history_texture_name(texture_key_prefix);
+        ctx.load_texture(
+            texture_name,
+            ColorImage {
+                size: [OUTER_WIDTH, OUTER_HEIGHT],
+                pixels,
+            },
+            TextureOptions::LINEAR,
+        )
+    }
+
     fn upsert_history_entry(&mut self, entry: HistoryEntry) {
         if let Some(existing_index) = self
             .history_entries
@@ -1051,6 +1174,23 @@ impl DicomViewerApp {
         });
     }
 
+    fn push_report_history_entry(
+        &mut self,
+        path: PathBuf,
+        report: StructuredReportDocument,
+        ctx: &egui::Context,
+    ) {
+        let thumb_texture = self.build_report_history_thumb(&report, "report", ctx);
+        let history_paths = vec![path.clone()];
+        self.upsert_history_entry(HistoryEntry {
+            id: history_id_from_paths(&history_paths),
+            kind: HistoryKind::Report(Box::new(HistoryReportData { path, report })),
+            thumbs: vec![HistoryThumb {
+                texture: thumb_texture,
+            }],
+        });
+    }
+
     fn current_history_id(&self) -> Option<String> {
         if let Some(path) = self.current_single_path.as_ref() {
             let paths = vec![path.clone()];
@@ -1070,6 +1210,7 @@ impl DicomViewerApp {
 
     fn has_open_study(&self) -> bool {
         self.image.is_some()
+            || self.report.is_some()
             || self.current_single_path.is_some()
             || self.has_mammo_group()
             || self.single_load_receiver.is_some()
@@ -1170,7 +1311,32 @@ impl DicomViewerApp {
         tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
     ) {
         let load_paths = prepared.image_paths;
+        let report_paths = prepared.structured_report_paths;
         let gsps_overlays = prepared.gsps_overlays;
+
+        if load_paths.is_empty() {
+            let result = match report_paths.as_slice() {
+                [path] => load_structured_report(path)
+                    .map(|report| HistoryPreloadResult::Report {
+                        path: path.clone(),
+                        report: Box::new(report),
+                    })
+                    .map_err(|err| format!("{err:#}")),
+                _ => Err("Unsupported preload group size".to_string()),
+            };
+            let _ = tx.send(result);
+            return;
+        }
+
+        for path in report_paths {
+            let result = load_structured_report(&path)
+                .map(|report| HistoryPreloadResult::Report {
+                    path: path.clone(),
+                    report: Box::new(report),
+                })
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(result);
+        }
 
         let result = match load_paths.len() {
             1 => {
@@ -1285,6 +1451,11 @@ impl DicomViewerApp {
                     );
                 }
             }
+            HistoryKind::Report(report) => {
+                if let Some(path) = self.current_single_path.as_ref() {
+                    report.path = path.clone();
+                }
+            }
         }
     }
 
@@ -1301,6 +1472,7 @@ impl DicomViewerApp {
 
         match kind {
             HistoryKind::Single(single) => {
+                self.report = None;
                 self.image = Some(single.image);
                 self.current_single_path = Some(single.path);
                 self.texture = None;
@@ -1369,6 +1541,15 @@ impl DicomViewerApp {
                 log::info!("Loaded grouped study from memory cache.");
                 ctx.request_repaint();
             }
+            HistoryKind::Report(report) => {
+                self.clear_single_viewer();
+                self.mammo_group.clear();
+                self.report = Some(report.report);
+                self.current_single_path = Some(report.path);
+                self.clear_load_error();
+                log::info!("Loaded structured report from memory cache.");
+                ctx.request_repaint();
+            }
         }
     }
 
@@ -1428,9 +1609,13 @@ impl DicomViewerApp {
         let mut preload_groups = Vec::with_capacity(groups.len());
         for (index, group) in groups.iter().enumerate() {
             let prepared = Self::prepare_load_paths(group.clone());
-            let image_count = prepared.image_paths.len();
-            if !Self::is_supported_group_size(image_count) {
-                let err = Self::format_group_size_error(index + 1, image_count);
+            let entry_count = if prepared.image_paths.is_empty() {
+                prepared.structured_report_paths.len()
+            } else {
+                prepared.image_paths.len()
+            };
+            if !Self::is_supported_prepared_group(&prepared) {
+                let err = Self::format_group_size_error(index + 1, entry_count);
                 self.set_load_error(err.clone());
                 log::warn!("{err}");
                 return;
@@ -1719,6 +1904,11 @@ impl DicomViewerApp {
                                 self.dicomweb_active_path_receiver = None;
                             }
                         }
+                        Ok(DicomPathKind::StructuredReport) => {
+                            log::info!(
+                                "Ignoring streamed Structured Report in multi-view image mode."
+                            );
+                        }
                         Ok(DicomPathKind::Other) => {
                             log::warn!("Ignoring streamed non-image DICOM input.");
                         }
@@ -1811,6 +2001,11 @@ impl DicomViewerApp {
                             self.push_group_history_entry(&ordered, 0, ctx);
                             self.move_current_history_to_front();
                         }
+                        break;
+                    }
+                    Ok(HistoryPreloadResult::Report { path, report }) => {
+                        self.push_report_history_entry(path, *report, ctx);
+                        self.move_current_history_to_front();
                         break;
                     }
                     Err(err) => {
@@ -2062,8 +2257,12 @@ impl DicomViewerApp {
         match receiver.try_recv() {
             Ok(result) => {
                 match result {
-                    Ok(pending) => {
+                    Ok(PendingSingleLoad::Image(pending)) => {
                         self.apply_loaded_single(pending.path, pending.image, ctx);
+                        self.clear_load_error();
+                    }
+                    Ok(PendingSingleLoad::StructuredReport { path, report }) => {
+                        self.apply_loaded_structured_report(path, report, ctx);
                         self.clear_load_error();
                     }
                     Err(err) => {
@@ -2142,7 +2341,9 @@ impl DicomViewerApp {
         ctx: &egui::Context,
     ) -> Result<(), ()> {
         let paths = prepared.image_paths;
-        if !paths.is_empty() || prepared.gsps_files_found > 0 {
+        let structured_report_paths = prepared.structured_report_paths;
+        if !paths.is_empty() || !structured_report_paths.is_empty() || prepared.gsps_files_found > 0
+        {
             self.sync_current_state_to_history();
         }
         self.history_preload_receiver = None;
@@ -2150,6 +2351,14 @@ impl DicomViewerApp {
         self.gsps_overlay_visible = false;
 
         if paths.is_empty() {
+            if let Some((report_path, remaining_reports)) = structured_report_paths
+                .split_first()
+                .map(|(first, rest)| (first.clone(), rest))
+            {
+                self.stage_structured_report_history_entries(remaining_reports, ctx);
+                self.load_structured_report_path(report_path, ctx);
+                return Ok(());
+            }
             if prepared.gsps_files_found > 0 {
                 self.set_load_error("GSPS detected, but no displayable DICOM image was selected.");
                 log::warn!("GSPS detected, but no displayable DICOM image was selected.");
@@ -2157,12 +2366,25 @@ impl DicomViewerApp {
                 return Err(());
             }
             if prepared.other_files_found > 0 {
-                self.set_load_error("Selected DICOM objects are not displayable images.");
-                log::warn!("Selected DICOM objects are not displayable images.");
+                self.set_load_error(
+                    "Selected DICOM objects are not displayable images or structured reports.",
+                );
+                log::warn!(
+                    "Selected DICOM objects are not displayable images or structured reports."
+                );
                 ctx.request_repaint();
                 return Err(());
             }
             return Err(());
+        }
+
+        if !structured_report_paths.is_empty() {
+            self.stage_structured_report_history_entries(&structured_report_paths, ctx);
+            log::info!(
+                "Opening {} image DICOM(s) and staging {} structured report object(s) as separate history entries.",
+                paths.len(),
+                structured_report_paths.len()
+            );
         }
 
         match paths.len() {
@@ -2197,6 +2419,24 @@ impl DicomViewerApp {
         self.apply_prepared_load_paths(prepared, ctx)
     }
 
+    fn stage_structured_report_history_entries(
+        &mut self,
+        report_paths: &[PathBuf],
+        ctx: &egui::Context,
+    ) {
+        for path in report_paths {
+            match load_structured_report(path) {
+                Ok(report) => self.push_report_history_entry(path.clone(), report, ctx),
+                Err(err) => {
+                    log::warn!(
+                        "Could not stage Structured Report {} into history: {err:#}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
     fn load_path(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
@@ -2205,14 +2445,33 @@ impl DicomViewerApp {
         self.clear_load_error();
         log::info!("Loading selected DICOM...");
         log::info!(target: "perf", "single-open started");
-        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         thread::spawn(move || {
             let result = match load_dicom(&path) {
                 Ok(image) => {
                     log::info!(target: "perf", "single-open dicom-load completed");
-                    Ok(PendingLoad { path, image })
+                    Ok(PendingSingleLoad::Image(PendingLoad { path, image }))
                 }
                 Err(err) => Err(format!("Error opening selected DICOM: {err:#}")),
+            };
+            let _ = tx.send(result);
+        });
+        self.single_load_receiver = Some(rx);
+        ctx.request_repaint();
+    }
+
+    fn load_structured_report_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.single_load_receiver = None;
+        self.history_pushed_for_active_group = false;
+        self.clear_load_error();
+        log::info!("Loading selected Structured Report...");
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        thread::spawn(move || {
+            let result = match load_structured_report(&path) {
+                Ok(report) => Ok(PendingSingleLoad::StructuredReport { path, report }),
+                Err(err) => Err(format!("Error opening selected Structured Report: {err:#}")),
             };
             let _ = tx.send(result);
         });
@@ -2237,6 +2496,7 @@ impl DicomViewerApp {
             .clamp(1.0, 120.0);
 
         let history_image = image.clone();
+        self.report = None;
         self.image = Some(image);
         self.current_single_path = Some(path.clone());
         self.mammo_group.clear();
@@ -2261,6 +2521,22 @@ impl DicomViewerApp {
             );
         }
         log::info!("Loaded selected DICOM.");
+    }
+
+    fn apply_loaded_structured_report(
+        &mut self,
+        path: PathBuf,
+        report: StructuredReportDocument,
+        ctx: &egui::Context,
+    ) {
+        self.clear_single_viewer();
+        self.clear_load_error();
+        self.push_report_history_entry(path.clone(), report.clone(), ctx);
+        self.report = Some(report);
+        self.current_single_path = Some(path);
+        self.pending_gsps_overlays.clear();
+        ctx.request_repaint();
+        log::info!("Loaded selected Structured Report.");
     }
 
     fn load_mammo_group_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
@@ -2475,6 +2751,16 @@ impl DicomViewerApp {
         } else {
             self.selected_mammo_viewport()
                 .map(|viewport| &viewport.image)
+        }
+    }
+
+    fn active_metadata(&self) -> Option<&[(String, String)]> {
+        if let Some(image) = self.active_image() {
+            Some(image.metadata.as_slice())
+        } else {
+            self.report
+                .as_ref()
+                .map(|report| report.metadata.as_slice())
         }
     }
 
@@ -2715,6 +3001,88 @@ impl DicomViewerApp {
                 }
             }
         }
+    }
+
+    fn show_structured_report_view(&self, ui: &mut egui::Ui, report: &StructuredReportDocument) {
+        ui.add_space(8.0);
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new(&report.title).strong().size(24.0));
+            ui.add_space(4.0);
+            let mut summary_fields = Vec::new();
+            if let Some(modality) = report.modality.as_deref() {
+                summary_fields.push(format!("Modality: {modality}"));
+            }
+            if let Some(completion_flag) = report.completion_flag.as_deref() {
+                summary_fields.push(format!("Completion: {completion_flag}"));
+            }
+            if let Some(verification_flag) = report.verification_flag.as_deref() {
+                summary_fields.push(format!("Verification: {verification_flag}"));
+            }
+            if !summary_fields.is_empty() {
+                ui.add(
+                    egui::Label::new(summary_fields.join("  |  "))
+                        .wrap()
+                        .halign(egui::Align::Center),
+                );
+            }
+        });
+        ui.add_space(12.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("structured-report-scroll")
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(720.0);
+
+                    if report.content.is_empty() {
+                        ui.add(
+                            egui::Label::new(
+                                "This Structured Report does not contain a parsable Content Sequence.",
+                            )
+                            .wrap()
+                            .halign(egui::Align::Center),
+                        );
+                        return;
+                    }
+
+                    for node in &report.content {
+                        Self::show_structured_report_node(ui, node, 0);
+                        ui.add_space(6.0);
+                    }
+                });
+            });
+    }
+
+    fn show_structured_report_node(ui: &mut egui::Ui, node: &StructuredReportNode, depth: usize) {
+        let header = match node.relationship_type.as_deref() {
+            Some(relationship_type) => format!("{relationship_type}  {}", node.label),
+            None => node.label.clone(),
+        };
+
+        if node.children.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(header).strong());
+                if let Some(value) = node.value.as_deref() {
+                    ui.add(egui::Label::new(value).wrap().halign(egui::Align::Center));
+                }
+            });
+            return;
+        }
+
+        egui::CollapsingHeader::new(header)
+            .default_open(depth < 2)
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    if let Some(value) = node.value.as_deref() {
+                        ui.add(egui::Label::new(value).wrap().halign(egui::Align::Center));
+                        ui.add_space(4.0);
+                    }
+                    for child in &node.children {
+                        Self::show_structured_report_node(ui, child, depth.saturating_add(1));
+                        ui.add_space(4.0);
+                    }
+                });
+            });
     }
 
     fn apply_window_level_drag(
@@ -3108,14 +3476,9 @@ impl DicomViewerApp {
                         } else {
                             egui::Color32::from_gray(35)
                         };
-                        let fill_color = if is_current {
-                            egui::Color32::from_gray(18)
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        };
 
                         egui::Frame::none()
-                            .fill(fill_color)
+                            .fill(egui::Color32::TRANSPARENT)
                             .stroke(egui::Stroke::new(1.0, stroke_color))
                             .inner_margin(egui::Margin::same(6.0))
                             .show(ui, |ui| {
@@ -3872,6 +4235,8 @@ impl eframe::App for DicomViewerApp {
                         }
                     }
                 }
+            } else if let Some(report) = self.report.as_ref() {
+                self.show_structured_report_view(ui, report);
             } else {
                 let is_loading = self.is_loading();
                 ui.allocate_ui_with_layout(
@@ -3888,7 +4253,7 @@ impl eframe::App for DicomViewerApp {
             }
         });
 
-        if let Some(active_image) = self.active_image() {
+        if let Some(metadata) = self.active_metadata() {
             let overlay_height = (ctx.screen_rect().height() * 0.62).max(180.0);
             egui::Area::new(egui::Id::new("metadata-overlay-left"))
                 .order(egui::Order::Foreground)
@@ -3901,7 +4266,7 @@ impl eframe::App for DicomViewerApp {
                         .id_salt("metadata-overlay-scroll")
                         .show(ui, |ui| {
                             let mut shown_count = 0usize;
-                            for (key, value) in &active_image.metadata {
+                            for (key, value) in metadata {
                                 if !self.visible_metadata_fields.contains(key.as_str()) {
                                     continue;
                                 }
@@ -4239,6 +4604,20 @@ mod tests {
                 cine_fps: DEFAULT_CINE_FPS,
             })),
             thumbs: Vec::new(),
+        }
+    }
+
+    fn report_history_entry(ctx: &egui::Context, path: &str, texture_name: &str) -> HistoryEntry {
+        let path_buf = PathBuf::from(path);
+        HistoryEntry {
+            id: history_id_from_paths(std::slice::from_ref(&path_buf)),
+            kind: HistoryKind::Report(Box::new(HistoryReportData {
+                path: path_buf,
+                report: StructuredReportDocument::test_stub(),
+            })),
+            thumbs: vec![HistoryThumb {
+                texture: test_texture(ctx, texture_name),
+            }],
         }
     }
 
@@ -4897,6 +5276,104 @@ mod tests {
     }
 
     #[test]
+    fn open_history_entry_report_clears_load_error() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            load_error_message: Some("Previous load failed.".to_string()),
+            history_entries: vec![report_history_entry(
+                &ctx,
+                "cached-report.dcm",
+                "history-report-error-clear",
+            )],
+            ..Default::default()
+        };
+
+        app.open_history_entry(0, &ctx);
+
+        assert!(app.load_error_message.is_none());
+        assert_eq!(
+            app.report.as_ref().map(|report| report.title.as_str()),
+            Some("Structured Report")
+        );
+        assert_eq!(
+            app.current_single_path,
+            Some(PathBuf::from("cached-report.dcm"))
+        );
+    }
+
+    #[test]
+    fn open_history_entry_report_clears_active_group_view() {
+        let ctx = egui::Context::default();
+        let texture = test_texture(&ctx, "active-group-texture");
+        let mut app = DicomViewerApp {
+            mammo_group: vec![
+                Some(MammoViewport {
+                    path: PathBuf::from("group-a.dcm"),
+                    image: DicomImage::test_stub(None),
+                    texture: texture.clone(),
+                    label: "A".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+                Some(MammoViewport {
+                    path: PathBuf::from("group-b.dcm"),
+                    image: DicomImage::test_stub(None),
+                    texture,
+                    label: "B".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+            ],
+            history_entries: vec![report_history_entry(
+                &ctx,
+                "cached-report.dcm",
+                "history-report-clears-group",
+            )],
+            ..Default::default()
+        };
+
+        app.open_history_entry(0, &ctx);
+
+        assert!(app.mammo_group.is_empty());
+        assert_eq!(
+            app.report.as_ref().map(|report| report.title.as_str()),
+            Some("Structured Report")
+        );
+    }
+
+    #[test]
+    fn poll_history_preload_can_enqueue_report_history_entry() {
+        let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        tx.send(Ok(HistoryPreloadResult::Report {
+            path: PathBuf::from("preloaded-report.dcm"),
+            report: Box::new(StructuredReportDocument::test_stub()),
+        }))
+        .expect("report preload should send");
+
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            history_preload_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.poll_history_preload(&ctx);
+
+        assert_eq!(app.history_entries.len(), 1);
+        assert_eq!(
+            app.history_entries[0].id,
+            history_id_from_paths(&[PathBuf::from("preloaded-report.dcm")])
+        );
+    }
+
+    #[test]
     fn close_current_group_removes_active_entry_and_opens_next_history_item() {
         let ctx = egui::Context::default();
         let mut app = DicomViewerApp {
@@ -4978,7 +5455,7 @@ mod tests {
 
     #[test]
     fn poll_single_load_sets_user_visible_error_on_failure() {
-        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         tx.send(Err(
             "Error opening selected DICOM: decode failed".to_string()
         ))
@@ -5000,11 +5477,11 @@ mod tests {
 
     #[test]
     fn poll_single_load_clears_user_visible_error_on_success() {
-        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
-        tx.send(Ok(PendingLoad {
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        tx.send(Ok(PendingSingleLoad::Image(PendingLoad {
             path: PathBuf::from("selected.dcm"),
             image: DicomImage::test_stub(None),
-        }))
+        })))
         .expect("success should send");
 
         let mut app = DicomViewerApp {
@@ -5017,6 +5494,39 @@ mod tests {
         app.poll_single_load(&ctx);
 
         assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn poll_single_load_can_activate_structured_report() {
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        tx.send(Ok(PendingSingleLoad::StructuredReport {
+            path: PathBuf::from("report.dcm"),
+            report: StructuredReportDocument::test_stub(),
+        }))
+        .expect("report should send");
+
+        let mut app = DicomViewerApp {
+            single_load_receiver: Some(rx),
+            load_error_message: Some("Previous load failed.".to_string()),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_single_load(&ctx);
+
+        assert!(app.load_error_message.is_none());
+        assert!(app.image.is_none());
+        assert!(app.texture.is_none());
+        assert_eq!(app.current_single_path, Some(PathBuf::from("report.dcm")));
+        assert_eq!(
+            app.report.as_ref().map(|report| report.title.as_str()),
+            Some("Structured Report")
+        );
+        assert_eq!(app.history_entries.len(), 1);
+        assert_eq!(
+            app.history_entries[0].id,
+            history_id_from_paths(&[PathBuf::from("report.dcm")])
+        );
     }
 
     #[test]
@@ -5050,7 +5560,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             app.load_error_message.as_deref(),
-            Some("Selected DICOM objects are not displayable images.")
+            Some("Selected DICOM objects are not displayable images or structured reports.")
         );
     }
 
