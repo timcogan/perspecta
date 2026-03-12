@@ -7,10 +7,13 @@ use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use reqwest::header::ACCEPT;
 
+use crate::dicom::{is_gsps_sop_class_uid, is_structured_report_sop_class_uid, DicomPathKind};
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest};
 use crate::mammo::{classify_laterality, classify_view};
 
+const TAG_SOP_CLASS_UID: &str = "00080016";
 const TAG_SOP_INSTANCE_UID: &str = "00080018";
+const TAG_MODALITY: &str = "00080060";
 const TAG_SERIES_INSTANCE_UID: &str = "0020000E";
 const TAG_INSTANCE_NUMBER: &str = "00200013";
 const TAG_VIEW_POSITION: &str = "00185101";
@@ -21,6 +24,8 @@ const TAG_LATERALITY: &str = "00200060";
 struct MetadataInstance {
     series_uid: Option<String>,
     instance_uid: String,
+    sop_class_uid: Option<String>,
+    modality: Option<String>,
     view_position: Option<String>,
     laterality: Option<String>,
     instance_number: Option<i32>,
@@ -147,12 +152,19 @@ where
         }
 
         let selected_instances = select_group_instances_from_reduced_sets(reduced_by_series);
+        let displayable_image_count = displayable_group_image_count(&selected_instances);
 
-        if !matches!(selected_instances.len(), 1..=4 | 8) {
+        if displayable_image_count > 0 && !matches!(displayable_image_count, 1..=4 | 8) {
             bail!(
-                "DICOMweb group {} resolved to {} instances; each group must resolve to 1, 2, 3, 4, or 8 DICOM instances",
+                "DICOMweb group {} resolved to {} displayable image instances; each group must resolve to 1, 2, 3, 4, or 8 displayable images",
                 group_index,
-                selected_instances.len()
+                displayable_image_count
+            );
+        }
+        if displayable_image_count == 0 && !has_displayable_group_content(&selected_instances) {
+            bail!(
+                "DICOMweb group {} resolved to no displayable images or structured reports",
+                group_index
             );
         }
 
@@ -167,9 +179,9 @@ where
         .map(|_| None::<Vec<PathBuf>>)
         .collect::<Vec<_>>();
 
-    on_active_path(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(
-        selected_instances_by_group[open_group].len(),
-    ));
+    if let Some(count) = active_group_instance_count(&selected_instances_by_group[open_group]) {
+        on_active_path(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(count));
+    }
     downloaded_groups[open_group] = Some(download_instances_streaming(
         &client,
         &base,
@@ -233,6 +245,77 @@ fn select_group_instances_from_reduced_sets(
         }
     }
     selected_instances
+}
+
+fn modality_indicates_image(modality: &str) -> bool {
+    matches!(
+        modality.to_ascii_uppercase().as_str(),
+        "CR" | "CT"
+            | "DX"
+            | "IO"
+            | "MG"
+            | "MR"
+            | "NM"
+            | "OT"
+            | "PT"
+            | "RF"
+            | "RG"
+            | "RTIMAGE"
+            | "SC"
+            | "US"
+            | "XA"
+            | "XC"
+    )
+}
+
+fn metadata_instance_kind(instance: &MetadataInstance) -> DicomPathKind {
+    if instance
+        .sop_class_uid
+        .as_deref()
+        .is_some_and(is_gsps_sop_class_uid)
+    {
+        return DicomPathKind::Gsps;
+    }
+    if instance
+        .sop_class_uid
+        .as_deref()
+        .is_some_and(is_structured_report_sop_class_uid)
+        || instance
+            .modality
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("SR"))
+    {
+        return DicomPathKind::StructuredReport;
+    }
+    if instance
+        .modality
+        .as_deref()
+        .is_some_and(modality_indicates_image)
+    {
+        return DicomPathKind::Image;
+    }
+    DicomPathKind::Other
+}
+
+fn displayable_group_image_count(instances: &[MetadataInstance]) -> usize {
+    instances
+        .iter()
+        .filter(|instance| metadata_instance_kind(instance) == DicomPathKind::Image)
+        .count()
+}
+
+fn has_displayable_group_content(instances: &[MetadataInstance]) -> bool {
+    instances.iter().any(|instance| {
+        matches!(
+            metadata_instance_kind(instance),
+            DicomPathKind::Image | DicomPathKind::StructuredReport
+        )
+    })
+}
+
+fn active_group_instance_count(instances: &[MetadataInstance]) -> Option<usize> {
+    let image_count = displayable_group_image_count(instances);
+    (image_count > 0).then_some(image_count)
 }
 
 fn download_instances_streaming<F>(
@@ -364,6 +447,8 @@ fn parse_metadata_instances(json: &str) -> Result<Vec<MetadataInstance>> {
         let metadata = MetadataInstance {
             series_uid: first_tag_string(obj, TAG_SERIES_INSTANCE_UID),
             instance_uid,
+            sop_class_uid: normalize_metadata_string(first_tag_string(obj, TAG_SOP_CLASS_UID)),
+            modality: normalize_metadata_string(first_tag_string(obj, TAG_MODALITY)),
             view_position: first_tag_string(obj, TAG_VIEW_POSITION),
             laterality: first_tag_string(obj, TAG_IMAGE_LATERALITY)
                 .or_else(|| first_tag_string(obj, TAG_LATERALITY)),
@@ -374,6 +459,13 @@ fn parse_metadata_instances(json: &str) -> Result<Vec<MetadataInstance>> {
     }
 
     Ok(instances)
+}
+
+fn normalize_metadata_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 fn split_top_level_json_objects(input: &str) -> Result<Vec<&str>> {
@@ -906,6 +998,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    use crate::dicom::{BASIC_TEXT_SR_SOP_CLASS_UID, GSPS_SOP_CLASS_UID};
+
     fn metadata_instance(
         instance_uid: &str,
         view_position: Option<&str>,
@@ -915,6 +1009,8 @@ mod tests {
         MetadataInstance {
             series_uid: Some("series_a".to_string()),
             instance_uid: instance_uid.to_string(),
+            sop_class_uid: None,
+            modality: Some("MG".to_string()),
             view_position: view_position.map(|value| value.to_string()),
             laterality: laterality.map(|value| value.to_string()),
             instance_number,
@@ -942,6 +1038,23 @@ mod tests {
             first_tag_string(object, TAG_INSTANCE_NUMBER).as_deref(),
             Some("42")
         );
+    }
+
+    #[test]
+    fn parse_metadata_instances_trims_sop_class_uid_and_modality() {
+        let json = format!(
+            r#"[{{"00080018":{{"vr":"UI","Value":["instance_uid_alpha"]}},"00080016":{{"vr":"UI","Value":["{} "]}},"00080060":{{"vr":"CS","Value":["MG "]}}, "0020000E":{{"vr":"UI","Value":["series_uid_alpha"]}}}}]"#,
+            BASIC_TEXT_SR_SOP_CLASS_UID
+        );
+
+        let instances = parse_metadata_instances(&json).expect("metadata should parse");
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(
+            instances[0].sop_class_uid.as_deref(),
+            Some(BASIC_TEXT_SR_SOP_CLASS_UID)
+        );
+        assert_eq!(instances[0].modality.as_deref(), Some("MG"));
     }
 
     #[test]
@@ -1113,11 +1226,84 @@ mod tests {
     }
 
     #[test]
+    fn displayable_group_image_count_excludes_structured_reports_and_gsps() {
+        let image = metadata_instance("inst_image", Some("CC"), Some("R"), Some(1));
+        let structured_report = MetadataInstance {
+            instance_uid: "inst_sr".to_string(),
+            sop_class_uid: Some(BASIC_TEXT_SR_SOP_CLASS_UID.to_string()),
+            modality: Some("SR".to_string()),
+            ..metadata_instance("inst_sr", None, None, Some(2))
+        };
+        let gsps = MetadataInstance {
+            instance_uid: "inst_gsps".to_string(),
+            sop_class_uid: Some(GSPS_SOP_CLASS_UID.to_string()),
+            ..metadata_instance("inst_gsps", None, None, Some(3))
+        };
+
+        let instances = vec![image, structured_report, gsps];
+
+        assert_eq!(displayable_group_image_count(&instances), 1);
+        assert!(has_displayable_group_content(&instances));
+    }
+
+    #[test]
+    fn has_displayable_group_content_accepts_structured_report_only_groups() {
+        let instances = vec![MetadataInstance {
+            instance_uid: "inst_sr".to_string(),
+            sop_class_uid: Some(BASIC_TEXT_SR_SOP_CLASS_UID.to_string()),
+            modality: Some("SR".to_string()),
+            ..metadata_instance("inst_sr", None, None, Some(1))
+        }];
+
+        assert_eq!(displayable_group_image_count(&instances), 0);
+        assert!(has_displayable_group_content(&instances));
+    }
+
+    #[test]
+    fn active_group_instance_count_skips_structured_report_only_groups() {
+        let sr_only = vec![MetadataInstance {
+            instance_uid: "inst_sr".to_string(),
+            sop_class_uid: Some(BASIC_TEXT_SR_SOP_CLASS_UID.to_string()),
+            modality: Some("SR".to_string()),
+            ..metadata_instance("inst_sr", None, None, Some(1))
+        }];
+        let mixed = vec![
+            metadata_instance("inst_image", Some("CC"), Some("R"), Some(1)),
+            MetadataInstance {
+                instance_uid: "inst_sr".to_string(),
+                sop_class_uid: Some(BASIC_TEXT_SR_SOP_CLASS_UID.to_string()),
+                modality: Some("SR".to_string()),
+                ..metadata_instance("inst_sr", None, None, Some(2))
+            },
+        ];
+
+        assert_eq!(active_group_instance_count(&sr_only), None);
+        assert_eq!(active_group_instance_count(&mixed), Some(1));
+    }
+
+    #[test]
+    fn metadata_instance_kind_defaults_unknown_metadata_to_other() {
+        let instance = MetadataInstance {
+            series_uid: Some("series_a".to_string()),
+            instance_uid: "inst_unknown".to_string(),
+            sop_class_uid: None,
+            modality: None,
+            view_position: None,
+            laterality: None,
+            instance_number: Some(1),
+        };
+
+        assert_eq!(metadata_instance_kind(&instance), DicomPathKind::Other);
+    }
+
+    #[test]
     fn download_instances_streaming_emits_active_path_for_each_instance_in_order() {
         let instances = vec![
             MetadataInstance {
                 series_uid: Some("series_a".to_string()),
                 instance_uid: "inst_1".to_string(),
+                sop_class_uid: None,
+                modality: Some("MG".to_string()),
                 view_position: Some("CC".to_string()),
                 laterality: Some("R".to_string()),
                 instance_number: Some(1),
@@ -1125,6 +1311,8 @@ mod tests {
             MetadataInstance {
                 series_uid: Some("series_a".to_string()),
                 instance_uid: "inst_2".to_string(),
+                sop_class_uid: None,
+                modality: Some("MG".to_string()),
                 view_position: Some("MLO".to_string()),
                 laterality: Some("L".to_string()),
                 instance_number: Some(2),

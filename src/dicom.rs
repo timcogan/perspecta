@@ -44,16 +44,24 @@ pub const METADATA_FIELD_NAMES: &[&str] = &[
     "Laterality",
     "FrameLaterality",
     "InstanceNumber",
+    "ContentDate",
+    "ContentTime",
+    "CompletionFlag",
+    "VerificationFlag",
 ];
 
 pub const GSPS_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.11.1";
+pub const STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX: &str = "1.2.840.10008.5.1.4.1.1.88.";
 #[cfg(test)]
 pub const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
+#[cfg(test)]
+pub const BASIC_TEXT_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.11";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DicomPathKind {
     Image,
     Gsps,
+    StructuredReport,
     Other,
 }
 
@@ -118,6 +126,49 @@ impl GspsOverlay {
             };
             applies.then_some(&graphic.graphic)
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredReportNode {
+    pub relationship_type: Option<String>,
+    pub label: String,
+    pub value: Option<String>,
+    pub children: Vec<StructuredReportNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredReportDocument {
+    pub title: String,
+    pub modality: Option<String>,
+    pub completion_flag: Option<String>,
+    pub verification_flag: Option<String>,
+    pub content: Vec<StructuredReportNode>,
+    pub metadata: Vec<(String, String)>,
+}
+
+impl StructuredReportDocument {
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> Self {
+        Self {
+            title: "Structured Report".to_string(),
+            modality: Some("SR".to_string()),
+            completion_flag: Some("COMPLETE".to_string()),
+            verification_flag: Some("UNVERIFIED".to_string()),
+            content: vec![StructuredReportNode {
+                relationship_type: None,
+                label: "Findings".to_string(),
+                value: Some("No acute abnormality".to_string()),
+                children: Vec::new(),
+            }],
+            metadata: vec![
+                ("Modality".to_string(), "SR".to_string()),
+                (
+                    "SeriesDescription".to_string(),
+                    "Structured Report".to_string(),
+                ),
+            ],
+        }
     }
 }
 
@@ -275,6 +326,11 @@ pub fn is_gsps_sop_class_uid(uid: &str) -> bool {
     uid.trim() == GSPS_SOP_CLASS_UID
 }
 
+pub fn is_structured_report_sop_class_uid(uid: &str) -> bool {
+    uid.trim()
+        .starts_with(STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX)
+}
+
 pub fn classify_dicom_path(path: &Path) -> Result<DicomPathKind> {
     let obj = open_dicom_object(path)?;
     Ok(classify_dicom_object(&obj))
@@ -293,9 +349,31 @@ pub fn load_gsps_overlays(path: &Path) -> Result<HashMap<String, GspsOverlay>> {
     Ok(parse_gsps_overlays(&obj))
 }
 
+pub fn load_structured_report(path: &Path) -> Result<StructuredReportDocument> {
+    let obj = open_dicom_object(path)?;
+    if classify_dicom_object(&obj) != DicomPathKind::StructuredReport {
+        let sop_class = read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
+        bail!(
+            "{} is not a Structured Report object (SOPClassUID={})",
+            path.display(),
+            sop_class
+        );
+    }
+    Ok(parse_structured_report_document(&obj))
+}
+
 fn classify_dicom_object(obj: &DefaultDicomObject) -> DicomPathKind {
-    if read_string(obj, "SOPClassUID").is_some_and(|uid| is_gsps_sop_class_uid(&uid)) {
+    let sop_class_uid = read_string(obj, "SOPClassUID");
+
+    if sop_class_uid.as_deref().is_some_and(is_gsps_sop_class_uid) {
         return DicomPathKind::Gsps;
+    }
+    if sop_class_uid
+        .as_deref()
+        .is_some_and(is_structured_report_sop_class_uid)
+        || read_string(obj, "Modality").is_some_and(|value| value.eq_ignore_ascii_case("SR"))
+    {
+        return DicomPathKind::StructuredReport;
     }
     if obj.element(Tag(0x7FE0, 0x0010)).is_ok() || obj.element_by_name("PixelData").is_ok() {
         return DicomPathKind::Image;
@@ -428,6 +506,157 @@ fn collect_graphics_from_annotation(annotation: &InMemDicomObject) -> Vec<GspsGr
         graphics.extend(collect_graphics_from_graphic_object(graphic_item));
     }
     graphics
+}
+
+fn parse_structured_report_document(obj: &DefaultDicomObject) -> StructuredReportDocument {
+    const CONTENT_SEQUENCE: Tag = Tag(0x0040, 0xA730);
+
+    let mut content = sequence_items_from_object(obj, CONTENT_SEQUENCE)
+        .map(parse_structured_report_nodes)
+        .unwrap_or_default();
+
+    let mut title = content
+        .first()
+        .map(|node| node.label.clone())
+        .filter(|label| !label.is_empty() && label != "Container")
+        .or_else(|| read_string(obj, "SeriesDescription"))
+        .or_else(|| read_string(obj, "StudyDescription"))
+        .unwrap_or_else(|| "Structured Report".to_string());
+
+    if content.len() == 1 {
+        let root = content.remove(0);
+        if root.relationship_type.is_none() && root.value.is_none() && !root.children.is_empty() {
+            title = if root.label.is_empty() {
+                title
+            } else {
+                root.label
+            };
+            content = root.children;
+        } else {
+            content = vec![root];
+        }
+    }
+
+    StructuredReportDocument {
+        title,
+        modality: read_string(obj, "Modality"),
+        completion_flag: read_string(obj, "CompletionFlag"),
+        verification_flag: read_string(obj, "VerificationFlag"),
+        content,
+        metadata: collect_metadata(obj),
+    }
+}
+
+fn parse_structured_report_nodes(items: &[InMemDicomObject]) -> Vec<StructuredReportNode> {
+    items.iter().map(parse_structured_report_node).collect()
+}
+
+fn parse_structured_report_node(item: &InMemDicomObject) -> StructuredReportNode {
+    const CONTENT_SEQUENCE: Tag = Tag(0x0040, 0xA730);
+    const RELATIONSHIP_TYPE: Tag = Tag(0x0040, 0xA010);
+    const VALUE_TYPE: Tag = Tag(0x0040, 0xA040);
+    const CONCEPT_NAME_CODE_SEQUENCE: Tag = Tag(0x0040, 0xA043);
+
+    let value_type = read_item_string(item, VALUE_TYPE)
+        .unwrap_or_else(|| "CONTAINER".to_string())
+        .to_ascii_uppercase();
+    let label = read_code_sequence_display_from_item(item, CONCEPT_NAME_CODE_SEQUENCE)
+        .unwrap_or_else(|| default_sr_label(&value_type).to_string());
+
+    StructuredReportNode {
+        relationship_type: read_item_string(item, RELATIONSHIP_TYPE),
+        label,
+        value: structured_report_value(item, &value_type),
+        children: sequence_items_from_item(item, CONTENT_SEQUENCE)
+            .map(parse_structured_report_nodes)
+            .unwrap_or_default(),
+    }
+}
+
+fn structured_report_value(item: &InMemDicomObject, value_type: &str) -> Option<String> {
+    const TEXT_VALUE: Tag = Tag(0x0040, 0xA160);
+    const DATE_TIME: Tag = Tag(0x0040, 0xA120);
+    const DATE: Tag = Tag(0x0040, 0xA121);
+    const TIME: Tag = Tag(0x0040, 0xA122);
+    const PERSON_NAME: Tag = Tag(0x0040, 0xA123);
+    const UIDREF: Tag = Tag(0x0040, 0xA124);
+    const CONCEPT_CODE_SEQUENCE: Tag = Tag(0x0040, 0xA168);
+    const MEASURED_VALUE_SEQUENCE: Tag = Tag(0x0040, 0xA300);
+    const NUMERIC_VALUE: Tag = Tag(0x0040, 0xA30A);
+    const MEASUREMENT_UNITS_CODE_SEQUENCE: Tag = Tag(0x0040, 0x08EA);
+    const TEMPORAL_RANGE_TYPE: Tag = Tag(0x0040, 0xA130);
+    const GRAPHIC_TYPE: Tag = Tag(0x0070, 0x0023);
+
+    match value_type {
+        "TEXT" => read_item_string(item, TEXT_VALUE),
+        "CODE" => read_code_sequence_display_from_item(item, CONCEPT_CODE_SEQUENCE),
+        "NUM" => {
+            let measured_item = sequence_items_from_item(item, MEASURED_VALUE_SEQUENCE)
+                .and_then(|items| items.first())?;
+            let numeric_value = read_item_string(measured_item, NUMERIC_VALUE)?;
+            let units = read_code_sequence_display_from_item(
+                measured_item,
+                MEASUREMENT_UNITS_CODE_SEQUENCE,
+            );
+            Some(match units {
+                Some(units) => format!("{numeric_value} {units}"),
+                None => numeric_value,
+            })
+        }
+        "DATETIME" => read_item_string(item, DATE_TIME),
+        "DATE" => read_item_string(item, DATE),
+        "TIME" => read_item_string(item, TIME),
+        "PNAME" => read_item_string(item, PERSON_NAME),
+        "UIDREF" => read_item_string(item, UIDREF),
+        "IMAGE" | "COMPOSITE" | "WAVEFORM" => structured_report_reference_value(item),
+        "TCOORD" => read_item_string(item, TEMPORAL_RANGE_TYPE),
+        "SCOORD" | "SCOORD3D" => read_item_string(item, GRAPHIC_TYPE),
+        _ => None,
+    }
+}
+
+fn structured_report_reference_value(item: &InMemDicomObject) -> Option<String> {
+    const REFERENCED_SOP_SEQUENCE: Tag = Tag(0x0008, 0x1199);
+    const REFERENCED_SOP_CLASS_UID: Tag = Tag(0x0008, 0x1150);
+    const REFERENCED_SOP_INSTANCE_UID: Tag = Tag(0x0008, 0x1155);
+
+    let reference_item =
+        sequence_items_from_item(item, REFERENCED_SOP_SEQUENCE).and_then(|items| items.first())?;
+    let instance_uid = read_item_string(reference_item, REFERENCED_SOP_INSTANCE_UID)?;
+    let sop_class = read_item_string(reference_item, REFERENCED_SOP_CLASS_UID);
+
+    Some(match sop_class {
+        Some(sop_class) => format!("{instance_uid} ({sop_class})"),
+        None => instance_uid,
+    })
+}
+
+fn read_code_sequence_display_from_item(item: &InMemDicomObject, tag: Tag) -> Option<String> {
+    let code_item = sequence_items_from_item(item, tag).and_then(|items| items.first())?;
+    read_item_string(code_item, Tag(0x0008, 0x0104))
+        .or_else(|| read_item_string(code_item, Tag(0x0008, 0x0100)))
+        .or_else(|| read_item_string(code_item, Tag(0x0008, 0x0102)))
+}
+
+fn default_sr_label(value_type: &str) -> &'static str {
+    match value_type {
+        "CODE" => "Code",
+        "COMPOSITE" => "Referenced Object",
+        "CONTAINER" => "Container",
+        "DATE" => "Date",
+        "DATETIME" => "Date/Time",
+        "IMAGE" => "Referenced Image",
+        "NUM" => "Numeric Value",
+        "PNAME" => "Person Name",
+        "SCOORD" => "Spatial Coordinates",
+        "SCOORD3D" => "3D Spatial Coordinates",
+        "TCOORD" => "Temporal Coordinates",
+        "TEXT" => "Text",
+        "TIME" => "Time",
+        "UIDREF" => "UID Reference",
+        "WAVEFORM" => "Referenced Waveform",
+        _ => "Structured Report Item",
+    }
 }
 
 fn collect_graphics_from_graphic_object(graphic_item: &InMemDicomObject) -> Vec<GspsGraphic> {
@@ -581,6 +810,14 @@ fn read_item_multi_int(item: &InMemDicomObject, tag: Tag) -> Option<Vec<i32>> {
 
 pub fn load_dicom(path: &Path) -> Result<DicomImage> {
     let obj = open_dicom_object(path)?;
+    if classify_dicom_object(&obj) == DicomPathKind::StructuredReport {
+        let sop_class = read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
+        bail!(
+            "{} is a Structured Report object (SOPClassUID={}); use load_structured_report() instead",
+            path.display(),
+            sop_class
+        );
+    }
 
     let width: usize = obj
         .element_by_name("Columns")
@@ -1397,6 +1634,72 @@ mod tests {
         item
     }
 
+    fn unique_test_file_path(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after UNIX_EPOCH")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "perspecta-{prefix}-{}-{nanos}.dcm",
+            std::process::id()
+        ))
+    }
+
+    fn code_item(code_meaning: &str) -> InMemDicomObject {
+        InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0008, 0x0104),
+            VR::LO,
+            code_meaning,
+        )])
+    }
+
+    fn numeric_measurement_item(value: &str, units: &str) -> InMemDicomObject {
+        InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0040, 0xA30A), VR::DS, value),
+            DataElement::new(
+                Tag(0x0040, 0x08EA),
+                VR::SQ,
+                DataSetSequence::from(vec![code_item(units)]),
+            ),
+        ])
+    }
+
+    fn sr_content_item(
+        value_type: &str,
+        relationship_type: Option<&str>,
+        concept_name: Option<&str>,
+        value: Option<DataElement<InMemDicomObject>>,
+        children: Vec<InMemDicomObject>,
+    ) -> InMemDicomObject {
+        let mut item = InMemDicomObject::new_empty();
+        item.put(DataElement::new(Tag(0x0040, 0xA040), VR::CS, value_type));
+        if let Some(relationship_type) = relationship_type {
+            item.put(DataElement::new(
+                Tag(0x0040, 0xA010),
+                VR::CS,
+                relationship_type,
+            ));
+        }
+        if let Some(concept_name) = concept_name {
+            item.put(DataElement::new(
+                Tag(0x0040, 0xA043),
+                VR::SQ,
+                DataSetSequence::from(vec![code_item(concept_name)]),
+            ));
+        }
+        if let Some(value) = value {
+            item.put(value);
+        }
+        if !children.is_empty() {
+            item.put(DataElement::new(
+                Tag(0x0040, 0xA730),
+                VR::SQ,
+                DataSetSequence::from(children),
+            ));
+        }
+        item
+    }
+
     #[test]
     fn repair_inserts_group_length_when_missing() {
         let mut bytes = vec![0u8; 128];
@@ -1482,6 +1785,127 @@ mod tests {
     fn parse_graphic_points_reads_xy_pairs() {
         let points = parse_graphic_points(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
         assert_eq!(points, vec![(10.0, 20.0), (30.0, 40.0), (50.0, 60.0)]);
+    }
+
+    #[test]
+    fn classify_dicom_object_recognizes_structured_reports() {
+        let sr_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+        ]);
+
+        let sr_obj = sr_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(BASIC_TEXT_SR_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("4.3.2.1"),
+            )
+            .expect("SR test object should build file meta");
+
+        assert_eq!(
+            classify_dicom_object(&sr_obj),
+            DicomPathKind::StructuredReport
+        );
+    }
+
+    #[test]
+    fn load_dicom_rejects_structured_reports_with_clear_guidance() {
+        let sr_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+        ]);
+
+        let sr_obj = sr_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(BASIC_TEXT_SR_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("4.3.2.3"),
+            )
+            .expect("SR test object should build file meta");
+
+        let path = unique_test_file_path("load-dicom-rejects-sr");
+        sr_obj
+            .write_to_file(&path)
+            .expect("SR test object should write to disk");
+
+        let err = load_dicom(&path).expect_err("load_dicom should reject structured reports");
+        let _ = std::fs::remove_file(&path);
+
+        let message = format!("{err:#}");
+        assert!(message.contains("Structured Report object"));
+        assert!(message.contains(BASIC_TEXT_SR_SOP_CLASS_UID));
+        assert!(message.contains("load_structured_report()"));
+    }
+
+    #[test]
+    fn parse_structured_report_document_extracts_title_and_content() {
+        let findings = sr_content_item(
+            "TEXT",
+            Some("CONTAINS"),
+            Some("Findings"),
+            Some(DataElement::new(
+                Tag(0x0040, 0xA160),
+                VR::UT,
+                "No acute cardiopulmonary abnormality.",
+            )),
+            Vec::new(),
+        );
+        let heart_rate = sr_content_item(
+            "NUM",
+            Some("CONTAINS"),
+            Some("Heart Rate"),
+            Some(DataElement::new(
+                Tag(0x0040, 0xA300),
+                VR::SQ,
+                DataSetSequence::from(vec![numeric_measurement_item("72", "bpm")]),
+            )),
+            Vec::new(),
+        );
+        let root = sr_content_item(
+            "CONTAINER",
+            None,
+            Some("Impression"),
+            None,
+            vec![findings, heart_rate],
+        );
+
+        let sr_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+            DataElement::new(Tag(0x0008, 0x103E), VR::LO, "Chest SR"),
+            DataElement::new(Tag(0x0040, 0xA491), VR::CS, "COMPLETE"),
+            DataElement::new(Tag(0x0040, 0xA493), VR::CS, "UNVERIFIED"),
+            DataElement::new(
+                Tag(0x0040, 0xA730),
+                VR::SQ,
+                DataSetSequence::from(vec![root]),
+            ),
+        ]);
+
+        let sr_obj = sr_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(BASIC_TEXT_SR_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("4.3.2.2"),
+            )
+            .expect("SR test object should build file meta");
+
+        let report = parse_structured_report_document(&sr_obj);
+        assert_eq!(report.title, "Impression");
+        assert_eq!(report.modality.as_deref(), Some("SR"));
+        assert_eq!(report.completion_flag.as_deref(), Some("COMPLETE"));
+        assert_eq!(report.verification_flag.as_deref(), Some("UNVERIFIED"));
+        assert_eq!(report.content.len(), 2);
+        assert_eq!(report.content[0].label, "Findings");
+        assert_eq!(
+            report.content[0].value.as_deref(),
+            Some("No acute cardiopulmonary abnormality.")
+        );
+        assert_eq!(report.content[1].label, "Heart Rate");
+        assert_eq!(report.content[1].value.as_deref(), Some("72 bpm"));
     }
 
     #[test]
