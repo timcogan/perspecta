@@ -806,6 +806,14 @@ fn read_item_multi_int(item: &InMemDicomObject, tag: Tag) -> Option<Vec<i32>> {
 
 pub fn load_dicom(path: &Path) -> Result<DicomImage> {
     let obj = open_dicom_object(path)?;
+    if classify_dicom_object(&obj) == DicomPathKind::StructuredReport {
+        let sop_class = read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
+        bail!(
+            "{} is a Structured Report object (SOPClassUID={}); use load_structured_report() instead",
+            path.display(),
+            sop_class
+        );
+    }
 
     let width: usize = obj
         .element_by_name("Columns")
@@ -1622,6 +1630,17 @@ mod tests {
         item
     }
 
+    fn unique_test_file_path(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after UNIX_EPOCH")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "perspecta-{prefix}-{}-{nanos}.dcm",
+            std::process::id()
+        ))
+    }
+
     fn code_item(code_meaning: &str) -> InMemDicomObject {
         InMemDicomObject::from_element_iter([DataElement::new(
             Tag(0x0008, 0x0104),
@@ -1784,6 +1803,36 @@ mod tests {
             classify_dicom_object(&sr_obj),
             DicomPathKind::StructuredReport
         );
+    }
+
+    #[test]
+    fn load_dicom_rejects_structured_reports_with_clear_guidance() {
+        let sr_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+        ]);
+
+        let sr_obj = sr_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(BASIC_TEXT_SR_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("4.3.2.3"),
+            )
+            .expect("SR test object should build file meta");
+
+        let path = unique_test_file_path("load-dicom-rejects-sr");
+        sr_obj
+            .write_to_file(&path)
+            .expect("SR test object should write to disk");
+
+        let err = load_dicom(&path).expect_err("load_dicom should reject structured reports");
+        let _ = std::fs::remove_file(&path);
+
+        let message = format!("{err:#}");
+        assert!(message.contains("Structured Report object"));
+        assert!(message.contains(BASIC_TEXT_SR_SOP_CLASS_UID));
+        assert!(message.contains("load_structured_report()"));
     }
 
     #[test]

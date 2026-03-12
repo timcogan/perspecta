@@ -580,7 +580,7 @@ impl DicomViewerApp {
 
     fn is_supported_prepared_group(prepared: &PreparedLoadPaths) -> bool {
         Self::is_supported_group_size(prepared.image_paths.len())
-            || (prepared.image_paths.is_empty() && prepared.structured_report_paths.len() == 1)
+            || (prepared.image_paths.is_empty() && !prepared.structured_report_paths.is_empty())
     }
 
     fn reorder_indices_cover_all(items_len: usize, ordered_indices: &[usize]) -> bool {
@@ -1315,16 +1315,19 @@ impl DicomViewerApp {
         let gsps_overlays = prepared.gsps_overlays;
 
         if load_paths.is_empty() {
-            let result = match report_paths.as_slice() {
-                [path] => load_structured_report(path)
+            if report_paths.is_empty() {
+                let _ = tx.send(Err("Unsupported preload group size".to_string()));
+                return;
+            }
+            for path in report_paths {
+                let result = load_structured_report(&path)
                     .map(|report| HistoryPreloadResult::Report {
                         path: path.clone(),
                         report: Box::new(report),
                     })
-                    .map_err(|err| format!("{err:#}")),
-                _ => Err("Unsupported preload group size".to_string()),
-            };
-            let _ = tx.send(result);
+                    .map_err(|err| format!("{err:#}"));
+                let _ = tx.send(result);
+            }
             return;
         }
 
@@ -2266,8 +2269,8 @@ impl DicomViewerApp {
                         self.clear_load_error();
                     }
                     Err(err) => {
-                        self.set_load_error("Failed to load selected DICOM.");
-                        log::error!("{err}");
+                        self.set_load_error("Failed to load selected item.");
+                        log::error!("Failed to load selected item: {err}");
                     }
                 }
                 self.single_load_receiver = None;
@@ -2279,8 +2282,10 @@ impl DicomViewerApp {
             }
             Err(TryRecvError::Disconnected) => {
                 self.single_load_receiver = None;
-                self.set_load_error("Selected DICOM load did not complete.");
-                log::error!("Single-image load incomplete: worker exited before sending a result.");
+                self.set_load_error("Selected item load did not complete.");
+                log::error!(
+                    "Selected item load incomplete: worker exited before sending a result."
+                );
                 ctx.request_repaint();
             }
         }
@@ -3045,44 +3050,60 @@ impl DicomViewerApp {
                         return;
                     }
 
-                    for node in &report.content {
-                        Self::show_structured_report_node(ui, node, 0);
+                    for (index, node) in report.content.iter().enumerate() {
+                        Self::show_structured_report_node(ui, node, vec![index], 0);
                         ui.add_space(6.0);
                     }
                 });
             });
     }
 
-    fn show_structured_report_node(ui: &mut egui::Ui, node: &StructuredReportNode, depth: usize) {
+    fn show_structured_report_node(
+        ui: &mut egui::Ui,
+        node: &StructuredReportNode,
+        path: Vec<usize>,
+        depth: usize,
+    ) {
         let header = match node.relationship_type.as_deref() {
             Some(relationship_type) => format!("{relationship_type}  {}", node.label),
             None => node.label.clone(),
         };
 
         if node.children.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new(header).strong());
-                if let Some(value) = node.value.as_deref() {
-                    ui.add(egui::Label::new(value).wrap().halign(egui::Align::Center));
-                }
+            ui.push_id(&path, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new(header).strong());
+                    if let Some(value) = node.value.as_deref() {
+                        ui.add(egui::Label::new(value).wrap().halign(egui::Align::Center));
+                    }
+                });
             });
             return;
         }
 
-        egui::CollapsingHeader::new(header)
-            .default_open(depth < 2)
-            .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    if let Some(value) = node.value.as_deref() {
-                        ui.add(egui::Label::new(value).wrap().halign(egui::Align::Center));
-                        ui.add_space(4.0);
-                    }
-                    for child in &node.children {
-                        Self::show_structured_report_node(ui, child, depth.saturating_add(1));
-                        ui.add_space(4.0);
-                    }
+        ui.push_id(&path, |ui| {
+            egui::CollapsingHeader::new(header)
+                .default_open(depth < 2)
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        if let Some(value) = node.value.as_deref() {
+                            ui.add(egui::Label::new(value).wrap().halign(egui::Align::Center));
+                            ui.add_space(4.0);
+                        }
+                        for (index, child) in node.children.iter().enumerate() {
+                            let mut child_path = path.clone();
+                            child_path.push(index);
+                            Self::show_structured_report_node(
+                                ui,
+                                child,
+                                child_path,
+                                depth.saturating_add(1),
+                            );
+                            ui.add_space(4.0);
+                        }
+                    });
                 });
-            });
+        });
     }
 
     fn apply_window_level_drag(
@@ -5471,7 +5492,7 @@ mod tests {
 
         assert_eq!(
             app.load_error_message.as_deref(),
-            Some("Failed to load selected DICOM.")
+            Some("Failed to load selected item.")
         );
     }
 
@@ -5542,6 +5563,19 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(app.load_error_message.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn is_supported_prepared_group_allows_sr_only_multi_report_groups() {
+        let prepared = PreparedLoadPaths {
+            structured_report_paths: vec![
+                PathBuf::from("report-a.dcm"),
+                PathBuf::from("report-b.dcm"),
+            ],
+            ..Default::default()
+        };
+
+        assert!(DicomViewerApp::is_supported_prepared_group(&prepared));
     }
 
     #[test]

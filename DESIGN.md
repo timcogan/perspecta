@@ -63,6 +63,8 @@ Its primary purpose is consistency during development, not full architecture cov
    - Run module-specific validations for decode and renderer output tests.
 5. Streaming/GSPS/history/concurrency changes (`app.rs` load pipeline, GSPS attach, worker channels):
    - Run all launch/parsing checks above.
+   - Verify SR-only open uses the dedicated SR parser/UI path and that `load_dicom` rejects SR objects.
+   - Verify mixed image+SR selections keep images in viewports, stage SR documents as separate history entries, and preserve GSPS/history/streaming invariants.
    - Verify GSPS toggle behavior (default off, `G` works when overlay exists).
 6. Tooling/benchmark changes (`tools/benchmark`, workspace manifests, Makefile/CI command wiring):
    - Run `cargo fmt --all -- --check`.
