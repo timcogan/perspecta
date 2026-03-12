@@ -179,9 +179,9 @@ where
         .map(|_| None::<Vec<PathBuf>>)
         .collect::<Vec<_>>();
 
-    on_active_path(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(
-        displayable_group_image_count(&selected_instances_by_group[open_group]),
-    ));
+    if let Some(count) = active_group_instance_count(&selected_instances_by_group[open_group]) {
+        on_active_path(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(count));
+    }
     downloaded_groups[open_group] = Some(download_instances_streaming(
         &client,
         &base,
@@ -283,6 +283,11 @@ fn has_displayable_group_content(instances: &[MetadataInstance]) -> bool {
             DicomPathKind::Image | DicomPathKind::StructuredReport
         )
     })
+}
+
+fn active_group_instance_count(instances: &[MetadataInstance]) -> Option<usize> {
+    let image_count = displayable_group_image_count(instances);
+    (image_count > 0).then_some(image_count)
 }
 
 fn download_instances_streaming<F>(
@@ -1200,6 +1205,28 @@ mod tests {
 
         assert_eq!(displayable_group_image_count(&instances), 0);
         assert!(has_displayable_group_content(&instances));
+    }
+
+    #[test]
+    fn active_group_instance_count_skips_structured_report_only_groups() {
+        let sr_only = vec![MetadataInstance {
+            instance_uid: "inst_sr".to_string(),
+            sop_class_uid: Some(BASIC_TEXT_SR_SOP_CLASS_UID.to_string()),
+            modality: Some("SR".to_string()),
+            ..metadata_instance("inst_sr", None, None, Some(1))
+        }];
+        let mixed = vec![
+            metadata_instance("inst_image", Some("CC"), Some("R"), Some(1)),
+            MetadataInstance {
+                instance_uid: "inst_sr".to_string(),
+                sop_class_uid: Some(BASIC_TEXT_SR_SOP_CLASS_UID.to_string()),
+                modality: Some("SR".to_string()),
+                ..metadata_instance("inst_sr", None, None, Some(2))
+            },
+        ];
+
+        assert_eq!(active_group_instance_count(&sr_only), None);
+        assert_eq!(active_group_instance_count(&mixed), Some(1));
     }
 
     #[test]

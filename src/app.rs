@@ -2563,6 +2563,7 @@ impl DicomViewerApp {
         ctx: &egui::Context,
     ) {
         self.clear_single_viewer();
+        self.mammo_group.clear();
         self.clear_load_error();
         self.push_report_history_entry(path.clone(), report.clone(), ctx);
         self.report = Some(report);
@@ -5691,6 +5692,28 @@ mod tests {
         assert_eq!(
             app.history_entries[0].id,
             history_id_from_paths(&[PathBuf::from("report.dcm")])
+        );
+    }
+
+    #[test]
+    fn apply_loaded_structured_report_clears_active_group_view() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            mammo_group: vec![None, None],
+            ..Default::default()
+        };
+
+        app.apply_loaded_structured_report(
+            PathBuf::from("report.dcm"),
+            StructuredReportDocument::test_stub(),
+            &ctx,
+        );
+
+        assert!(app.mammo_group.is_empty());
+        assert_eq!(app.current_single_path, Some(PathBuf::from("report.dcm")));
+        assert_eq!(
+            app.report.as_ref().map(|report| report.title.as_str()),
+            Some("Structured Report")
         );
     }
 
