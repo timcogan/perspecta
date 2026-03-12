@@ -247,6 +247,27 @@ fn select_group_instances_from_reduced_sets(
     selected_instances
 }
 
+fn modality_indicates_image(modality: &str) -> bool {
+    matches!(
+        modality.to_ascii_uppercase().as_str(),
+        "CR" | "CT"
+            | "DX"
+            | "IO"
+            | "MG"
+            | "MR"
+            | "NM"
+            | "OT"
+            | "PT"
+            | "RF"
+            | "RG"
+            | "RTIMAGE"
+            | "SC"
+            | "US"
+            | "XA"
+            | "XC"
+    )
+}
+
 fn metadata_instance_kind(instance: &MetadataInstance) -> DicomPathKind {
     if instance
         .sop_class_uid
@@ -266,7 +287,14 @@ fn metadata_instance_kind(instance: &MetadataInstance) -> DicomPathKind {
     {
         return DicomPathKind::StructuredReport;
     }
-    DicomPathKind::Image
+    if instance
+        .modality
+        .as_deref()
+        .is_some_and(modality_indicates_image)
+    {
+        return DicomPathKind::Image;
+    }
+    DicomPathKind::Other
 }
 
 fn displayable_group_image_count(instances: &[MetadataInstance]) -> usize {
@@ -975,7 +1003,7 @@ mod tests {
             series_uid: Some("series_a".to_string()),
             instance_uid: instance_uid.to_string(),
             sop_class_uid: None,
-            modality: None,
+            modality: Some("MG".to_string()),
             view_position: view_position.map(|value| value.to_string()),
             laterality: laterality.map(|value| value.to_string()),
             instance_number,
@@ -1230,13 +1258,28 @@ mod tests {
     }
 
     #[test]
+    fn metadata_instance_kind_defaults_unknown_metadata_to_other() {
+        let instance = MetadataInstance {
+            series_uid: Some("series_a".to_string()),
+            instance_uid: "inst_unknown".to_string(),
+            sop_class_uid: None,
+            modality: None,
+            view_position: None,
+            laterality: None,
+            instance_number: Some(1),
+        };
+
+        assert_eq!(metadata_instance_kind(&instance), DicomPathKind::Other);
+    }
+
+    #[test]
     fn download_instances_streaming_emits_active_path_for_each_instance_in_order() {
         let instances = vec![
             MetadataInstance {
                 series_uid: Some("series_a".to_string()),
                 instance_uid: "inst_1".to_string(),
                 sop_class_uid: None,
-                modality: None,
+                modality: Some("MG".to_string()),
                 view_position: Some("CC".to_string()),
                 laterality: Some("R".to_string()),
                 instance_number: Some(1),
@@ -1245,7 +1288,7 @@ mod tests {
                 series_uid: Some("series_a".to_string()),
                 instance_uid: "inst_2".to_string(),
                 sop_class_uid: None,
-                modality: None,
+                modality: Some("MG".to_string()),
                 view_position: Some("MLO".to_string()),
                 laterality: Some("L".to_string()),
                 instance_number: Some(2),

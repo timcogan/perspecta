@@ -2384,7 +2384,12 @@ impl DicomViewerApp {
         {
             self.sync_current_state_to_history();
         }
-        self.clear_history_preload();
+        let preserve_history_preload = paths.len() == 1
+            && self.dicomweb_active_group_expected == Some(1)
+            && !self.dicomweb_active_group_paths.is_empty();
+        if !preserve_history_preload {
+            self.clear_history_preload();
+        }
         self.pending_gsps_overlays = prepared.gsps_overlays;
         self.gsps_overlay_visible = false;
 
@@ -5763,6 +5768,33 @@ mod tests {
             app.load_error_message.as_deref(),
             Some("Selected DICOM objects are not displayable images or structured reports.")
         );
+    }
+
+    #[test]
+    fn apply_prepared_load_paths_preserves_history_preload_for_streamed_single_image() {
+        let (_tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            dicomweb_active_group_expected: Some(1),
+            dicomweb_active_group_paths: vec![PathBuf::from("active-image.dcm")],
+            history_preload_receiver: Some(rx),
+            history_preload_queue: VecDeque::from([HistoryPreloadJob::StructuredReport(
+                PathBuf::from("queued-report.dcm"),
+            )]),
+            ..Default::default()
+        };
+
+        let result = app.apply_prepared_load_paths(
+            PreparedLoadPaths {
+                image_paths: vec![PathBuf::from("active-image.dcm")],
+                ..Default::default()
+            },
+            &ctx,
+        );
+
+        assert!(result.is_ok());
+        assert!(app.history_preload_receiver.is_some());
+        assert_eq!(app.history_preload_queue.len(), 1);
     }
 
     #[test]
