@@ -447,8 +447,8 @@ fn parse_metadata_instances(json: &str) -> Result<Vec<MetadataInstance>> {
         let metadata = MetadataInstance {
             series_uid: first_tag_string(obj, TAG_SERIES_INSTANCE_UID),
             instance_uid,
-            sop_class_uid: first_tag_string(obj, TAG_SOP_CLASS_UID),
-            modality: first_tag_string(obj, TAG_MODALITY),
+            sop_class_uid: normalize_metadata_string(first_tag_string(obj, TAG_SOP_CLASS_UID)),
+            modality: normalize_metadata_string(first_tag_string(obj, TAG_MODALITY)),
             view_position: first_tag_string(obj, TAG_VIEW_POSITION),
             laterality: first_tag_string(obj, TAG_IMAGE_LATERALITY)
                 .or_else(|| first_tag_string(obj, TAG_LATERALITY)),
@@ -459,6 +459,13 @@ fn parse_metadata_instances(json: &str) -> Result<Vec<MetadataInstance>> {
     }
 
     Ok(instances)
+}
+
+fn normalize_metadata_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 fn split_top_level_json_objects(input: &str) -> Result<Vec<&str>> {
@@ -1031,6 +1038,23 @@ mod tests {
             first_tag_string(object, TAG_INSTANCE_NUMBER).as_deref(),
             Some("42")
         );
+    }
+
+    #[test]
+    fn parse_metadata_instances_trims_sop_class_uid_and_modality() {
+        let json = format!(
+            r#"[{{"00080018":{{"vr":"UI","Value":["instance_uid_alpha"]}},"00080016":{{"vr":"UI","Value":["{} "]}},"00080060":{{"vr":"CS","Value":["MG "]}}, "0020000E":{{"vr":"UI","Value":["series_uid_alpha"]}}}}]"#,
+            BASIC_TEXT_SR_SOP_CLASS_UID
+        );
+
+        let instances = parse_metadata_instances(&json).expect("metadata should parse");
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(
+            instances[0].sop_class_uid.as_deref(),
+            Some(BASIC_TEXT_SR_SOP_CLASS_UID)
+        );
+        assert_eq!(instances[0].modality.as_deref(), Some("MG"));
     }
 
     #[test]
