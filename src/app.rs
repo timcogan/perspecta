@@ -85,6 +85,11 @@ enum HistoryPreloadResult {
     },
 }
 
+enum HistoryPreloadJob {
+    Group(PreparedLoadPaths),
+    StructuredReport(PathBuf),
+}
+
 #[derive(Clone)]
 struct HistorySingleData {
     path: PathBuf,
@@ -181,6 +186,7 @@ pub struct DicomViewerApp {
     mammo_load_sender: Option<Sender<Result<PendingLoad, String>>>,
     history_pushed_for_active_group: bool,
     history_preload_receiver: Option<Receiver<Result<HistoryPreloadResult, String>>>,
+    history_preload_queue: VecDeque<HistoryPreloadJob>,
     window_center: f32,
     window_width: f32,
     pending_gsps_overlays: HashMap<String, GspsOverlay>,
@@ -236,6 +242,7 @@ impl DicomViewerApp {
             mammo_load_sender: None,
             history_pushed_for_active_group: false,
             history_preload_receiver: None,
+            history_preload_queue: VecDeque::new(),
             window_center: 0.0,
             window_width: 1.0,
             pending_gsps_overlays: HashMap::new(),
@@ -278,6 +285,7 @@ impl DicomViewerApp {
             || self.single_load_receiver.is_some()
             || self.mammo_load_receiver.is_some()
             || self.history_preload_receiver.is_some()
+            || !self.history_preload_queue.is_empty()
             || self.pending_history_open_index.is_some()
             || self.pending_local_open_paths.is_some()
     }
@@ -1233,7 +1241,7 @@ impl DicomViewerApp {
         self.single_load_receiver = None;
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
-        self.history_preload_receiver = None;
+        self.clear_history_preload();
         self.history_pushed_for_active_group = false;
         self.pending_gsps_overlays.clear();
         self.clear_single_viewer();
@@ -1306,6 +1314,24 @@ impl DicomViewerApp {
         self.history_entries.insert(0, entry);
     }
 
+    fn clear_history_preload(&mut self) {
+        self.history_preload_receiver = None;
+        self.history_preload_queue.clear();
+    }
+
+    fn preload_report_into_history(
+        path: PathBuf,
+        tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
+    ) {
+        let result = load_structured_report(&path)
+            .map(|report| HistoryPreloadResult::Report {
+                path: path.clone(),
+                report: Box::new(report),
+            })
+            .map_err(|err| format!("{err:#}"));
+        let _ = tx.send(result);
+    }
+
     fn preload_group_into_history(
         prepared: PreparedLoadPaths,
         tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
@@ -1320,25 +1346,13 @@ impl DicomViewerApp {
                 return;
             }
             for path in report_paths {
-                let result = load_structured_report(&path)
-                    .map(|report| HistoryPreloadResult::Report {
-                        path: path.clone(),
-                        report: Box::new(report),
-                    })
-                    .map_err(|err| format!("{err:#}"));
-                let _ = tx.send(result);
+                Self::preload_report_into_history(path, tx);
             }
             return;
         }
 
         for path in report_paths {
-            let result = load_structured_report(&path)
-                .map(|report| HistoryPreloadResult::Report {
-                    path: path.clone(),
-                    report: Box::new(report),
-                })
-                .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(result);
+            Self::preload_report_into_history(path, tx);
         }
 
         let result = match load_paths.len() {
@@ -1376,30 +1390,46 @@ impl DicomViewerApp {
         let _ = tx.send(result);
     }
 
+    fn start_next_history_preload(&mut self, ctx: &egui::Context) {
+        if self.history_preload_receiver.is_some() {
+            return;
+        }
+
+        let Some(job) = self.history_preload_queue.pop_front() else {
+            return;
+        };
+
+        let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        thread::spawn(move || match job {
+            HistoryPreloadJob::Group(prepared) => Self::preload_group_into_history(prepared, &tx),
+            HistoryPreloadJob::StructuredReport(path) => {
+                Self::preload_report_into_history(path, &tx);
+            }
+        });
+        self.history_preload_receiver = Some(rx);
+        ctx.request_repaint_after(Duration::from_millis(16));
+    }
+
+    fn enqueue_history_preload_job(&mut self, job: HistoryPreloadJob, ctx: &egui::Context) {
+        self.history_preload_queue.push_back(job);
+        self.start_next_history_preload(ctx);
+    }
+
     fn preload_non_active_groups_into_history(
         &mut self,
         groups: &[PreparedLoadPaths],
         open_group: usize,
+        ctx: &egui::Context,
     ) {
-        let preload_jobs = groups
+        for group in groups
             .iter()
             .enumerate()
             .rev()
             .filter(|(index, _)| *index != open_group)
             .map(|(_, group)| group.clone())
-            .collect::<Vec<_>>();
-        if preload_jobs.is_empty() {
-            self.history_preload_receiver = None;
-            return;
+        {
+            self.enqueue_history_preload_job(HistoryPreloadJob::Group(group), ctx);
         }
-
-        let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
-        thread::spawn(move || {
-            for group in preload_jobs {
-                Self::preload_group_into_history(group, &tx);
-            }
-        });
-        self.history_preload_receiver = Some(rx);
     }
 
     fn sync_current_state_to_history(&mut self) {
@@ -1628,7 +1658,7 @@ impl DicomViewerApp {
 
         let active_group = open_group.min(groups.len().saturating_sub(1));
         let _ = self.load_selected_paths(groups[active_group].clone(), ctx);
-        self.preload_non_active_groups_into_history(&preload_groups, active_group);
+        self.preload_non_active_groups_into_history(&preload_groups, active_group, ctx);
     }
 
     fn start_dicomweb_download(&mut self, request: DicomWebLaunchRequest) {
@@ -1639,7 +1669,7 @@ impl DicomViewerApp {
 
         self.clear_load_error();
         self.sync_current_state_to_history();
-        self.history_preload_receiver = None;
+        self.clear_history_preload();
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
         self.history_pushed_for_active_group = false;
@@ -1666,7 +1696,7 @@ impl DicomViewerApp {
 
         self.clear_load_error();
         self.sync_current_state_to_history();
-        self.history_preload_receiver = None;
+        self.clear_history_preload();
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
         self.history_pushed_for_active_group = false;
@@ -1852,72 +1882,69 @@ impl DicomViewerApp {
 
         let expected = self.dicomweb_active_group_expected.unwrap_or(0);
         if let Some(path) = self.dicomweb_active_pending_paths.pop_front() {
-            match expected {
-                1 => {
-                    self.dicomweb_active_group_paths.push(path.clone());
-                    let _ = self.load_selected_paths(vec![path], ctx);
-                }
-                count if Self::is_supported_multi_view_group_size(count) => {
-                    match classify_dicom_path(&path) {
-                        Ok(DicomPathKind::Gsps) => match load_gsps_overlays(&path) {
-                            Ok(overlays) => {
-                                Self::merge_gsps_overlays(
-                                    &mut self.pending_gsps_overlays,
-                                    overlays,
-                                );
-                                for viewport in
-                                    self.mammo_group.iter_mut().filter_map(Option::as_mut)
-                                {
-                                    Self::attach_matching_gsps_overlay(
-                                        &mut viewport.image,
-                                        &self.pending_gsps_overlays,
-                                    );
-                                }
-                                self.sync_current_state_to_history();
-                            }
-                            Err(err) => {
-                                log::warn!("Could not parse streamed GSPS input: {err:#}");
-                            }
-                        },
-                        Ok(DicomPathKind::Image) | Err(_) => {
-                            self.dicomweb_active_group_paths.push(path.clone());
-                            if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
-                                thread::spawn(move || {
-                                    let result = match load_dicom(&path) {
-                                        Ok(image) => Ok(PendingLoad { path, image }),
-                                        Err(err) => {
-                                            Err(format!("Error opening streamed DICOM: {err:#}"))
-                                        }
-                                    };
-                                    let _ = sender.send(result);
-                                });
-                            } else {
-                                self.set_load_error(
-                                    "Streaming multi-view load channel was not available.",
-                                );
-                                log::error!("Streaming multi-view load channel not available.");
-                                self.mammo_group.clear();
-                                self.mammo_load_receiver = None;
-                                self.mammo_load_sender = None;
-                                self.history_pushed_for_active_group = false;
-                                self.cine_mode = false;
-                                self.dicomweb_active_group_paths.clear();
-                                self.dicomweb_active_pending_paths.clear();
-                                self.dicomweb_active_group_expected = None;
-                                self.dicomweb_active_path_receiver = None;
-                            }
+            match classify_dicom_path(&path) {
+                Ok(DicomPathKind::Gsps) => match load_gsps_overlays(&path) {
+                    Ok(overlays) => {
+                        Self::merge_gsps_overlays(&mut self.pending_gsps_overlays, overlays);
+                        if let Some(image) = self.image.as_mut() {
+                            Self::attach_matching_gsps_overlay(image, &self.pending_gsps_overlays);
                         }
-                        Ok(DicomPathKind::StructuredReport) => {
-                            log::info!(
-                                "Ignoring streamed Structured Report in multi-view image mode."
+                        for viewport in self.mammo_group.iter_mut().filter_map(Option::as_mut) {
+                            Self::attach_matching_gsps_overlay(
+                                &mut viewport.image,
+                                &self.pending_gsps_overlays,
                             );
                         }
-                        Ok(DicomPathKind::Other) => {
-                            log::warn!("Ignoring streamed non-image DICOM input.");
+                        self.sync_current_state_to_history();
+                    }
+                    Err(err) => {
+                        log::warn!("Could not parse streamed GSPS input: {err:#}");
+                    }
+                },
+                Ok(DicomPathKind::StructuredReport) => {
+                    self.enqueue_history_preload_job(
+                        HistoryPreloadJob::StructuredReport(path),
+                        ctx,
+                    );
+                }
+                Ok(DicomPathKind::Image) | Err(_) => match expected {
+                    1 => {
+                        self.dicomweb_active_group_paths.push(path.clone());
+                        let _ = self.load_selected_paths(vec![path], ctx);
+                    }
+                    count if Self::is_supported_multi_view_group_size(count) => {
+                        self.dicomweb_active_group_paths.push(path.clone());
+                        if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
+                            thread::spawn(move || {
+                                let result = match load_dicom(&path) {
+                                    Ok(image) => Ok(PendingLoad { path, image }),
+                                    Err(err) => {
+                                        Err(format!("Error opening streamed DICOM: {err:#}"))
+                                    }
+                                };
+                                let _ = sender.send(result);
+                            });
+                        } else {
+                            self.set_load_error(
+                                "Streaming multi-view load channel was not available.",
+                            );
+                            log::error!("Streaming multi-view load channel not available.");
+                            self.mammo_group.clear();
+                            self.mammo_load_receiver = None;
+                            self.mammo_load_sender = None;
+                            self.history_pushed_for_active_group = false;
+                            self.cine_mode = false;
+                            self.dicomweb_active_group_paths.clear();
+                            self.dicomweb_active_pending_paths.clear();
+                            self.dicomweb_active_group_expected = None;
+                            self.dicomweb_active_path_receiver = None;
                         }
                     }
+                    _ => {}
+                },
+                Ok(DicomPathKind::Other) => {
+                    log::warn!("Ignoring streamed non-image DICOM input.");
                 }
-                _ => {}
             }
         }
 
@@ -1927,6 +1954,8 @@ impl DicomViewerApp {
     }
 
     fn poll_history_preload(&mut self, ctx: &egui::Context) {
+        self.start_next_history_preload(ctx);
+
         let Some(receiver) = self.history_preload_receiver.take() else {
             return;
         };
@@ -2026,7 +2055,10 @@ impl DicomViewerApp {
         if keep_receiver {
             self.history_preload_receiver = Some(receiver);
             ctx.request_repaint_after(Duration::from_millis(16));
+            return;
         }
+
+        self.start_next_history_preload(ctx);
     }
 
     fn poll_dicomweb_download(&mut self, ctx: &egui::Context) {
@@ -2074,6 +2106,7 @@ impl DicomViewerApp {
                             self.preload_non_active_groups_into_history(
                                 &prepared_groups,
                                 validated_open_group,
+                                ctx,
                             );
                             if Self::is_supported_multi_view_group_size(active_group_len)
                                 && self.mammo_group_complete()
@@ -2351,7 +2384,7 @@ impl DicomViewerApp {
         {
             self.sync_current_state_to_history();
         }
-        self.history_preload_receiver = None;
+        self.clear_history_preload();
         self.pending_gsps_overlays = prepared.gsps_overlays;
         self.gsps_overlay_visible = false;
 
@@ -2430,15 +2463,10 @@ impl DicomViewerApp {
         ctx: &egui::Context,
     ) {
         for path in report_paths {
-            match load_structured_report(path) {
-                Ok(report) => self.push_report_history_entry(path.clone(), report, ctx),
-                Err(err) => {
-                    log::warn!(
-                        "Could not stage Structured Report {} into history: {err:#}",
-                        path.display()
-                    );
-                }
-            }
+            self.enqueue_history_preload_job(
+                HistoryPreloadJob::StructuredReport(path.clone()),
+                ctx,
+            );
         }
     }
 
@@ -4599,6 +4627,10 @@ fn history_id_from_paths(paths: &[PathBuf]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dicom_core::{DataElement, Tag, VR};
+    use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
+
+    use crate::dicom::{BASIC_TEXT_SR_SOP_CLASS_UID, EXPLICIT_VR_LITTLE_ENDIAN_UID};
 
     fn test_texture(ctx: &egui::Context, name: &str) -> TextureHandle {
         ctx.load_texture(
@@ -4609,6 +4641,40 @@ mod tests {
             },
             TextureOptions::LINEAR,
         )
+    }
+
+    fn unique_test_file_path(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after UNIX_EPOCH")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "perspecta-app-{prefix}-{}-{nanos}.dcm",
+            std::process::id()
+        ))
+    }
+
+    fn write_test_structured_report_file(prefix: &str) -> PathBuf {
+        let sr_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+            DataElement::new(Tag(0x0008, 0x103E), VR::LO, "Test Structured Report"),
+        ]);
+
+        let sr_obj = sr_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(BASIC_TEXT_SR_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("4.3.2.200"),
+            )
+            .expect("SR test object should build file meta");
+
+        let path = unique_test_file_path(prefix);
+        sr_obj
+            .write_to_file(&path)
+            .expect("SR test object should write to disk");
+        path
     }
 
     fn single_history_entry(ctx: &egui::Context, path: &str, texture_name: &str) -> HistoryEntry {
@@ -5392,6 +5458,84 @@ mod tests {
             app.history_entries[0].id,
             history_id_from_paths(&[PathBuf::from("preloaded-report.dcm")])
         );
+    }
+
+    #[test]
+    fn stage_structured_report_history_entries_uses_background_preload() {
+        let path = write_test_structured_report_file("history-stage-report");
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp::default();
+
+        app.stage_structured_report_history_entries(std::slice::from_ref(&path), &ctx);
+
+        assert!(app.history_entries.is_empty());
+
+        let receiver = app
+            .history_preload_receiver
+            .take()
+            .expect("report staging should start a history preload worker");
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("report preload should complete")
+            .expect("report preload should succeed");
+
+        match result {
+            HistoryPreloadResult::Report {
+                path: result_path, ..
+            } => {
+                assert_eq!(result_path, path);
+            }
+            HistoryPreloadResult::Single { .. } | HistoryPreloadResult::Group { .. } => {
+                panic!("expected a report history preload result");
+            }
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn poll_dicomweb_active_paths_stages_streamed_structured_report_in_history() {
+        let path = write_test_structured_report_file("streamed-active-report");
+        let (tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        tx.send(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(2))
+            .expect("streamed group count should send");
+        tx.send(DicomWebGroupStreamUpdate::ActivePath(path.clone()))
+            .expect("streamed report path should send");
+        drop(tx);
+
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            dicomweb_active_path_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.poll_dicomweb_active_paths(&ctx);
+
+        assert_eq!(app.dicomweb_active_group_expected, Some(2));
+        assert_eq!(app.mammo_group.len(), 2);
+        assert!(app.dicomweb_active_group_paths.is_empty());
+
+        let receiver = app
+            .history_preload_receiver
+            .take()
+            .expect("streamed report should be staged into history preload");
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("streamed report preload should complete")
+            .expect("streamed report preload should succeed");
+
+        match result {
+            HistoryPreloadResult::Report {
+                path: result_path, ..
+            } => {
+                assert_eq!(result_path, path);
+            }
+            HistoryPreloadResult::Single { .. } | HistoryPreloadResult::Group { .. } => {
+                panic!("expected a report history preload result");
+            }
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

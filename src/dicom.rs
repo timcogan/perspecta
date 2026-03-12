@@ -363,10 +363,14 @@ pub fn load_structured_report(path: &Path) -> Result<StructuredReportDocument> {
 }
 
 fn classify_dicom_object(obj: &DefaultDicomObject) -> DicomPathKind {
-    if read_string(obj, "SOPClassUID").is_some_and(|uid| is_gsps_sop_class_uid(&uid)) {
+    let sop_class_uid = read_string(obj, "SOPClassUID");
+
+    if sop_class_uid.as_deref().is_some_and(is_gsps_sop_class_uid) {
         return DicomPathKind::Gsps;
     }
-    if read_string(obj, "SOPClassUID").is_some_and(|uid| is_structured_report_sop_class_uid(&uid))
+    if sop_class_uid
+        .as_deref()
+        .is_some_and(is_structured_report_sop_class_uid)
         || read_string(obj, "Modality").is_some_and(|value| value.eq_ignore_ascii_case("SR"))
     {
         return DicomPathKind::StructuredReport;

@@ -7,10 +7,13 @@ use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use reqwest::header::ACCEPT;
 
+use crate::dicom::{is_gsps_sop_class_uid, is_structured_report_sop_class_uid, DicomPathKind};
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest};
 use crate::mammo::{classify_laterality, classify_view};
 
+const TAG_SOP_CLASS_UID: &str = "00080016";
 const TAG_SOP_INSTANCE_UID: &str = "00080018";
+const TAG_MODALITY: &str = "00080060";
 const TAG_SERIES_INSTANCE_UID: &str = "0020000E";
 const TAG_INSTANCE_NUMBER: &str = "00200013";
 const TAG_VIEW_POSITION: &str = "00185101";
@@ -21,6 +24,8 @@ const TAG_LATERALITY: &str = "00200060";
 struct MetadataInstance {
     series_uid: Option<String>,
     instance_uid: String,
+    sop_class_uid: Option<String>,
+    modality: Option<String>,
     view_position: Option<String>,
     laterality: Option<String>,
     instance_number: Option<i32>,
@@ -147,12 +152,19 @@ where
         }
 
         let selected_instances = select_group_instances_from_reduced_sets(reduced_by_series);
+        let displayable_image_count = displayable_group_image_count(&selected_instances);
 
-        if !matches!(selected_instances.len(), 1..=4 | 8) {
+        if displayable_image_count > 0 && !matches!(displayable_image_count, 1..=4 | 8) {
             bail!(
-                "DICOMweb group {} resolved to {} instances; each group must resolve to 1, 2, 3, 4, or 8 DICOM instances",
+                "DICOMweb group {} resolved to {} displayable image instances; each group must resolve to 1, 2, 3, 4, or 8 displayable images",
                 group_index,
-                selected_instances.len()
+                displayable_image_count
+            );
+        }
+        if displayable_image_count == 0 && !has_displayable_group_content(&selected_instances) {
+            bail!(
+                "DICOMweb group {} resolved to no displayable images or structured reports",
+                group_index
             );
         }
 
@@ -168,7 +180,7 @@ where
         .collect::<Vec<_>>();
 
     on_active_path(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(
-        selected_instances_by_group[open_group].len(),
+        displayable_group_image_count(&selected_instances_by_group[open_group]),
     ));
     downloaded_groups[open_group] = Some(download_instances_streaming(
         &client,
@@ -233,6 +245,44 @@ fn select_group_instances_from_reduced_sets(
         }
     }
     selected_instances
+}
+
+fn metadata_instance_kind(instance: &MetadataInstance) -> DicomPathKind {
+    if instance
+        .sop_class_uid
+        .as_deref()
+        .is_some_and(is_gsps_sop_class_uid)
+    {
+        return DicomPathKind::Gsps;
+    }
+    if instance
+        .sop_class_uid
+        .as_deref()
+        .is_some_and(is_structured_report_sop_class_uid)
+        || instance
+            .modality
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("SR"))
+    {
+        return DicomPathKind::StructuredReport;
+    }
+    DicomPathKind::Image
+}
+
+fn displayable_group_image_count(instances: &[MetadataInstance]) -> usize {
+    instances
+        .iter()
+        .filter(|instance| metadata_instance_kind(instance) == DicomPathKind::Image)
+        .count()
+}
+
+fn has_displayable_group_content(instances: &[MetadataInstance]) -> bool {
+    instances.iter().any(|instance| {
+        matches!(
+            metadata_instance_kind(instance),
+            DicomPathKind::Image | DicomPathKind::StructuredReport
+        )
+    })
 }
 
 fn download_instances_streaming<F>(
@@ -364,6 +414,8 @@ fn parse_metadata_instances(json: &str) -> Result<Vec<MetadataInstance>> {
         let metadata = MetadataInstance {
             series_uid: first_tag_string(obj, TAG_SERIES_INSTANCE_UID),
             instance_uid,
+            sop_class_uid: first_tag_string(obj, TAG_SOP_CLASS_UID),
+            modality: first_tag_string(obj, TAG_MODALITY),
             view_position: first_tag_string(obj, TAG_VIEW_POSITION),
             laterality: first_tag_string(obj, TAG_IMAGE_LATERALITY)
                 .or_else(|| first_tag_string(obj, TAG_LATERALITY)),
@@ -906,6 +958,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    use crate::dicom::{BASIC_TEXT_SR_SOP_CLASS_UID, GSPS_SOP_CLASS_UID};
+
     fn metadata_instance(
         instance_uid: &str,
         view_position: Option<&str>,
@@ -915,6 +969,8 @@ mod tests {
         MetadataInstance {
             series_uid: Some("series_a".to_string()),
             instance_uid: instance_uid.to_string(),
+            sop_class_uid: None,
+            modality: None,
             view_position: view_position.map(|value| value.to_string()),
             laterality: laterality.map(|value| value.to_string()),
             instance_number,
@@ -1113,11 +1169,47 @@ mod tests {
     }
 
     #[test]
+    fn displayable_group_image_count_excludes_structured_reports_and_gsps() {
+        let image = metadata_instance("inst_image", Some("CC"), Some("R"), Some(1));
+        let structured_report = MetadataInstance {
+            instance_uid: "inst_sr".to_string(),
+            sop_class_uid: Some(BASIC_TEXT_SR_SOP_CLASS_UID.to_string()),
+            modality: Some("SR".to_string()),
+            ..metadata_instance("inst_sr", None, None, Some(2))
+        };
+        let gsps = MetadataInstance {
+            instance_uid: "inst_gsps".to_string(),
+            sop_class_uid: Some(GSPS_SOP_CLASS_UID.to_string()),
+            ..metadata_instance("inst_gsps", None, None, Some(3))
+        };
+
+        let instances = vec![image, structured_report, gsps];
+
+        assert_eq!(displayable_group_image_count(&instances), 1);
+        assert!(has_displayable_group_content(&instances));
+    }
+
+    #[test]
+    fn has_displayable_group_content_accepts_structured_report_only_groups() {
+        let instances = vec![MetadataInstance {
+            instance_uid: "inst_sr".to_string(),
+            sop_class_uid: Some(BASIC_TEXT_SR_SOP_CLASS_UID.to_string()),
+            modality: Some("SR".to_string()),
+            ..metadata_instance("inst_sr", None, None, Some(1))
+        }];
+
+        assert_eq!(displayable_group_image_count(&instances), 0);
+        assert!(has_displayable_group_content(&instances));
+    }
+
+    #[test]
     fn download_instances_streaming_emits_active_path_for_each_instance_in_order() {
         let instances = vec![
             MetadataInstance {
                 series_uid: Some("series_a".to_string()),
                 instance_uid: "inst_1".to_string(),
+                sop_class_uid: None,
+                modality: None,
                 view_position: Some("CC".to_string()),
                 laterality: Some("R".to_string()),
                 instance_number: Some(1),
@@ -1125,6 +1217,8 @@ mod tests {
             MetadataInstance {
                 series_uid: Some("series_a".to_string()),
                 instance_uid: "inst_2".to_string(),
+                sop_class_uid: None,
+                modality: None,
                 view_position: Some("MLO".to_string()),
                 laterality: Some("L".to_string()),
                 instance_number: Some(2),
