@@ -3,7 +3,7 @@ use std::{cmp::Ordering, collections::BTreeMap};
 
 use eframe::egui;
 
-use crate::dicom::{DicomImage, DicomSource};
+use crate::dicom::{DicomImage, DicomSourceMeta};
 
 pub fn normalize_token(value: Option<&str>) -> String {
     value
@@ -200,7 +200,7 @@ pub fn mammo_image_align(index: usize) -> egui::Align {
     }
 }
 
-pub fn mammo_label(image: &DicomImage, source: &DicomSource) -> String {
+pub fn mammo_label(image: &DicomImage, source: &DicomSourceMeta) -> String {
     let laterality = classify_laterality(image.image_laterality.as_deref());
     let view = classify_view(image.view_position.as_deref());
     let code = match (laterality, view) {
@@ -210,10 +210,10 @@ pub fn mammo_label(image: &DicomImage, source: &DicomSource) -> String {
         _ => String::new(),
     };
 
-    let file_name = source.short_label();
+    let file_name = source.display_label();
 
     if code.is_empty() {
-        file_name.into_owned()
+        file_name.to_string()
     } else {
         format!("{code} ({file_name})")
     }

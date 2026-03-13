@@ -1550,5 +1550,45 @@ mod tests {
             result,
             vec![PathBuf::from("inst_1.dcm"), PathBuf::from("inst_2.dcm")]
         );
+
+        let mut memory_updates = Vec::<DicomWebGroupStreamUpdate>::new();
+        let mut on_memory_path = |update: DicomWebGroupStreamUpdate| memory_updates.push(update);
+        let memory_result =
+            download_instances_streaming_with(&instances, &mut on_memory_path, |instance| {
+                Ok(DicomSource::from_memory(
+                    &instance.instance_uid,
+                    instance.instance_uid.as_bytes().to_vec(),
+                ))
+            })
+            .expect("memory-backed streaming should succeed");
+
+        let memory_callback_paths = memory_updates
+            .into_iter()
+            .filter_map(|update| match update {
+                DicomWebGroupStreamUpdate::ActivePath(path) => Some(path),
+                DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            memory_callback_paths
+                .iter()
+                .map(|path| path.short_label().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["inst_1".to_string(), "inst_2".to_string()]
+        );
+        assert!(memory_callback_paths
+            .iter()
+            .all(|path| matches!(path, DicomSource::Memory { .. })));
+        assert_eq!(
+            memory_result
+                .iter()
+                .map(|path| path.short_label().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["inst_1".to_string(), "inst_2".to_string()]
+        );
+        assert!(memory_result
+            .iter()
+            .all(|path| matches!(path, DicomSource::Memory { .. })));
     }
 }

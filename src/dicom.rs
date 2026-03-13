@@ -66,6 +66,7 @@ pub enum DicomSource {
     Memory {
         id: u64,
         label: Arc<str>,
+        identity_key: Arc<str>,
         bytes: Arc<[u8]>,
     },
 }
@@ -77,13 +78,22 @@ impl DicomSource {
         let id = IN_MEMORY_DICOM_COUNTER.fetch_add(1, Ordering::Relaxed);
         let label = Arc::<str>::from(sanitize_memory_source_label(preferred_name));
         let bytes = Arc::<[u8]>::from(bytes.into_boxed_slice());
-        Self::Memory { id, label, bytes }
+        let identity_key = Arc::<str>::from(infer_memory_source_identity_key(
+            preferred_name,
+            bytes.as_ref(),
+        ));
+        Self::Memory {
+            id,
+            label,
+            identity_key,
+            bytes,
+        }
     }
 
     pub fn stable_id(&self) -> String {
         match self {
             Self::File(path) => format!("file:{}", path.to_string_lossy()),
-            Self::Memory { id, label, .. } => format!("memory:{id}:{label}"),
+            Self::Memory { identity_key, .. } => identity_key.to_string(),
         }
     }
 
@@ -95,6 +105,20 @@ impl DicomSource {
                 .map(Cow::Borrowed)
                 .unwrap_or_else(|| Cow::Owned(path.display().to_string())),
             Self::Memory { label, .. } => Cow::Borrowed(label.as_ref()),
+        }
+    }
+
+    pub fn identity_key(&self) -> Cow<'_, str> {
+        match self {
+            Self::File(path) => Cow::Owned(format!("file:{}", path.to_string_lossy())),
+            Self::Memory { identity_key, .. } => Cow::Borrowed(identity_key.as_ref()),
+        }
+    }
+
+    pub fn to_meta(&self) -> DicomSourceMeta {
+        DicomSourceMeta {
+            display_label: Arc::<str>::from(self.short_label().into_owned()),
+            identity_key: Arc::<str>::from(self.identity_key().into_owned()),
         }
     }
 
@@ -110,6 +134,72 @@ impl DicomSource {
             Self::File(path) => Some(path.as_path()),
             Self::Memory { .. } => None,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DicomSourceMeta {
+    display_label: Arc<str>,
+    identity_key: Arc<str>,
+}
+
+impl DicomSourceMeta {
+    pub fn display_label(&self) -> &str {
+        self.display_label.as_ref()
+    }
+
+    pub fn identity_key(&self) -> &str {
+        self.identity_key.as_ref()
+    }
+}
+
+impl From<DicomSource> for DicomSourceMeta {
+    fn from(value: DicomSource) -> Self {
+        value.to_meta()
+    }
+}
+
+impl From<&DicomSource> for DicomSourceMeta {
+    fn from(value: &DicomSource) -> Self {
+        value.to_meta()
+    }
+}
+
+impl From<PathBuf> for DicomSourceMeta {
+    fn from(value: PathBuf) -> Self {
+        DicomSource::from(value).to_meta()
+    }
+}
+
+impl From<&PathBuf> for DicomSourceMeta {
+    fn from(value: &PathBuf) -> Self {
+        DicomSource::from(value).to_meta()
+    }
+}
+
+impl From<&Path> for DicomSourceMeta {
+    fn from(value: &Path) -> Self {
+        DicomSource::from(value).to_meta()
+    }
+}
+
+impl From<&DicomSourceMeta> for DicomSourceMeta {
+    fn from(value: &DicomSourceMeta) -> Self {
+        value.clone()
+    }
+}
+
+impl PartialEq for DicomSourceMeta {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity_key == other.identity_key
+    }
+}
+
+impl Eq for DicomSourceMeta {}
+
+impl Hash for DicomSourceMeta {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.identity_key.hash(state);
     }
 }
 
@@ -1393,6 +1483,56 @@ fn sanitize_memory_source_label(value: &str) -> String {
     } else {
         sanitized
     }
+}
+
+fn infer_memory_source_identity_key(preferred_name: &str, bytes: &[u8]) -> String {
+    let Some(identity) = open_dicom_object_from_bytes(bytes, preferred_name)
+        .ok()
+        .and_then(|obj| dicom_identity_key_from_object(&obj))
+    else {
+        return fallback_memory_identity_key(preferred_name, bytes);
+    };
+
+    identity
+}
+
+fn dicom_identity_key_from_object(obj: &DefaultDicomObject) -> Option<String> {
+    let study_uid = read_string(obj, "StudyInstanceUID");
+    let series_uid = read_string(obj, "SeriesInstanceUID");
+    let instance_uid = read_string(obj, "SOPInstanceUID");
+    let sop_class_uid = read_string(obj, "SOPClassUID");
+    let modality = read_string(obj, "Modality");
+
+    if study_uid.is_none()
+        && series_uid.is_none()
+        && instance_uid.is_none()
+        && sop_class_uid.is_none()
+        && modality.is_none()
+    {
+        return None;
+    }
+
+    Some(format!(
+        "dicom:study={};series={};instance={};class={};modality={}",
+        study_uid.unwrap_or_else(|| "_".to_string()),
+        series_uid.unwrap_or_else(|| "_".to_string()),
+        instance_uid.unwrap_or_else(|| "_".to_string()),
+        sop_class_uid.unwrap_or_else(|| "_".to_string()),
+        modality.unwrap_or_else(|| "_".to_string()),
+    ))
+}
+
+fn fallback_memory_identity_key(preferred_name: &str, bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+
+    format!(
+        "memory-fallback:{}:{hash:016x}",
+        sanitize_memory_source_label(preferred_name)
+    )
 }
 
 fn preload_worker_count(frame_count: usize) -> usize {
