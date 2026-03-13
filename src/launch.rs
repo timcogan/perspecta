@@ -225,16 +225,6 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
             .map(|group| group.into_iter().map(PathBuf::from).collect::<Vec<_>>())
             .collect::<Vec<_>>();
 
-        for (index, group) in groups.iter().enumerate() {
-            if !matches!(group.len(), 1..=4 | 8) {
-                return Err(format!(
-                    "Group {} has {} paths. Each group must contain exactly 1, 2, 3, 4, or 8 DICOM paths.",
-                    index,
-                    group.len()
-                ));
-            }
-        }
-
         let open_group = open_group.unwrap_or(0).min(groups.len().saturating_sub(1));
         return Ok(LaunchRequest::LocalGroups { groups, open_group });
     }
@@ -262,16 +252,6 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
         let Some(study_uid) = study_uid else {
             return Err("Grouped DICOMweb launch requires study UID via study=...".to_string());
         };
-
-        for (index, group) in grouped_series_uids.iter().enumerate() {
-            if !matches!(group.len(), 1..=4 | 8) {
-                return Err(format!(
-                    "group_series group {} has {} series UIDs. Each group must contain exactly 1, 2, 3, 4, or 8 series UIDs.",
-                    index,
-                    group.len()
-                ));
-            }
-        }
 
         let open_group = open_group
             .unwrap_or(0)
@@ -702,6 +682,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_dicomweb_grouped_series_request_allows_supplementary_series() {
+        let request = parse_perspecta_uri(
+            "perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042%2Fdicom-web&study=study_uid_alpha&group_series=series_rcc|series_lcc|series_rmlo|series_lmlo|series_gsps",
+        )
+        .expect("URI should parse");
+        assert_eq!(
+            request,
+            LaunchRequest::DicomWebGroups(DicomWebGroupedLaunchRequest {
+                base_url: "http://localhost:8042/dicom-web".to_string(),
+                study_uid: "study_uid_alpha".to_string(),
+                groups: vec![vec![
+                    "series_rcc".to_string(),
+                    "series_lcc".to_string(),
+                    "series_rmlo".to_string(),
+                    "series_lmlo".to_string(),
+                    "series_gsps".to_string(),
+                ]],
+                open_group: 0,
+                username: None,
+                password: None,
+            })
+        );
+    }
+
+    #[test]
     fn parse_dicomweb_grouped_series_requires_dicomweb_url() {
         let error = parse_perspecta_uri(
             "perspecta://open?study=study_uid_alpha&group_series=series_a|series_b|series_c|series_d",
@@ -805,6 +810,27 @@ mod tests {
                     PathBuf::from("example-data/f.dcm"),
                     PathBuf::from("example-data/g.dcm"),
                     PathBuf::from("example-data/h.dcm"),
+                ]],
+                open_group: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_grouped_local_request_allows_supplementary_paths() {
+        let request = parse_perspecta_uri(
+            "perspecta://open?group=example-data%2Frcc.dcm|example-data%2Flcc.dcm|example-data%2Frmlo.dcm|example-data%2Flmlo.dcm|example-data%2Fpresentation.dcm",
+        )
+        .expect("URI should parse");
+        assert_eq!(
+            request,
+            LaunchRequest::LocalGroups {
+                groups: vec![vec![
+                    PathBuf::from("example-data/rcc.dcm"),
+                    PathBuf::from("example-data/lcc.dcm"),
+                    PathBuf::from("example-data/rmlo.dcm"),
+                    PathBuf::from("example-data/lmlo.dcm"),
+                    PathBuf::from("example-data/presentation.dcm"),
                 ]],
                 open_group: 0,
             }

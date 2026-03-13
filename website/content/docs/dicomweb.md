@@ -36,4 +36,4 @@ window.location.href = uri;
 ## Notes
 
 - Provide both `user` and `password` together when using basic auth.
-- Grouped DICOMweb preload uses `group_series` and follows supported counts (`1`, `2`, `3`, `4`, `8`) per group.
+- Grouped DICOMweb preload uses `group_series`; each group must resolve to `1`, `2`, `3`, `4`, or `8` displayable items, while supplementary GSPS/SR objects do not count toward that total.

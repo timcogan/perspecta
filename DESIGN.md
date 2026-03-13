@@ -23,7 +23,7 @@ Its primary purpose is consistency during development, not full architecture cov
 
 ## Core Invariants
 
-1. Supported group sizes MUST be exactly `1`, `2`, `3`, `4`, or `8`.
+1. Supported primary displayable group sizes MUST be exactly `1`, `2`, `3`, `4`, or `8`; supplementary GSPS/SR objects do not count toward that total.
 2. Multi-view rendering paths MUST apply only to `2`, `3`, `4`, or `8`.
 3. Non-image DICOM objects (`DicomPathKind::Other`) and Structured Reports MUST NOT be passed to `load_dicom`.
 4. Structured Reports MUST load through the dedicated SR parser and single-document UI path.
@@ -34,6 +34,7 @@ Its primary purpose is consistency during development, not full architecture cov
 9. Streaming completion logic MUST compare image counts (not total paths including GSPS/SR).
 10. UI state mutations MUST stay on the main thread; workers MUST communicate through channels.
 11. Production diagnostics MUST use logging (`log` macros), not `println!/eprintln!`.
+12. DICOMweb metadata parsing MUST use top-level instance identifiers; nested reference tags inside GSPS/SR sequences MUST NOT override the owning series or instance identity.
 
 ## Change Rules
 
