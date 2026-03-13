@@ -12,7 +12,7 @@ use eframe::egui::{
 
 use crate::dicom::{
     classify_dicom_path, load_dicom, load_gsps_overlays, load_structured_report, DicomImage,
-    DicomPathKind, GspsGraphic, GspsOverlay, GspsUnits, StructuredReportDocument,
+    DicomPathKind, DicomSource, GspsGraphic, GspsOverlay, GspsUnits, StructuredReportDocument,
     StructuredReportNode, METADATA_FIELD_NAMES,
 };
 use crate::dicomweb::{
@@ -37,7 +37,7 @@ const FILE_DROP_OVERLAY_WIDTH: f32 = 420.0;
 
 #[derive(Clone)]
 struct MammoViewport {
-    path: PathBuf,
+    path: DicomSource,
     image: DicomImage,
     texture: TextureHandle,
     label: String,
@@ -50,22 +50,22 @@ struct MammoViewport {
 }
 
 struct PendingLoad {
-    path: PathBuf,
+    path: DicomSource,
     image: DicomImage,
 }
 
 enum PendingSingleLoad {
     Image(PendingLoad),
     StructuredReport {
-        path: PathBuf,
+        path: DicomSource,
         report: StructuredReportDocument,
     },
 }
 
 #[derive(Default, Clone)]
 struct PreparedLoadPaths {
-    image_paths: Vec<PathBuf>,
-    structured_report_paths: Vec<PathBuf>,
+    image_paths: Vec<DicomSource>,
+    structured_report_paths: Vec<DicomSource>,
     gsps_overlays: HashMap<String, GspsOverlay>,
     gsps_files_found: usize,
     other_files_found: usize,
@@ -73,26 +73,26 @@ struct PreparedLoadPaths {
 
 enum HistoryPreloadResult {
     Single {
-        path: PathBuf,
+        path: DicomSource,
         image: Box<DicomImage>,
     },
     Group {
-        viewports: Vec<(PathBuf, DicomImage)>,
+        viewports: Vec<(DicomSource, DicomImage)>,
     },
     Report {
-        path: PathBuf,
+        path: DicomSource,
         report: Box<StructuredReportDocument>,
     },
 }
 
 enum HistoryPreloadJob {
     Group(PreparedLoadPaths),
-    StructuredReport(PathBuf),
+    StructuredReport(DicomSource),
 }
 
 #[derive(Clone)]
 struct HistorySingleData {
-    path: PathBuf,
+    path: DicomSource,
     image: DicomImage,
     texture: TextureHandle,
     window_center: f32,
@@ -103,7 +103,7 @@ struct HistorySingleData {
 
 #[derive(Clone)]
 struct HistoryGroupViewportData {
-    path: PathBuf,
+    path: DicomSource,
     image: DicomImage,
     texture: TextureHandle,
     label: String,
@@ -120,7 +120,7 @@ struct HistoryGroupData {
 
 #[derive(Clone)]
 struct HistoryReportData {
-    path: PathBuf,
+    path: DicomSource,
     report: StructuredReportDocument,
 }
 
@@ -163,7 +163,7 @@ struct GspsNavigationTarget {
 pub struct DicomViewerApp {
     image: Option<DicomImage>,
     report: Option<StructuredReportDocument>,
-    current_single_path: Option<PathBuf>,
+    current_single_path: Option<DicomSource>,
     texture: Option<TextureHandle>,
     mammo_group: Vec<Option<MammoViewport>>,
     mammo_selected_index: usize,
@@ -179,8 +179,8 @@ pub struct DicomViewerApp {
     dicomweb_receiver: Option<Receiver<Result<DicomWebDownloadResult, String>>>,
     dicomweb_active_path_receiver: Option<Receiver<DicomWebGroupStreamUpdate>>,
     dicomweb_active_group_expected: Option<usize>,
-    dicomweb_active_group_paths: Vec<PathBuf>,
-    dicomweb_active_pending_paths: VecDeque<PathBuf>,
+    dicomweb_active_group_paths: Vec<DicomSource>,
+    dicomweb_active_pending_paths: VecDeque<DicomSource>,
     single_load_receiver: Option<Receiver<Result<PendingSingleLoad, String>>>,
     mammo_load_receiver: Option<Receiver<Result<PendingLoad, String>>>,
     mammo_load_sender: Option<Sender<Result<PendingLoad, String>>>,
@@ -303,10 +303,14 @@ impl DicomViewerApp {
         }
     }
 
-    fn prepare_load_paths(paths: Vec<PathBuf>) -> PreparedLoadPaths {
+    fn prepare_load_paths<T>(paths: Vec<T>) -> PreparedLoadPaths
+    where
+        T: Into<DicomSource>,
+    {
         let mut prepared = PreparedLoadPaths::default();
 
         for path in paths {
+            let path = path.into();
             match classify_dicom_path(&path) {
                 Ok(DicomPathKind::Gsps) => {
                     prepared.gsps_files_found = prepared.gsps_files_found.saturating_add(1);
@@ -957,6 +961,10 @@ impl DicomViewerApp {
         format!("history-{prefix}-{}", self.history_nonce)
     }
 
+    fn source_texture_name(prefix: &str, source: &DicomSource) -> String {
+        format!("{prefix}:{}", source.stable_id())
+    }
+
     fn build_history_thumb(
         &mut self,
         image: &DicomImage,
@@ -1184,7 +1192,7 @@ impl DicomViewerApp {
 
     fn push_report_history_entry(
         &mut self,
-        path: PathBuf,
+        path: DicomSource,
         report: StructuredReportDocument,
         ctx: &egui::Context,
     ) {
@@ -1320,7 +1328,7 @@ impl DicomViewerApp {
     }
 
     fn preload_report_into_history(
-        path: PathBuf,
+        path: DicomSource,
         tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
     ) {
         let result = load_structured_report(&path)
@@ -1626,12 +1634,10 @@ impl DicomViewerApp {
         }
     }
 
-    fn load_local_groups(
-        &mut self,
-        groups: Vec<Vec<PathBuf>>,
-        open_group: usize,
-        ctx: &egui::Context,
-    ) {
+    fn load_local_groups<T>(&mut self, groups: Vec<Vec<T>>, open_group: usize, ctx: &egui::Context)
+    where
+        T: Clone + Into<DicomSource>,
+    {
         if groups.is_empty() {
             self.set_load_error("Launch request had no groups to open.");
             log::warn!("Launch request had no groups to open.");
@@ -1751,7 +1757,7 @@ impl DicomViewerApp {
             return Err("Could not prepare preview for image (no decodable frame).".to_string());
         };
 
-        let texture_name = format!("mammo-group:{}", pending.path.display());
+        let texture_name = Self::source_texture_name("mammo-group", &pending.path);
         let texture = ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
         let label = mammo_label(&pending.image, &pending.path);
         self.mammo_group[slot_index] = Some(MammoViewport {
@@ -1972,7 +1978,8 @@ impl DicomViewerApp {
                         else {
                             break;
                         };
-                        let texture_name = format!("history-preload-single:{}", path.display());
+                        let texture_name =
+                            Self::source_texture_name("history-preload-single", &path);
                         let texture =
                             ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
                         self.push_single_history_entry(
@@ -2004,7 +2011,8 @@ impl DicomViewerApp {
                                 );
                                 continue;
                             };
-                            let texture_name = format!("history-preload-group:{}", path.display());
+                            let texture_name =
+                                Self::source_texture_name("history-preload-group", &path);
                             let texture =
                                 ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
                             let label = mammo_label(&image, &path);
@@ -2456,26 +2464,31 @@ impl DicomViewerApp {
         }
     }
 
-    fn load_selected_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) -> Result<(), ()> {
+    fn load_selected_paths<T>(&mut self, paths: Vec<T>, ctx: &egui::Context) -> Result<(), ()>
+    where
+        T: Into<DicomSource>,
+    {
         self.clear_load_error();
         let prepared = Self::prepare_load_paths(paths);
         self.apply_prepared_load_paths(prepared, ctx)
     }
 
-    fn stage_structured_report_history_entries(
+    fn stage_structured_report_history_entries<T>(
         &mut self,
-        report_paths: &[PathBuf],
+        report_paths: &[T],
         ctx: &egui::Context,
-    ) {
+    ) where
+        T: Clone + Into<DicomSource>,
+    {
         for path in report_paths {
             self.enqueue_history_preload_job(
-                HistoryPreloadJob::StructuredReport(path.clone()),
+                HistoryPreloadJob::StructuredReport(path.clone().into()),
                 ctx,
             );
         }
     }
 
-    fn load_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+    fn load_path(&mut self, path: DicomSource, ctx: &egui::Context) {
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
         self.single_load_receiver = None;
@@ -2498,7 +2511,7 @@ impl DicomViewerApp {
         ctx.request_repaint();
     }
 
-    fn load_structured_report_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+    fn load_structured_report_path(&mut self, path: DicomSource, ctx: &egui::Context) {
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
         self.single_load_receiver = None;
@@ -2517,7 +2530,7 @@ impl DicomViewerApp {
         ctx.request_repaint();
     }
 
-    fn apply_loaded_single(&mut self, path: PathBuf, image: DicomImage, ctx: &egui::Context) {
+    fn apply_loaded_single(&mut self, path: DicomSource, image: DicomImage, ctx: &egui::Context) {
         let mut image = image;
         Self::attach_matching_gsps_overlay(&mut image, &self.pending_gsps_overlays);
         self.gsps_overlay_visible = false;
@@ -2563,7 +2576,7 @@ impl DicomViewerApp {
 
     fn apply_loaded_structured_report(
         &mut self,
-        path: PathBuf,
+        path: DicomSource,
         report: StructuredReportDocument,
         ctx: &egui::Context,
     ) {
@@ -2578,7 +2591,7 @@ impl DicomViewerApp {
         log::info!("Loaded selected Structured Report.");
     }
 
-    fn load_mammo_group_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+    fn load_mammo_group_paths(&mut self, paths: Vec<DicomSource>, ctx: &egui::Context) {
         if !Self::is_supported_multi_view_group_size(paths.len()) {
             let err = Self::format_multi_view_size_error(paths.len());
             self.set_load_error(err.clone());
@@ -2803,9 +2816,17 @@ impl DicomViewerApp {
         }
     }
 
-    fn displayed_study_matches_paths(&self, image_paths: &[PathBuf]) -> bool {
-        match image_paths {
-            [path] => self
+    fn displayed_study_matches_paths<T>(&self, image_paths: &[T]) -> bool
+    where
+        T: Clone + Into<DicomSource>,
+    {
+        let image_paths = image_paths
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        match image_paths.as_slice() {
+            [ref path] => self
                 .current_single_path
                 .as_ref()
                 .is_some_and(|current| current == path),
@@ -4621,10 +4642,15 @@ fn unescape_toml_string(value: &str) -> String {
     output
 }
 
-fn history_id_from_paths(paths: &[PathBuf]) -> String {
+fn history_id_from_paths<T>(paths: &[T]) -> String
+where
+    T: Clone + Into<DicomSource>,
+{
     let mut normalized = paths
         .iter()
-        .map(|path| path.to_string_lossy().to_string())
+        .cloned()
+        .map(Into::into)
+        .map(|path: DicomSource| path.stable_id())
         .collect::<Vec<_>>();
     normalized.sort();
     format!("{}:{}", normalized.len(), normalized.join("|"))
@@ -4683,12 +4709,16 @@ mod tests {
         path
     }
 
+    fn test_source(path: &str) -> DicomSource {
+        PathBuf::from(path).into()
+    }
+
     fn single_history_entry(ctx: &egui::Context, path: &str, texture_name: &str) -> HistoryEntry {
         let path_buf = PathBuf::from(path);
         HistoryEntry {
             id: history_id_from_paths(std::slice::from_ref(&path_buf)),
             kind: HistoryKind::Single(Box::new(HistorySingleData {
-                path: path_buf,
+                path: path_buf.clone().into(),
                 image: DicomImage::test_stub(None),
                 texture: test_texture(ctx, texture_name),
                 window_center: 0.0,
@@ -4705,7 +4735,7 @@ mod tests {
         HistoryEntry {
             id: history_id_from_paths(std::slice::from_ref(&path_buf)),
             kind: HistoryKind::Report(Box::new(HistoryReportData {
-                path: path_buf,
+                path: path_buf.into(),
                 report: StructuredReportDocument::test_stub(),
             })),
             thumbs: vec![HistoryThumb {
@@ -4896,7 +4926,7 @@ mod tests {
         app.dicomweb_active_path_receiver = None;
         app.dicomweb_active_group_expected = Some(4);
         app.dicomweb_active_pending_paths
-            .push_back(PathBuf::from("streamed.dcm"));
+            .push_back(test_source("streamed.dcm"));
         assert!(app.has_mammo_group());
 
         app.dicomweb_active_path_receiver = None;
@@ -4911,7 +4941,7 @@ mod tests {
 
         app.dicomweb_active_path_receiver = None;
         app.dicomweb_active_pending_paths
-            .push_back(PathBuf::from("streamed-8-up.dcm"));
+            .push_back(test_source("streamed-8-up.dcm"));
         assert!(app.has_mammo_group());
     }
 
@@ -5007,7 +5037,7 @@ mod tests {
 
         app.dicomweb_active_path_receiver = None;
         app.dicomweb_active_pending_paths
-            .push_back(PathBuf::from("pending-stream.dcm"));
+            .push_back(test_source("pending-stream.dcm"));
         assert!(app.has_mammo_group());
         assert!(DicomViewerApp::is_supported_multi_view_group_size(8));
         assert_eq!(DicomViewerApp::multi_view_grid_dimensions(8), Some((2, 4)));
@@ -5116,7 +5146,7 @@ mod tests {
         let mut app = DicomViewerApp {
             mammo_group: vec![
                 Some(MammoViewport {
-                    path: PathBuf::from("a.dcm"),
+                    path: test_source("a.dcm"),
                     image: DicomImage::test_stub(None),
                     texture: texture_a,
                     label: "A".to_string(),
@@ -5128,7 +5158,7 @@ mod tests {
                     frame_scroll_accum: 0.0,
                 }),
                 Some(MammoViewport {
-                    path: PathBuf::from("b.dcm"),
+                    path: test_source("b.dcm"),
                     image: DicomImage::test_stub(Some(overlay)),
                     texture: texture_b,
                     label: "B".to_string(),
@@ -5238,7 +5268,7 @@ mod tests {
         let mut app = DicomViewerApp {
             mammo_group: vec![
                 Some(MammoViewport {
-                    path: PathBuf::from("a.dcm"),
+                    path: test_source("a.dcm"),
                     image: DicomImage::test_stub_with_mono_frames(Some(overlay_a), 3),
                     texture: texture_a,
                     label: "A".to_string(),
@@ -5250,7 +5280,7 @@ mod tests {
                     frame_scroll_accum: 0.0,
                 }),
                 Some(MammoViewport {
-                    path: PathBuf::from("b.dcm"),
+                    path: test_source("b.dcm"),
                     image: DicomImage::test_stub_with_mono_frames(Some(overlay_b), 3),
                     texture: texture_b,
                     label: "B".to_string(),
@@ -5296,7 +5326,7 @@ mod tests {
             history_entries: vec![HistoryEntry {
                 id: "single".to_string(),
                 kind: HistoryKind::Single(Box::new(HistorySingleData {
-                    path: PathBuf::from("cached-single.dcm"),
+                    path: test_source("cached-single.dcm"),
                     image: DicomImage::test_stub(None),
                     texture,
                     window_center: 0.0,
@@ -5338,7 +5368,7 @@ mod tests {
                 kind: HistoryKind::Group(HistoryGroupData {
                     viewports: vec![
                         HistoryGroupViewportData {
-                            path: PathBuf::from("cached-a.dcm"),
+                            path: test_source("cached-a.dcm"),
                             image: DicomImage::test_stub(None),
                             texture: texture_a,
                             label: "A".to_string(),
@@ -5347,7 +5377,7 @@ mod tests {
                             current_frame: 0,
                         },
                         HistoryGroupViewportData {
-                            path: PathBuf::from("cached-b.dcm"),
+                            path: test_source("cached-b.dcm"),
                             image: DicomImage::test_stub(None),
                             texture: texture_b,
                             label: "B".to_string(),
@@ -5390,7 +5420,7 @@ mod tests {
         );
         assert_eq!(
             app.current_single_path,
-            Some(PathBuf::from("cached-report.dcm"))
+            Some(test_source("cached-report.dcm"))
         );
     }
 
@@ -5401,7 +5431,7 @@ mod tests {
         let mut app = DicomViewerApp {
             mammo_group: vec![
                 Some(MammoViewport {
-                    path: PathBuf::from("group-a.dcm"),
+                    path: test_source("group-a.dcm"),
                     image: DicomImage::test_stub(None),
                     texture: texture.clone(),
                     label: "A".to_string(),
@@ -5413,7 +5443,7 @@ mod tests {
                     frame_scroll_accum: 0.0,
                 }),
                 Some(MammoViewport {
-                    path: PathBuf::from("group-b.dcm"),
+                    path: test_source("group-b.dcm"),
                     image: DicomImage::test_stub(None),
                     texture,
                     label: "B".to_string(),
@@ -5446,7 +5476,7 @@ mod tests {
     fn poll_history_preload_can_enqueue_report_history_entry() {
         let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
         tx.send(Ok(HistoryPreloadResult::Report {
-            path: PathBuf::from("preloaded-report.dcm"),
+            path: test_source("preloaded-report.dcm"),
             report: Box::new(StructuredReportDocument::test_stub()),
         }))
         .expect("report preload should send");
@@ -5505,7 +5535,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
         tx.send(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(2))
             .expect("streamed group count should send");
-        tx.send(DicomWebGroupStreamUpdate::ActivePath(path.clone()))
+        tx.send(DicomWebGroupStreamUpdate::ActivePath(path.clone().into()))
             .expect("streamed report path should send");
         drop(tx);
 
@@ -5549,7 +5579,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = DicomViewerApp {
             image: Some(DicomImage::test_stub(None)),
-            current_single_path: Some(PathBuf::from("current.dcm")),
+            current_single_path: Some(test_source("current.dcm")),
             texture: Some(test_texture(&ctx, "active-current")),
             history_entries: vec![
                 single_history_entry(&ctx, "current.dcm", "history-current"),
@@ -5560,7 +5590,7 @@ mod tests {
 
         app.close_current_group(&ctx);
 
-        assert_eq!(app.current_single_path, Some(PathBuf::from("next.dcm")));
+        assert_eq!(app.current_single_path, Some(test_source("next.dcm")));
         assert_eq!(app.history_entries.len(), 1);
         assert_eq!(
             app.history_entries[0].id,
@@ -5573,7 +5603,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = DicomViewerApp {
             image: Some(DicomImage::test_stub(None)),
-            current_single_path: Some(PathBuf::from("lonely.dcm")),
+            current_single_path: Some(test_source("lonely.dcm")),
             texture: Some(test_texture(&ctx, "active-lonely")),
             ..Default::default()
         };
@@ -5598,17 +5628,14 @@ mod tests {
     fn poll_dicomweb_grouped_keeps_load_error_until_active_group_is_ready() {
         let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
         tx.send(Ok(DicomWebDownloadResult::Grouped {
-            groups: vec![vec![
-                PathBuf::from("group-a.dcm"),
-                PathBuf::from("group-b.dcm"),
-            ]],
+            groups: vec![vec![test_source("group-a.dcm"), test_source("group-b.dcm")]],
             open_group: 0,
         }))
         .expect("grouped result should send");
 
         let mut app = DicomViewerApp {
             dicomweb_receiver: Some(rx),
-            dicomweb_active_group_paths: vec![PathBuf::from("group-a.dcm")],
+            dicomweb_active_group_paths: vec![test_source("group-a.dcm")],
             load_error_message: Some(
                 "Streaming multi-view load channel was not available.".to_string(),
             ),
@@ -5650,7 +5677,7 @@ mod tests {
     fn poll_single_load_clears_user_visible_error_on_success() {
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         tx.send(Ok(PendingSingleLoad::Image(PendingLoad {
-            path: PathBuf::from("selected.dcm"),
+            path: test_source("selected.dcm"),
             image: DicomImage::test_stub(None),
         })))
         .expect("success should send");
@@ -5671,7 +5698,7 @@ mod tests {
     fn poll_single_load_can_activate_structured_report() {
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         tx.send(Ok(PendingSingleLoad::StructuredReport {
-            path: PathBuf::from("report.dcm"),
+            path: test_source("report.dcm"),
             report: StructuredReportDocument::test_stub(),
         }))
         .expect("report should send");
@@ -5688,7 +5715,7 @@ mod tests {
         assert!(app.load_error_message.is_none());
         assert!(app.image.is_none());
         assert!(app.texture.is_none());
-        assert_eq!(app.current_single_path, Some(PathBuf::from("report.dcm")));
+        assert_eq!(app.current_single_path, Some(test_source("report.dcm")));
         assert_eq!(
             app.report.as_ref().map(|report| report.title.as_str()),
             Some("Structured Report")
@@ -5709,13 +5736,13 @@ mod tests {
         };
 
         app.apply_loaded_structured_report(
-            PathBuf::from("report.dcm"),
+            test_source("report.dcm"),
             StructuredReportDocument::test_stub(),
             &ctx,
         );
 
         assert!(app.mammo_group.is_empty());
-        assert_eq!(app.current_single_path, Some(PathBuf::from("report.dcm")));
+        assert_eq!(app.current_single_path, Some(test_source("report.dcm")));
         assert_eq!(
             app.report.as_ref().map(|report| report.title.as_str()),
             Some("Structured Report")
@@ -5740,10 +5767,7 @@ mod tests {
     #[test]
     fn is_supported_prepared_group_allows_sr_only_multi_report_groups() {
         let prepared = PreparedLoadPaths {
-            structured_report_paths: vec![
-                PathBuf::from("report-a.dcm"),
-                PathBuf::from("report-b.dcm"),
-            ],
+            structured_report_paths: vec![test_source("report-a.dcm"), test_source("report-b.dcm")],
             ..Default::default()
         };
 
@@ -5776,17 +5800,17 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = DicomViewerApp {
             dicomweb_active_group_expected: Some(1),
-            dicomweb_active_group_paths: vec![PathBuf::from("active-image.dcm")],
+            dicomweb_active_group_paths: vec![test_source("active-image.dcm")],
             history_preload_receiver: Some(rx),
             history_preload_queue: VecDeque::from([HistoryPreloadJob::StructuredReport(
-                PathBuf::from("queued-report.dcm"),
+                test_source("queued-report.dcm"),
             )]),
             ..Default::default()
         };
 
         let result = app.apply_prepared_load_paths(
             PreparedLoadPaths {
-                image_paths: vec![PathBuf::from("active-image.dcm")],
+                image_paths: vec![test_source("active-image.dcm")],
                 ..Default::default()
             },
             &ctx,
@@ -5802,7 +5826,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
         tx.send(Ok(DicomWebDownloadResult::Single(
             (0..5)
-                .map(|index| PathBuf::from(format!("invalid-{index}.dcm")))
+                .map(|index| DicomSource::from(PathBuf::from(format!("invalid-{index}.dcm"))))
                 .collect::<Vec<_>>(),
         )))
         .expect("single result should send");
@@ -5810,8 +5834,8 @@ mod tests {
         let mut app = DicomViewerApp {
             dicomweb_receiver: Some(rx),
             dicomweb_active_group_expected: Some(3),
-            dicomweb_active_group_paths: vec![PathBuf::from("active-a.dcm")],
-            dicomweb_active_pending_paths: VecDeque::from(vec![PathBuf::from("pending.dcm")]),
+            dicomweb_active_group_paths: vec![test_source("active-a.dcm")],
+            dicomweb_active_pending_paths: VecDeque::from(vec![test_source("pending.dcm")]),
             history_pushed_for_active_group: true,
             load_error_message: Some("Previous load failed.".to_string()),
             ..Default::default()
@@ -5825,11 +5849,11 @@ mod tests {
         assert_eq!(app.dicomweb_active_group_expected, Some(3));
         assert_eq!(
             app.dicomweb_active_group_paths,
-            vec![PathBuf::from("active-a.dcm")]
+            vec![test_source("active-a.dcm")]
         );
         assert_eq!(
             app.dicomweb_active_pending_paths,
-            VecDeque::from(vec![PathBuf::from("pending.dcm")])
+            VecDeque::from(vec![test_source("pending.dcm")])
         );
         assert!(app.history_pushed_for_active_group);
     }

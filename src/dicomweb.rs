@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use reqwest::header::ACCEPT;
 
-use crate::dicom::{is_gsps_sop_class_uid, is_structured_report_sop_class_uid, DicomPathKind};
+use crate::dicom::{
+    dicom_source_from_bytes, is_gsps_sop_class_uid, is_structured_report_sop_class_uid,
+    DicomPathKind, DicomSource,
+};
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest};
 use crate::mammo::{classify_laterality, classify_view};
 
@@ -41,9 +41,9 @@ struct DownloadInstanceRequest<'a> {
 
 #[derive(Debug, Clone)]
 pub enum DicomWebDownloadResult {
-    Single(Vec<PathBuf>),
+    Single(Vec<DicomSource>),
     Grouped {
-        groups: Vec<Vec<PathBuf>>,
+        groups: Vec<Vec<DicomSource>>,
         open_group: usize,
     },
 }
@@ -51,7 +51,7 @@ pub enum DicomWebDownloadResult {
 #[derive(Debug, Clone)]
 pub enum DicomWebGroupStreamUpdate {
     ActiveGroupInstanceCount(usize),
-    ActivePath(PathBuf),
+    ActivePath(DicomSource),
 }
 
 pub fn download_dicomweb_request(
@@ -60,7 +60,6 @@ pub fn download_dicomweb_request(
     let client = build_http_client()?;
     let base = normalize_base_url(&request.base_url);
     let auth = request.username.as_deref().zip(request.password.as_deref());
-    let cache_dir = create_cache_dir()?;
 
     if let Some(instance_uid) = request.instance_uid.as_ref() {
         let path = download_instance(
@@ -72,7 +71,6 @@ pub fn download_dicomweb_request(
                 sop_class_uid: None,
                 instance_uid,
             },
-            &cache_dir,
             auth,
         )?;
         return Ok(DicomWebDownloadResult::Single(vec![path]));
@@ -90,14 +88,7 @@ pub fn download_dicomweb_request(
     }
 
     let selected = select_instances_for_viewer(metadata_instances, request.series_uid.as_deref())?;
-    let paths = download_instances_parallel(
-        &client,
-        &base,
-        &request.study_uid,
-        &cache_dir,
-        auth,
-        &selected,
-    )?;
+    let paths = download_instances_parallel(&client, &base, &request.study_uid, auth, &selected)?;
 
     Ok(DicomWebDownloadResult::Single(paths))
 }
@@ -112,7 +103,6 @@ where
     let client = build_http_client()?;
     let base = normalize_base_url(&request.base_url);
     let auth = request.username.as_deref().zip(request.password.as_deref());
-    let cache_dir = create_cache_dir()?;
 
     if request.groups.is_empty() {
         bail!("DICOMweb grouped launch requested no groups");
@@ -123,7 +113,7 @@ where
         .min(request.groups.len().saturating_sub(1));
 
     let mut downloaded_groups = (0..request.groups.len())
-        .map(|_| None::<Vec<PathBuf>>)
+        .map(|_| None::<Vec<DicomSource>>)
         .collect::<Vec<_>>();
 
     let active_group_instances = resolve_group_instances(
@@ -142,7 +132,6 @@ where
         &client,
         &base,
         &request.study_uid,
-        &cache_dir,
         auth,
         &active_group_instances,
         &mut on_active_path,
@@ -164,7 +153,6 @@ where
             &client,
             &base,
             &request.study_uid,
-            &cache_dir,
             auth,
             &selected_instances,
         )?;
@@ -365,11 +353,10 @@ fn download_instances_streaming<F>(
     client: &Client,
     base: &str,
     study_uid: &str,
-    cache_dir: &Path,
     auth: Option<(&str, &str)>,
     instances: &[MetadataInstance],
     on_path: &mut F,
-) -> Result<Vec<PathBuf>>
+) -> Result<Vec<DicomSource>>
 where
     F: FnMut(DicomWebGroupStreamUpdate),
 {
@@ -383,7 +370,6 @@ where
                 sop_class_uid: instance.sop_class_uid.as_deref(),
                 instance_uid: &instance.instance_uid,
             },
-            cache_dir,
             auth,
         )
     })
@@ -393,10 +379,10 @@ fn download_instances_streaming_with<F, D>(
     instances: &[MetadataInstance],
     on_path: &mut F,
     mut downloader: D,
-) -> Result<Vec<PathBuf>>
+) -> Result<Vec<DicomSource>>
 where
     F: FnMut(DicomWebGroupStreamUpdate),
-    D: FnMut(&MetadataInstance) -> Result<PathBuf>,
+    D: FnMut(&MetadataInstance) -> Result<DicomSource>,
 {
     let mut paths = Vec::with_capacity(instances.len());
     for instance in instances {
@@ -445,17 +431,6 @@ fn has_root_only_path(url: &str) -> bool {
     } else {
         !url.contains('/')
     }
-}
-
-fn create_cache_dir() -> Result<PathBuf> {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let dir = std::env::temp_dir().join(format!("perspecta-dicomweb-{}-{ts}", std::process::id()));
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("Could not create temporary directory {}", dir.display()))?;
-    Ok(dir)
 }
 
 fn fetch_instance_metadata(
@@ -919,9 +894,8 @@ fn download_instance(
     client: &Client,
     base: &str,
     request: DownloadInstanceRequest<'_>,
-    output_dir: &Path,
     auth: Option<(&str, &str)>,
-) -> Result<PathBuf> {
+) -> Result<DicomSource> {
     let DownloadInstanceRequest {
         study_uid,
         series_uid,
@@ -965,11 +939,7 @@ fn download_instance(
         );
     };
 
-    let file_name = sanitize_for_file_name(instance_uid);
-    let path = output_dir.join(format!("{file_name}.dcm"));
-    fs::write(&path, &bytes)
-        .with_context(|| format!("Could not write downloaded DICOM file {}", path.display()))?;
-    Ok(path)
+    Ok(dicom_source_from_bytes(instance_uid, bytes))
 }
 
 fn preferred_accepts_for_instance(sop_class_uid: Option<&str>) -> &'static [&'static str] {
@@ -1001,16 +971,15 @@ fn download_instances_parallel(
     client: &Client,
     base: &str,
     study_uid: &str,
-    cache_dir: &Path,
     auth: Option<(&str, &str)>,
     instances: &[MetadataInstance],
-) -> Result<Vec<PathBuf>> {
+) -> Result<Vec<DicomSource>> {
     if instances.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut outputs = (0..instances.len())
-        .map(|_| None::<Result<PathBuf>>)
+        .map(|_| None::<Result<DicomSource>>)
         .collect::<Vec<_>>();
     std::thread::scope(|scope| {
         let mut jobs = Vec::with_capacity(instances.len());
@@ -1027,7 +996,6 @@ fn download_instances_parallel(
                             sop_class_uid: instance.sop_class_uid.as_deref(),
                             instance_uid: &instance.instance_uid,
                         },
-                        cache_dir,
                         auth,
                     )
                 }),
@@ -1146,19 +1114,6 @@ fn http_get_bytes(
         .bytes()
         .map(|body| body.to_vec())
         .with_context(|| format!("Could not read response body from {url}"))
-}
-
-fn sanitize_for_file_name(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
 }
 
 #[cfg(test)]
@@ -1572,7 +1527,10 @@ mod tests {
         let mut updates = Vec::<DicomWebGroupStreamUpdate>::new();
         let mut on_path = |update: DicomWebGroupStreamUpdate| updates.push(update);
         let result = download_instances_streaming_with(&instances, &mut on_path, |instance| {
-            Ok(PathBuf::from(format!("{}.dcm", instance.instance_uid)))
+            Ok(DicomSource::from(PathBuf::from(format!(
+                "{}.dcm",
+                instance.instance_uid
+            ))))
         })
         .expect("streaming should succeed");
 

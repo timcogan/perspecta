@@ -1,6 +1,9 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::{fs, io::Cursor};
@@ -56,6 +59,131 @@ pub const STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX: &str = "1.2.840.10008.5.1.4.1.
 pub const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
 #[cfg(test)]
 pub const BASIC_TEXT_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.11";
+
+#[derive(Debug, Clone)]
+pub enum DicomSource {
+    File(PathBuf),
+    Memory {
+        id: u64,
+        label: Arc<str>,
+        bytes: Arc<[u8]>,
+    },
+}
+
+impl DicomSource {
+    pub fn from_memory(preferred_name: &str, bytes: Vec<u8>) -> Self {
+        static IN_MEMORY_DICOM_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+        let id = IN_MEMORY_DICOM_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let label = Arc::<str>::from(sanitize_memory_source_label(preferred_name));
+        let bytes = Arc::<[u8]>::from(bytes.into_boxed_slice());
+        Self::Memory { id, label, bytes }
+    }
+
+    pub fn stable_id(&self) -> String {
+        match self {
+            Self::File(path) => format!("file:{}", path.to_string_lossy()),
+            Self::Memory { id, label, .. } => format!("memory:{id}:{label}"),
+        }
+    }
+
+    pub fn short_label(&self) -> Cow<'_, str> {
+        match self {
+            Self::File(path) => path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(Cow::Borrowed)
+                .unwrap_or_else(|| Cow::Owned(path.display().to_string())),
+            Self::Memory { label, .. } => Cow::Borrowed(label.as_ref()),
+        }
+    }
+
+    fn bytes(&self) -> Option<&Arc<[u8]>> {
+        match self {
+            Self::File(_) => None,
+            Self::Memory { bytes, .. } => Some(bytes),
+        }
+    }
+
+    fn file_path(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path.as_path()),
+            Self::Memory { .. } => None,
+        }
+    }
+}
+
+impl From<PathBuf> for DicomSource {
+    fn from(value: PathBuf) -> Self {
+        Self::File(value)
+    }
+}
+
+impl From<&PathBuf> for DicomSource {
+    fn from(value: &PathBuf) -> Self {
+        Self::File(value.clone())
+    }
+}
+
+impl From<&Path> for DicomSource {
+    fn from(value: &Path) -> Self {
+        Self::File(value.to_path_buf())
+    }
+}
+
+impl From<&DicomSource> for DicomSource {
+    fn from(value: &DicomSource) -> Self {
+        value.clone()
+    }
+}
+
+impl PartialEq for DicomSource {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::File(left), Self::File(right)) => left == right,
+            (Self::Memory { id: left, .. }, Self::Memory { id: right, .. }) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for DicomSource {}
+
+impl Hash for DicomSource {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::File(path) => {
+                0u8.hash(state);
+                path.hash(state);
+            }
+            Self::Memory { id, .. } => {
+                1u8.hash(state);
+                id.hash(state);
+            }
+        }
+    }
+}
+
+impl PartialEq<PathBuf> for DicomSource {
+    fn eq(&self, other: &PathBuf) -> bool {
+        matches!(self, Self::File(path) if path == other)
+    }
+}
+
+impl PartialEq<DicomSource> for PathBuf {
+    fn eq(&self, other: &DicomSource) -> bool {
+        other == self
+    }
+}
+
+impl fmt::Display for DicomSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File(path) => write!(f, "{}", path.display()),
+            Self::Memory { id, label, .. } => write!(f, "memory:{label}#{id}"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DicomPathKind {
@@ -220,14 +348,14 @@ enum RgbFrames {
 
 #[derive(Debug, Clone)]
 struct LazyMonoFrames {
-    path: PathBuf,
+    source: DicomSource,
     cache: MonoFrameCache,
     preload_started: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
 struct LazyRgbFrames {
-    path: PathBuf,
+    source: DicomSource,
     cache: RgbFrameCache,
     preload_started: Arc<AtomicBool>,
 }
@@ -275,16 +403,13 @@ impl LazyMonoFrames {
         if self.preload_started.swap(true, Ordering::Relaxed) {
             return;
         }
-        let path = self.path.clone();
+        let source = self.source.clone();
         let cache = Arc::clone(&self.cache);
         let preload_started = Arc::clone(&self.preload_started);
         thread::spawn(move || {
-            if let Err(err) = preload_mono_frames_from_path(&path, &cache) {
+            if let Err(err) = preload_mono_frames_from_source(&source, &cache) {
                 preload_started.store(false, Ordering::Relaxed);
-                log::warn!(
-                    "preload_mono_frames_from_path failed for {}: {err:#}",
-                    path.display()
-                );
+                log::warn!("preload_mono_frames_from_source failed for {source}: {err:#}");
             }
         });
     }
@@ -307,16 +432,13 @@ impl LazyRgbFrames {
         if self.preload_started.swap(true, Ordering::Relaxed) {
             return;
         }
-        let path = self.path.clone();
+        let source = self.source.clone();
         let cache = Arc::clone(&self.cache);
         let preload_started = Arc::clone(&self.preload_started);
         thread::spawn(move || {
-            if let Err(err) = preload_rgb_frames_from_path(&path, &cache) {
+            if let Err(err) = preload_rgb_frames_from_source(&source, &cache) {
                 preload_started.store(false, Ordering::Relaxed);
-                log::warn!(
-                    "preload_rgb_frames_from_path failed for {}: {err:#}",
-                    path.display()
-                );
+                log::warn!("preload_rgb_frames_from_source failed for {source}: {err:#}");
             }
         });
     }
@@ -331,31 +453,37 @@ pub fn is_structured_report_sop_class_uid(uid: &str) -> bool {
         .starts_with(STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX)
 }
 
-pub fn classify_dicom_path(path: &Path) -> Result<DicomPathKind> {
-    let obj = open_dicom_object(path)?;
+pub fn dicom_source_from_bytes(preferred_name: &str, bytes: Vec<u8>) -> DicomSource {
+    DicomSource::from_memory(preferred_name, bytes)
+}
+
+pub fn classify_dicom_path(source: impl Into<DicomSource>) -> Result<DicomPathKind> {
+    let obj = open_dicom_object(source)?;
     Ok(classify_dicom_object(&obj))
 }
 
-pub fn load_gsps_overlays(path: &Path) -> Result<HashMap<String, GspsOverlay>> {
-    let obj = open_dicom_object(path)?;
+pub fn load_gsps_overlays(source: impl Into<DicomSource>) -> Result<HashMap<String, GspsOverlay>> {
+    let source = source.into();
+    let obj = open_dicom_object(&source)?;
     if classify_dicom_object(&obj) != DicomPathKind::Gsps {
         let sop_class = read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
         bail!(
             "{} is not a GSPS object (SOPClassUID={})",
-            path.display(),
+            source,
             sop_class
         );
     }
     Ok(parse_gsps_overlays(&obj))
 }
 
-pub fn load_structured_report(path: &Path) -> Result<StructuredReportDocument> {
-    let obj = open_dicom_object(path)?;
+pub fn load_structured_report(source: impl Into<DicomSource>) -> Result<StructuredReportDocument> {
+    let source = source.into();
+    let obj = open_dicom_object(&source)?;
     if classify_dicom_object(&obj) != DicomPathKind::StructuredReport {
         let sop_class = read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
         bail!(
             "{} is not a Structured Report object (SOPClassUID={})",
-            path.display(),
+            source,
             sop_class
         );
     }
@@ -808,13 +936,14 @@ fn read_item_multi_int(item: &InMemDicomObject, tag: Tag) -> Option<Vec<i32>> {
         })
 }
 
-pub fn load_dicom(path: &Path) -> Result<DicomImage> {
-    let obj = open_dicom_object(path)?;
+pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
+    let source = source.into();
+    let obj = open_dicom_object(&source)?;
     if classify_dicom_object(&obj) == DicomPathKind::StructuredReport {
         let sop_class = read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
         bail!(
             "{} is a Structured Report object (SOPClassUID={}); use load_structured_report() instead",
-            path.display(),
+            source,
             sop_class
         );
     }
@@ -898,7 +1027,7 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
                 let mut cache = vec![None; frame_count];
                 cache[0] = Some(Arc::<[i32]>::from(first_frame_pixels.into_boxed_slice()));
                 MonoFrames::Lazy(LazyMonoFrames {
-                    path: path.to_path_buf(),
+                    source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
                     preload_started: Arc::new(AtomicBool::new(false)),
                 })
@@ -966,7 +1095,7 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
                 let mut cache = vec![None; frame_count];
                 cache[0] = Some(Arc::<[u8]>::from(first_frame_pixels.into_boxed_slice()));
                 RgbFrames::Lazy(LazyRgbFrames {
-                    path: path.to_path_buf(),
+                    source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
                     preload_started: Arc::new(AtomicBool::new(false)),
                 })
@@ -1001,7 +1130,7 @@ pub fn load_dicom(path: &Path) -> Result<DicomImage> {
     }
 }
 
-fn preload_mono_frames_from_path(path: &Path, cache: &MonoFrameCache) -> Result<()> {
+fn preload_mono_frames_from_source(source: &DicomSource, cache: &MonoFrameCache) -> Result<()> {
     let frame_count = match cache.lock() {
         Ok(guard) => guard.len(),
         Err(err) => {
@@ -1016,10 +1145,10 @@ fn preload_mono_frames_from_path(path: &Path, cache: &MonoFrameCache) -> Result<
     let mut workers = Vec::with_capacity(worker_count);
 
     for worker_id in 0..worker_count {
-        let path = path.to_path_buf();
+        let source = source.clone();
         let cache = Arc::clone(cache);
         workers.push(thread::spawn(move || -> Result<()> {
-            let obj = open_dicom_object(&path)?;
+            let obj = open_dicom_object(&source)?;
             for frame_index in (worker_id..frame_count).step_by(worker_count) {
                 let already_loaded = match cache.lock() {
                     Ok(guard) => guard
@@ -1089,7 +1218,7 @@ fn preload_mono_frames_from_path(path: &Path, cache: &MonoFrameCache) -> Result<
     Ok(())
 }
 
-fn preload_rgb_frames_from_path(path: &Path, cache: &RgbFrameCache) -> Result<()> {
+fn preload_rgb_frames_from_source(source: &DicomSource, cache: &RgbFrameCache) -> Result<()> {
     let frame_count = match cache.lock() {
         Ok(guard) => guard.len(),
         Err(err) => {
@@ -1104,10 +1233,10 @@ fn preload_rgb_frames_from_path(path: &Path, cache: &RgbFrameCache) -> Result<()
     let mut workers = Vec::with_capacity(worker_count);
 
     for worker_id in 0..worker_count {
-        let path = path.to_path_buf();
+        let source = source.clone();
         let cache = Arc::clone(cache);
         workers.push(thread::spawn(move || -> Result<()> {
-            let obj = open_dicom_object(&path)?;
+            let obj = open_dicom_object(&source)?;
             for frame_index in (worker_id..frame_count).step_by(worker_count) {
                 let already_loaded = match cache.lock() {
                     Ok(guard) => guard
@@ -1194,7 +1323,16 @@ fn preload_rgb_frames_from_path(path: &Path, cache: &RgbFrameCache) -> Result<()
     Ok(())
 }
 
-fn open_dicom_object(path: &Path) -> Result<DefaultDicomObject> {
+fn open_dicom_object(source: impl Into<DicomSource>) -> Result<DefaultDicomObject> {
+    let source = source.into();
+    if let Some(bytes) = source.bytes() {
+        return open_dicom_object_from_bytes(bytes.as_ref(), &source.to_string());
+    }
+
+    let path = source
+        .file_path()
+        .ok_or_else(|| anyhow::anyhow!("Could not resolve local file path for {source}"))?;
+
     match open_file(path) {
         Ok(obj) => Ok(obj),
         Err(err) => {
@@ -1214,6 +1352,46 @@ fn open_dicom_object(path: &Path) -> Result<DefaultDicomObject> {
 
             Err(err).with_context(|| format!("Could not open {}", path.display()))
         }
+    }
+}
+
+fn open_dicom_object_from_bytes(bytes: &[u8], source_label: &str) -> Result<DefaultDicomObject> {
+    match from_reader(Cursor::new(bytes)) {
+        Ok(obj) => Ok(obj),
+        Err(err) => {
+            if is_missing_meta_group_length_error(&err) {
+                if let Some(repaired) = repair_missing_meta_group_length(bytes) {
+                    return from_reader(Cursor::new(repaired)).with_context(|| {
+                        format!(
+                            "Could not open {source_label} after repairing missing File Meta Information Group Length (0002,0000)"
+                        )
+                    });
+                }
+            }
+
+            Err(err).with_context(|| format!("Could not open {source_label}"))
+        }
+    }
+}
+
+fn sanitize_memory_source_label(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+
+    if sanitized.is_empty() {
+        "dicom".to_string()
+    } else {
+        sanitized
     }
 }
 
@@ -1645,6 +1823,30 @@ mod tests {
         ))
     }
 
+    fn sr_test_bytes(instance_uid: &str) -> Vec<u8> {
+        let sr_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+        ]);
+
+        let sr_obj = sr_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(BASIC_TEXT_SR_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid(instance_uid),
+            )
+            .expect("SR test object should build file meta");
+
+        let path = unique_test_file_path("in-memory-dicom");
+        sr_obj
+            .write_to_file(&path)
+            .expect("SR test object should write to disk");
+        let bytes = fs::read(&path).expect("SR test bytes should read from disk");
+        let _ = fs::remove_file(&path);
+        bytes
+    }
+
     fn code_item(code_meaning: &str) -> InMemDicomObject {
         InMemDicomObject::from_element_iter([DataElement::new(
             Tag(0x0008, 0x0104),
@@ -1837,6 +2039,18 @@ mod tests {
         assert!(message.contains("Structured Report object"));
         assert!(message.contains(BASIC_TEXT_SR_SOP_CLASS_UID));
         assert!(message.contains("load_structured_report()"));
+    }
+
+    #[test]
+    fn dicom_source_from_bytes_roundtrip_opens_object() {
+        let bytes = sr_test_bytes("4.3.2.4");
+        let virtual_path = dicom_source_from_bytes("report 4.3.2.4", bytes);
+
+        assert!(matches!(virtual_path, DicomSource::Memory { .. }));
+        assert_eq!(
+            classify_dicom_path(&virtual_path).expect("virtual path should classify"),
+            DicomPathKind::StructuredReport
+        );
     }
 
     #[test]
