@@ -14,7 +14,7 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/main.rs`: app bootstrap and initial launch request wiring only.
 - `src/launch.rs`: parse/validate CLI and `perspecta://` launch inputs.
 - `src/dicomweb.rs`: DICOMweb metadata selection and instance download.
-- `src/dicom.rs`: DICOM open/classify/decode and GSPS/SR parsing.
+- `src/dicom.rs`, `src/dicom/*`: DICOM facade, shared object open/classify/decode helpers, and format-specific parsers.
 - `src/mammo.rs`: mammography ordering/alignment helpers.
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
 - `src/logging.rs`: logging setup and log-level configuration.
