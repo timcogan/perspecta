@@ -1,7 +1,8 @@
 baseURL = "https://perspecta.cogan.dev/"
 languageCode = "en-us"
 title = "Perspecta"
-disableKinds = ["taxonomy", "term", "RSS", "sitemap", "robotsTXT"]
+disableKinds = ["taxonomy", "term", "RSS"]
+enableRobotsTXT = true
 
 [params]
 description = "A fast DICOM viewer built in Rust."
