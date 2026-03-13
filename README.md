@@ -79,7 +79,7 @@ cargo run -- "example-data/current-RCC.dcm" "example-data/current-LCC.dcm" "exam
 - `3` files: opens the mammography `1x3` layout.
 - `4` files: opens the mammography `2x2` layout.
 - `8` files: opens the mammography comparison `2x4` layout (current row + prior row).
-- GSPS DICOM files can be included in the same selection; overlays are available with `G` (off by default).
+- GSPS DICOM files can be included in the same selection, including grouped launch inputs; they act as overlays and do not count as display slots.
 - Structured Report (SR) DICOM files can be opened directly in a single-document view.
 - If images and SR objects are selected together, Perspecta opens the images first and adds each SR as a separate history entry.
 
@@ -100,14 +100,14 @@ perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042&study=<StudyInstanceUID>
 | --- | --- |
 | `path`, `file` | Add one local file path |
 | `paths`, `files` | Add multiple local file paths (comma- or pipe-separated) |
-| `group` | Add one local preload group (must contain `1`, `2`, `3`, `4`, or `8` paths) |
+| `group` | Add one local preload group; after filtering supplementary GSPS/SR objects, each group must resolve to `1`, `2`, `3`, `4`, or `8` displayable items |
 | `groups` | Add multiple local preload groups separated by `;` |
 | `open_group` | Select which preloaded group opens first (default `0`) |
 | `dicomweb` | DICOMweb base URL (or full URL containing study/series/instance path segments) |
 | `study` | StudyInstanceUID (required for DICOMweb launch) |
 | `series` | SeriesInstanceUID (optional) |
 | `instance` | SOPInstanceUID (optional) |
-| `group_series` | DICOMweb grouped preload by series UID lists (each group must contain `1`, `2`, `3`, `4`, or `8`) |
+| `group_series` | DICOMweb grouped preload by series UID lists; each group must resolve to `1`, `2`, `3`, `4`, or `8` displayable items, while supplementary GSPS/SR objects do not count toward that total |
 | `user`, `password` | Optional HTTP basic auth credentials (must be provided together) |
 | `auth` | Alternative auth format: `username:password` (percent-encoded) |
 

@@ -31,6 +31,14 @@ struct MetadataInstance {
     instance_number: Option<i32>,
 }
 
+#[derive(Clone, Copy)]
+struct DownloadInstanceRequest<'a> {
+    study_uid: &'a str,
+    series_uid: Option<&'a str>,
+    sop_class_uid: Option<&'a str>,
+    instance_uid: &'a str,
+}
+
 #[derive(Debug, Clone)]
 pub enum DicomWebDownloadResult {
     Single(Vec<PathBuf>),
@@ -58,9 +66,12 @@ pub fn download_dicomweb_request(
         let path = download_instance(
             &client,
             &base,
-            &request.study_uid,
-            request.series_uid.as_deref(),
-            instance_uid,
+            DownloadInstanceRequest {
+                study_uid: &request.study_uid,
+                series_uid: request.series_uid.as_deref(),
+                sop_class_uid: None,
+                instance_uid,
+            },
             &cache_dir,
             auth,
         )?;
@@ -110,11 +121,10 @@ where
     let mut selected_instances_by_group = Vec::with_capacity(request.groups.len());
 
     for (group_index, group_series_uids) in request.groups.iter().enumerate() {
-        if !matches!(group_series_uids.len(), 1..=4 | 8) {
+        if group_series_uids.is_empty() {
             bail!(
-                "DICOMweb group {} has {} series UIDs; each group must contain exactly 1, 2, 3, 4, or 8 series UIDs",
-                group_index,
-                group_series_uids.len()
+                "DICOMweb group {} did not include any series UIDs",
+                group_index
             );
         }
         let mut reduced_by_series = Vec::<Vec<MetadataInstance>>::new();
@@ -334,9 +344,12 @@ where
         download_instance(
             client,
             base,
-            study_uid,
-            instance.series_uid.as_deref(),
-            &instance.instance_uid,
+            DownloadInstanceRequest {
+                study_uid,
+                series_uid: instance.series_uid.as_deref(),
+                sop_class_uid: instance.sop_class_uid.as_deref(),
+                instance_uid: &instance.instance_uid,
+            },
             cache_dir,
             auth,
         )
@@ -519,15 +532,117 @@ fn split_top_level_json_objects(input: &str) -> Result<Vec<&str>> {
 }
 
 fn first_tag_string(object: &str, tag: &str) -> Option<String> {
-    let needle = format!("\"{tag}\"");
-    let tag_pos = object.find(&needle)?;
-    let tail = &object[tag_pos + needle.len()..];
-    let value_pos = tail.find("\"Value\"")?;
-    let after_value = &tail[value_pos + "\"Value\"".len()..];
+    let tag_object = top_level_tag_object_slice(object, tag)?;
+    let value_pos = tag_object.find("\"Value\"")?;
+    let after_value = &tag_object[value_pos + "\"Value\"".len()..];
     let array_start = after_value.find('[')?;
     let after_array_start = &after_value[array_start + 1..];
     let first_token = parse_first_json_token(after_array_start)?;
     first_token_to_string(first_token)
+}
+
+fn top_level_tag_object_slice<'a>(object: &'a str, tag: &str) -> Option<&'a str> {
+    let bytes = object.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let key_start = index + 1;
+                index += 1;
+                let mut key_escaped = false;
+                while index < bytes.len() {
+                    let current = bytes[index];
+                    if key_escaped {
+                        key_escaped = false;
+                    } else if current == b'\\' {
+                        key_escaped = true;
+                    } else if current == b'"' {
+                        break;
+                    }
+                    index += 1;
+                }
+                if index >= bytes.len() {
+                    return None;
+                }
+
+                if depth == 1 && object.get(key_start..index) == Some(tag) {
+                    let mut value_index = index + 1;
+                    while value_index < bytes.len() && bytes[value_index].is_ascii_whitespace() {
+                        value_index += 1;
+                    }
+                    if bytes.get(value_index) != Some(&b':') {
+                        return None;
+                    }
+                    value_index += 1;
+                    while value_index < bytes.len() && bytes[value_index].is_ascii_whitespace() {
+                        value_index += 1;
+                    }
+                    if bytes.get(value_index) != Some(&b'{') {
+                        return None;
+                    }
+                    let value_end = find_matching_object_end(bytes, value_index)?;
+                    return object.get(value_index..=value_end);
+                }
+
+                index += 1;
+            }
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                index += 1;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    None
+}
+
+fn find_matching_object_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'{') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match *byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn parse_first_json_token(value: &str) -> Option<&str> {
@@ -770,12 +885,16 @@ fn mammo_sort_key(instance: &MetadataInstance) -> (u8, u8, i32, String) {
 fn download_instance(
     client: &Client,
     base: &str,
-    study_uid: &str,
-    series_uid: Option<&str>,
-    instance_uid: &str,
+    request: DownloadInstanceRequest<'_>,
     output_dir: &Path,
     auth: Option<(&str, &str)>,
 ) -> Result<PathBuf> {
+    let DownloadInstanceRequest {
+        study_uid,
+        series_uid,
+        sop_class_uid,
+        instance_uid,
+    } = request;
     let mut urls = Vec::with_capacity(2);
     if let Some(series_uid) = series_uid {
         urls.push(format!(
@@ -786,12 +905,7 @@ fn download_instance(
         "{base}/studies/{study_uid}/instances/{instance_uid}"
     ));
 
-    let accepts = [
-        "application/dicom",
-        "application/dicom; transfer-syntax=*",
-        "multipart/related; type=application/dicom",
-        "multipart/related; type=\"application/dicom\"",
-    ];
+    let accepts = preferred_accepts_for_instance(sop_class_uid);
 
     let mut last_error = None::<String>;
     let mut bytes = None::<Vec<u8>>;
@@ -825,6 +939,24 @@ fn download_instance(
     Ok(path)
 }
 
+fn preferred_accepts_for_instance(sop_class_uid: Option<&str>) -> &'static [&'static str] {
+    if sop_class_uid.is_some_and(is_gsps_sop_class_uid) {
+        &[
+            "multipart/related; type=application/dicom",
+            "multipart/related; type=\"application/dicom\"",
+            "application/dicom",
+            "application/dicom; transfer-syntax=*",
+        ]
+    } else {
+        &[
+            "application/dicom",
+            "application/dicom; transfer-syntax=*",
+            "multipart/related; type=application/dicom",
+            "multipart/related; type=\"application/dicom\"",
+        ]
+    }
+}
+
 fn unwrap_dicom_multipart(body: Vec<u8>) -> Vec<u8> {
     match extract_dicom_from_multipart(&body) {
         Some(extracted) => extracted,
@@ -856,9 +988,12 @@ fn download_instances_parallel(
                     download_instance(
                         client,
                         base,
-                        study_uid,
-                        instance.series_uid.as_deref(),
-                        &instance.instance_uid,
+                        DownloadInstanceRequest {
+                            study_uid,
+                            series_uid: instance.series_uid.as_deref(),
+                            sop_class_uid: instance.sop_class_uid.as_deref(),
+                            instance_uid: &instance.instance_uid,
+                        },
                         cache_dir,
                         auth,
                     )
@@ -1041,6 +1176,18 @@ mod tests {
     }
 
     #[test]
+    fn extract_first_tag_string_ignores_nested_sequence_tags() {
+        let object = r#"{
+            "00081115":{"vr":"SQ","Value":[{"0020000E":{"vr":"UI","Value":["series_uid_nested"]}}]},
+            "0020000E":{"vr":"UI","Value":["series_uid_top_level"]}
+        }"#;
+        assert_eq!(
+            first_tag_string(object, TAG_SERIES_INSTANCE_UID).as_deref(),
+            Some("series_uid_top_level")
+        );
+    }
+
+    #[test]
     fn parse_metadata_instances_trims_sop_class_uid_and_modality() {
         let json = format!(
             r#"[{{"00080018":{{"vr":"UI","Value":["instance_uid_alpha"]}},"00080016":{{"vr":"UI","Value":["{} "]}},"00080060":{{"vr":"CS","Value":["MG "]}}, "0020000E":{{"vr":"UI","Value":["series_uid_alpha"]}}}}]"#,
@@ -1055,6 +1202,34 @@ mod tests {
             Some(BASIC_TEXT_SR_SOP_CLASS_UID)
         );
         assert_eq!(instances[0].modality.as_deref(), Some("MG"));
+    }
+
+    #[test]
+    fn parse_metadata_instances_prefers_top_level_series_uid_for_gsps() {
+        let json = format!(
+            r#"[{{
+                "00081115":{{"vr":"SQ","Value":[{{"0020000E":{{"vr":"UI","Value":["series_uid_referenced_image"]}}}}]}},
+                "00080016":{{"vr":"UI","Value":["{}"]}},
+                "00080018":{{"vr":"UI","Value":["instance_uid_gsps"]}},
+                "00080060":{{"vr":"CS","Value":["PR"]}},
+                "0020000E":{{"vr":"UI","Value":["series_uid_gsps_actual"]}}
+            }}]"#,
+            GSPS_SOP_CLASS_UID
+        );
+
+        let instances = parse_metadata_instances(&json).expect("metadata should parse");
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(
+            instances[0].series_uid.as_deref(),
+            Some("series_uid_gsps_actual")
+        );
+        assert_eq!(instances[0].instance_uid, "instance_uid_gsps");
+        assert_eq!(instances[0].modality.as_deref(), Some("PR"));
+        assert_eq!(
+            instances[0].sop_class_uid.as_deref(),
+            Some(GSPS_SOP_CLASS_UID)
+        );
     }
 
     #[test]
@@ -1279,6 +1454,38 @@ mod tests {
 
         assert_eq!(active_group_instance_count(&sr_only), None);
         assert_eq!(active_group_instance_count(&mixed), Some(1));
+    }
+
+    #[test]
+    fn active_group_instance_count_ignores_supplementary_gsps() {
+        let instances = vec![
+            metadata_instance("inst_rcc", Some("CC"), Some("R"), Some(1)),
+            metadata_instance("inst_lcc", Some("CC"), Some("L"), Some(2)),
+            metadata_instance("inst_rmlo", Some("MLO"), Some("R"), Some(3)),
+            metadata_instance("inst_lmlo", Some("MLO"), Some("L"), Some(4)),
+            MetadataInstance {
+                instance_uid: "inst_gsps".to_string(),
+                sop_class_uid: Some(GSPS_SOP_CLASS_UID.to_string()),
+                ..metadata_instance("inst_gsps", None, None, Some(5))
+            },
+        ];
+
+        assert_eq!(displayable_group_image_count(&instances), 4);
+        assert_eq!(active_group_instance_count(&instances), Some(4));
+    }
+
+    #[test]
+    fn preferred_accepts_for_gsps_prioritize_multipart() {
+        let accepts = preferred_accepts_for_instance(Some(GSPS_SOP_CLASS_UID));
+        assert_eq!(accepts[0], "multipart/related; type=application/dicom");
+        assert_eq!(accepts[1], "multipart/related; type=\"application/dicom\"");
+    }
+
+    #[test]
+    fn preferred_accepts_for_images_keep_application_dicom_first() {
+        let accepts = preferred_accepts_for_instance(None);
+        assert_eq!(accepts[0], "application/dicom");
+        assert_eq!(accepts[1], "application/dicom; transfer-syntax=*");
     }
 
     #[test]
