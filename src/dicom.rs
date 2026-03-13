@@ -66,6 +66,8 @@ pub const STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX: &str = "1.2.840.10008.5.1.4.1.
 pub const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
 #[cfg(test)]
 pub const BASIC_TEXT_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.11";
+// Treat cumulative_delta from read_per_frame_image_positions as meaningful only above 0.001 mm so float noise does not flip reverse-order detection.
+const IMAGE_POSITION_PATIENT_DOMINANT_DELTA_TOLERANCE_MM: f32 = 0.001;
 
 #[derive(Debug, Clone)]
 pub enum DicomSource {
@@ -361,19 +363,18 @@ impl DicomImage {
     }
 
     pub(crate) fn display_frame_index_to_stored(&self, frame_index: usize) -> Option<usize> {
-        if self.frame_count == 0 {
+        if frame_index >= self.frame_count {
             return None;
         }
 
-        let safe_frame = frame_index.min(self.frame_count.saturating_sub(1));
         if self.reverse_frame_order {
             Some(
                 self.frame_count
                     .saturating_sub(1)
-                    .saturating_sub(safe_frame),
+                    .saturating_sub(frame_index),
             )
         } else {
-            Some(safe_frame)
+            Some(frame_index)
         }
     }
 
@@ -1483,7 +1484,7 @@ fn infer_reverse_frame_order(obj: &DefaultDicomObject, frame_count: usize) -> bo
         .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
         .unwrap_or((0, 0.0));
 
-    dominant_delta > 0.001
+    dominant_delta > IMAGE_POSITION_PATIENT_DOMINANT_DELTA_TOLERANCE_MM
 }
 
 fn read_float_first(obj: &DefaultDicomObject, name: &str) -> Option<f32> {
@@ -2011,6 +2012,15 @@ mod tests {
         assert_eq!(image.frame_mono_pixels(3).as_deref(), Some([0].as_slice()));
         assert_eq!(image.stored_frame_index_to_display(0), Some(3));
         assert_eq!(image.stored_frame_index_to_display(3), Some(0));
+    }
+
+    #[test]
+    fn frame_index_mapping_rejects_out_of_range_inputs() {
+        let image = DicomImage::test_stub_with_mono_frames_and_reverse(None, 4, true);
+
+        assert_eq!(image.display_frame_index_to_stored(4), None);
+        assert_eq!(image.stored_frame_index_to_display(4), None);
+        assert_eq!(image.frame_mono_pixels(4), None);
     }
 
     #[test]
