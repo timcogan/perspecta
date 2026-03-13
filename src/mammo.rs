@@ -1,10 +1,9 @@
 use std::collections::VecDeque;
-use std::path::Path;
 use std::{cmp::Ordering, collections::BTreeMap};
 
 use eframe::egui;
 
-use crate::dicom::DicomImage;
+use crate::dicom::{DicomImage, DicomSourceMeta};
 
 pub fn normalize_token(value: Option<&str>) -> String {
     value
@@ -201,7 +200,7 @@ pub fn mammo_image_align(index: usize) -> egui::Align {
     }
 }
 
-pub fn mammo_label(image: &DicomImage, path: &Path) -> String {
+pub fn mammo_label(image: &DicomImage, source: &DicomSourceMeta) -> String {
     let laterality = classify_laterality(image.image_laterality.as_deref());
     let view = classify_view(image.view_position.as_deref());
     let code = match (laterality, view) {
@@ -211,10 +210,7 @@ pub fn mammo_label(image: &DicomImage, path: &Path) -> String {
         _ => String::new(),
     };
 
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("DICOM");
+    let file_name = source.display_label();
 
     if code.is_empty() {
         file_name.to_string()
