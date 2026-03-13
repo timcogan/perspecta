@@ -5,8 +5,8 @@ use reqwest::blocking::Client;
 use reqwest::header::ACCEPT;
 
 use crate::dicom::{
-    dicom_source_from_bytes, is_gsps_sop_class_uid, is_structured_report_sop_class_uid,
-    DicomPathKind, DicomSource,
+    dicom_identity_key_from_parts, dicom_source_from_bytes_with_identity, is_gsps_sop_class_uid,
+    is_structured_report_sop_class_uid, DicomPathKind, DicomSource,
 };
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest};
 use crate::mammo::{classify_laterality, classify_view};
@@ -36,6 +36,7 @@ struct DownloadInstanceRequest<'a> {
     study_uid: &'a str,
     series_uid: Option<&'a str>,
     sop_class_uid: Option<&'a str>,
+    modality: Option<&'a str>,
     instance_uid: &'a str,
 }
 
@@ -69,6 +70,7 @@ pub fn download_dicomweb_request(
                 study_uid: &request.study_uid,
                 series_uid: request.series_uid.as_deref(),
                 sop_class_uid: None,
+                modality: None,
                 instance_uid,
             },
             auth,
@@ -165,7 +167,7 @@ where
         .map(|(group_index, group)| {
             group.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "DICOMweb group {} failed to produce downloaded paths",
+                    "DICOMweb group {} failed to produce DicomSource values",
                     group_index
                 )
             })
@@ -368,6 +370,7 @@ where
                 study_uid,
                 series_uid: instance.series_uid.as_deref(),
                 sop_class_uid: instance.sop_class_uid.as_deref(),
+                modality: instance.modality.as_deref(),
                 instance_uid: &instance.instance_uid,
             },
             auth,
@@ -900,6 +903,7 @@ fn download_instance(
         study_uid,
         series_uid,
         sop_class_uid,
+        modality,
         instance_uid,
     } = request;
     let mut urls = Vec::with_capacity(2);
@@ -939,7 +943,19 @@ fn download_instance(
         );
     };
 
-    Ok(dicom_source_from_bytes(instance_uid, bytes))
+    let identity_key = dicom_identity_key_from_parts(
+        Some(study_uid),
+        series_uid,
+        Some(instance_uid),
+        sop_class_uid,
+        modality,
+    );
+
+    Ok(dicom_source_from_bytes_with_identity(
+        instance_uid,
+        identity_key,
+        bytes,
+    ))
 }
 
 fn preferred_accepts_for_instance(sop_class_uid: Option<&str>) -> &'static [&'static str] {
@@ -994,6 +1010,7 @@ fn download_instances_parallel(
                             study_uid,
                             series_uid: instance.series_uid.as_deref(),
                             sop_class_uid: instance.sop_class_uid.as_deref(),
+                            modality: instance.modality.as_deref(),
                             instance_uid: &instance.instance_uid,
                         },
                         auth,

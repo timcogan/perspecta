@@ -34,6 +34,7 @@ const PERSPECTA_BRAND_BLUE: egui::Color32 = egui::Color32::from_rgb(14, 165, 233
 const CONTROL_VALUE_WIDTH: f32 = 64.0;
 const CONTROL_ACTION_BUTTON_WIDTH: f32 = 100.0;
 const FILE_DROP_OVERLAY_WIDTH: f32 = 420.0;
+const DICOMWEB_ACTIVE_PENDING_BATCH_SIZE: usize = 8;
 
 #[derive(Clone)]
 struct MammoViewport {
@@ -1888,7 +1889,10 @@ impl DicomViewerApp {
         }
 
         let expected = self.dicomweb_active_group_expected.unwrap_or(0);
-        if let Some(path) = self.dicomweb_active_pending_paths.pop_front() {
+        for _ in 0..DICOMWEB_ACTIVE_PENDING_BATCH_SIZE {
+            let Some(path) = self.dicomweb_active_pending_paths.pop_front() else {
+                break;
+            };
             match classify_dicom_path(&path) {
                 Ok(DicomPathKind::Gsps) => match load_gsps_overlays(&path) {
                     Ok(overlays) => {
@@ -4658,7 +4662,12 @@ where
         .map(|path: DicomSourceMeta| path.identity_key().to_string())
         .collect::<Vec<_>>();
     normalized.sort();
-    format!("{}:{}", normalized.len(), normalized.join("|"))
+
+    let mut history_id = format!("{}:", normalized.len());
+    for identity in normalized {
+        history_id.push_str(&format!("{}:{}", identity.len(), identity));
+    }
+    history_id
 }
 
 #[cfg(test)]
@@ -4819,6 +4828,14 @@ mod tests {
         };
         assert!(app.displayed_study_matches_paths(&[reopened_again]));
         assert!(!app.displayed_study_matches_paths(&[different]));
+    }
+
+    #[test]
+    fn history_id_from_paths_uses_collision_free_length_prefix_encoding() {
+        let left = vec![PathBuf::from("a|b"), PathBuf::from("c")];
+        let right = vec![PathBuf::from("a"), PathBuf::from("b|c")];
+
+        assert_ne!(history_id_from_paths(&left), history_id_from_paths(&right));
     }
 
     #[test]

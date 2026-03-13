@@ -73,15 +73,21 @@ pub enum DicomSource {
 
 impl DicomSource {
     pub fn from_memory(preferred_name: &str, bytes: Vec<u8>) -> Self {
+        let identity_key = infer_memory_source_identity_key(preferred_name, bytes.as_slice());
+        Self::from_memory_with_identity(preferred_name, identity_key, bytes)
+    }
+
+    pub fn from_memory_with_identity(
+        preferred_name: &str,
+        identity_key: impl Into<Arc<str>>,
+        bytes: Vec<u8>,
+    ) -> Self {
         static IN_MEMORY_DICOM_COUNTER: AtomicU64 = AtomicU64::new(1);
 
         let id = IN_MEMORY_DICOM_COUNTER.fetch_add(1, Ordering::Relaxed);
         let label = Arc::<str>::from(sanitize_memory_source_label(preferred_name));
         let bytes = Arc::<[u8]>::from(bytes.into_boxed_slice());
-        let identity_key = Arc::<str>::from(infer_memory_source_identity_key(
-            preferred_name,
-            bytes.as_ref(),
-        ));
+        let identity_key = identity_key.into();
         Self::Memory {
             id,
             label,
@@ -543,8 +549,12 @@ pub fn is_structured_report_sop_class_uid(uid: &str) -> bool {
         .starts_with(STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX)
 }
 
-pub fn dicom_source_from_bytes(preferred_name: &str, bytes: Vec<u8>) -> DicomSource {
-    DicomSource::from_memory(preferred_name, bytes)
+pub fn dicom_source_from_bytes_with_identity(
+    preferred_name: &str,
+    identity_key: impl Into<Arc<str>>,
+    bytes: Vec<u8>,
+) -> DicomSource {
+    DicomSource::from_memory_with_identity(preferred_name, identity_key, bytes)
 }
 
 pub fn classify_dicom_path(source: impl Into<DicomSource>) -> Result<DicomPathKind> {
@@ -1496,6 +1506,23 @@ fn infer_memory_source_identity_key(preferred_name: &str, bytes: &[u8]) -> Strin
     identity
 }
 
+pub fn dicom_identity_key_from_parts(
+    study_uid: Option<&str>,
+    series_uid: Option<&str>,
+    instance_uid: Option<&str>,
+    sop_class_uid: Option<&str>,
+    modality: Option<&str>,
+) -> String {
+    format!(
+        "dicom:study={};series={};instance={};class={};modality={}",
+        study_uid.unwrap_or("_"),
+        series_uid.unwrap_or("_"),
+        instance_uid.unwrap_or("_"),
+        sop_class_uid.unwrap_or("_"),
+        modality.unwrap_or("_"),
+    )
+}
+
 fn dicom_identity_key_from_object(obj: &DefaultDicomObject) -> Option<String> {
     let study_uid = read_string(obj, "StudyInstanceUID");
     let series_uid = read_string(obj, "SeriesInstanceUID");
@@ -1512,13 +1539,12 @@ fn dicom_identity_key_from_object(obj: &DefaultDicomObject) -> Option<String> {
         return None;
     }
 
-    Some(format!(
-        "dicom:study={};series={};instance={};class={};modality={}",
-        study_uid.unwrap_or_else(|| "_".to_string()),
-        series_uid.unwrap_or_else(|| "_".to_string()),
-        instance_uid.unwrap_or_else(|| "_".to_string()),
-        sop_class_uid.unwrap_or_else(|| "_".to_string()),
-        modality.unwrap_or_else(|| "_".to_string()),
+    Some(dicom_identity_key_from_parts(
+        study_uid.as_deref(),
+        series_uid.as_deref(),
+        instance_uid.as_deref(),
+        sop_class_uid.as_deref(),
+        modality.as_deref(),
     ))
 }
 
@@ -2182,9 +2208,9 @@ mod tests {
     }
 
     #[test]
-    fn dicom_source_from_bytes_roundtrip_opens_object() {
+    fn dicom_source_from_memory_roundtrip_opens_object() {
         let bytes = sr_test_bytes("4.3.2.4");
-        let virtual_path = dicom_source_from_bytes("report 4.3.2.4", bytes);
+        let virtual_path = DicomSource::from_memory("report 4.3.2.4", bytes);
 
         assert!(matches!(virtual_path, DicomSource::Memory { .. }));
         assert_eq!(
