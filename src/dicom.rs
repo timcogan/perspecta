@@ -14,7 +14,7 @@ use dicom_pixeldata::PixelDecoder;
 mod gsps;
 mod sr;
 
-#[cfg(test)]
+#[allow(unused_imports)]
 pub use gsps::GspsOverlayGraphic;
 pub use gsps::{load_gsps_overlays, GspsGraphic, GspsOverlay, GspsUnits};
 pub use sr::{load_structured_report, StructuredReportDocument, StructuredReportNode};
