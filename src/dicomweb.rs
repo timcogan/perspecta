@@ -52,6 +52,10 @@ pub enum DicomWebDownloadResult {
 pub enum DicomWebGroupStreamUpdate {
     ActiveGroupInstanceCount(usize),
     ActivePath(DicomSource),
+    BackgroundGroupReady {
+        group_index: usize,
+        paths: Vec<DicomSource>,
+    },
 }
 
 pub fn download_dicomweb_request(
@@ -156,6 +160,10 @@ where
             auth,
             &selected_instances,
         )?;
+        on_active_path(DicomWebGroupStreamUpdate::BackgroundGroupReady {
+            group_index,
+            paths: group_paths.clone(),
+        });
         downloaded_groups[group_index] = Some(group_paths);
     }
 
@@ -1545,7 +1553,8 @@ mod tests {
             .into_iter()
             .filter_map(|update| match update {
                 DicomWebGroupStreamUpdate::ActivePath(path) => Some(path),
-                DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(_) => None,
+                DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(_)
+                | DicomWebGroupStreamUpdate::BackgroundGroupReady { .. } => None,
             })
             .collect::<Vec<_>>();
 
@@ -1573,7 +1582,8 @@ mod tests {
             .into_iter()
             .filter_map(|update| match update {
                 DicomWebGroupStreamUpdate::ActivePath(path) => Some(path),
-                DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(_) => None,
+                DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(_)
+                | DicomWebGroupStreamUpdate::BackgroundGroupReady { .. } => None,
             })
             .collect::<Vec<_>>();
 

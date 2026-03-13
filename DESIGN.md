@@ -36,7 +36,9 @@ Its primary purpose is consistency during development, not full architecture cov
 11. Production diagnostics MUST use logging (`log` macros), not `println!/eprintln!`.
 12. DICOMweb metadata parsing MUST use top-level instance identifiers; nested reference tags inside GSPS/SR sequences MUST NOT override the owning series or instance identity.
 13. Grouped DICOMweb launch MUST resolve and stream the `open_group` before background groups so first-image latency is driven by the active group only.
-14. DICOM content inside the viewer MUST use explicit `DicomSource` ownership; DICOMweb bytes MUST be represented as `DicomSource::Memory`, not temp files or a global backing store.
+14. Background DICOMweb groups MUST stage into history as each group download completes; history thumbnails and group switching MUST NOT wait for the final grouped download result.
+15. If the user switches away from a streaming DICOMweb active group, remaining active-group work MUST continue staging into history and MUST NOT clear, replace, or visually mask the currently displayed study.
+16. DICOM content inside the viewer MUST use explicit `DicomSource` ownership; DICOMweb bytes MUST be represented as `DicomSource::Memory`, not temp files or a global backing store.
 
 ## Change Rules
 
