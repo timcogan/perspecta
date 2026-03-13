@@ -225,13 +225,13 @@ fn resolve_group_instances(
             );
         }
 
-        let mut reduced = reduce_series_instances(metadata_instances).with_context(|| {
+        let reduced = reduce_series_instances(metadata_instances).with_context(|| {
             format!(
                 "Group {} series {} did not resolve to a supported instance set",
                 group_index, series_uid
             )
         })?;
-        reduced_by_series.push(std::mem::take(&mut reduced));
+        reduced_by_series.push(reduced);
     }
 
     let selected_instances = select_group_instances_from_reduced_sets(reduced_by_series);
