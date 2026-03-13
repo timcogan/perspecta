@@ -2004,12 +2004,10 @@ mod tests {
             )
             .expect("SR test object should build file meta");
 
-        let path = unique_test_file_path("in-memory-dicom");
+        let mut bytes = Vec::new();
         sr_obj
-            .write_to_file(&path)
-            .expect("SR test object should write to disk");
-        let bytes = fs::read(&path).expect("SR test bytes should read from disk");
-        let _ = fs::remove_file(&path);
+            .write_all(&mut bytes)
+            .expect("SR test object should write to memory");
         bytes
     }
 

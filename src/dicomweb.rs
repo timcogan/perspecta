@@ -36,7 +36,6 @@ struct DownloadInstanceRequest<'a> {
     study_uid: &'a str,
     series_uid: Option<&'a str>,
     sop_class_uid: Option<&'a str>,
-    modality: Option<&'a str>,
     instance_uid: &'a str,
 }
 
@@ -70,7 +69,6 @@ pub fn download_dicomweb_request(
                 study_uid: &request.study_uid,
                 series_uid: request.series_uid.as_deref(),
                 sop_class_uid: None,
-                modality: None,
                 instance_uid,
             },
             auth,
@@ -370,7 +368,6 @@ where
                 study_uid,
                 series_uid: instance.series_uid.as_deref(),
                 sop_class_uid: instance.sop_class_uid.as_deref(),
-                modality: instance.modality.as_deref(),
                 instance_uid: &instance.instance_uid,
             },
             auth,
@@ -903,7 +900,6 @@ fn download_instance(
         study_uid,
         series_uid,
         sop_class_uid,
-        modality,
         instance_uid,
     } = request;
     let mut urls = Vec::with_capacity(2);
@@ -943,13 +939,8 @@ fn download_instance(
         );
     };
 
-    let identity_key = dicom_identity_key_from_parts(
-        Some(study_uid),
-        series_uid,
-        Some(instance_uid),
-        sop_class_uid,
-        modality,
-    );
+    let identity_key =
+        dicom_identity_key_from_parts(Some(study_uid), None, Some(instance_uid), None, None);
 
     Ok(dicom_source_from_bytes_with_identity(
         instance_uid,
@@ -1010,7 +1001,6 @@ fn download_instances_parallel(
                             study_uid,
                             series_uid: instance.series_uid.as_deref(),
                             sop_class_uid: instance.sop_class_uid.as_deref(),
-                            modality: instance.modality.as_deref(),
                             instance_uid: &instance.instance_uid,
                         },
                         auth,
