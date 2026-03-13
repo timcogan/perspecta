@@ -1447,6 +1447,7 @@ impl DicomViewerApp {
         &mut self,
         groups: &[PreparedLoadPaths],
         open_group: usize,
+        completed_background_groups: Option<&HashSet<usize>>,
         ctx: &egui::Context,
     ) {
         let queued_groups = groups
@@ -1454,7 +1455,10 @@ impl DicomViewerApp {
             .enumerate()
             .rev()
             .filter(|(index, _)| {
-                *index != open_group && !self.dicomweb_completed_background_groups.contains(index)
+                *index != open_group
+                    && completed_background_groups
+                        .map(|completed_groups| !completed_groups.contains(index))
+                        .unwrap_or(true)
             })
             .map(|(_, group)| group.clone())
             .collect::<Vec<_>>();
@@ -1691,7 +1695,7 @@ impl DicomViewerApp {
 
         let active_group = open_group.min(groups.len().saturating_sub(1));
         let _ = self.load_selected_paths(groups[active_group].clone(), ctx);
-        self.preload_non_active_groups_into_history(&preload_groups, active_group, ctx);
+        self.preload_non_active_groups_into_history(&preload_groups, active_group, None, ctx);
     }
 
     fn start_dicomweb_download(&mut self, request: DicomWebLaunchRequest) {
@@ -2192,9 +2196,12 @@ impl DicomViewerApp {
                             grouped_ready =
                                 self.displayed_study_matches_paths(active_group_paths.as_slice());
                         } else {
+                            let completed_background_groups =
+                                self.dicomweb_completed_background_groups.clone();
                             self.preload_non_active_groups_into_history(
                                 &prepared_groups,
                                 validated_open_group,
+                                Some(&completed_background_groups),
                                 ctx,
                             );
                             if !self.history_pushed_for_active_group {
@@ -5708,6 +5715,51 @@ mod tests {
             app.history_entries[0].id,
             history_id_from_paths(&[PathBuf::from("preloaded-report.dcm")])
         );
+    }
+
+    #[test]
+    fn preload_non_active_groups_into_history_only_applies_completed_filter_when_requested() {
+        let (_tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        let ctx = egui::Context::default();
+        let groups = vec![
+            PreparedLoadPaths {
+                image_paths: vec![test_source("group-0.dcm")],
+                ..Default::default()
+            },
+            PreparedLoadPaths {
+                image_paths: vec![test_source("group-1.dcm")],
+                ..Default::default()
+            },
+            PreparedLoadPaths {
+                image_paths: vec![test_source("group-2.dcm")],
+                ..Default::default()
+            },
+        ];
+        let completed_background_groups = HashSet::from([1usize]);
+
+        let mut local_app = DicomViewerApp {
+            history_preload_receiver: Some(rx),
+            dicomweb_completed_background_groups: completed_background_groups.clone(),
+            ..Default::default()
+        };
+        local_app.preload_non_active_groups_into_history(&groups, 0, None, &ctx);
+
+        assert_eq!(local_app.history_preload_queue.len(), 2);
+
+        let (_tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        let mut dicomweb_app = DicomViewerApp {
+            history_preload_receiver: Some(rx),
+            dicomweb_completed_background_groups: completed_background_groups.clone(),
+            ..Default::default()
+        };
+        dicomweb_app.preload_non_active_groups_into_history(
+            &groups,
+            0,
+            Some(&completed_background_groups),
+            &ctx,
+        );
+
+        assert_eq!(dicomweb_app.history_preload_queue.len(), 1);
     }
 
     #[test]
