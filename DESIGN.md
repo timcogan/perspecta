@@ -35,6 +35,7 @@ Its primary purpose is consistency during development, not full architecture cov
 10. UI state mutations MUST stay on the main thread; workers MUST communicate through channels.
 11. Production diagnostics MUST use logging (`log` macros), not `println!/eprintln!`.
 12. DICOMweb metadata parsing MUST use top-level instance identifiers; nested reference tags inside GSPS/SR sequences MUST NOT override the owning series or instance identity.
+13. Grouped DICOMweb launch MUST resolve and stream the `open_group` before background groups so first-image latency is driven by the active group only.
 
 ## Change Rules
 

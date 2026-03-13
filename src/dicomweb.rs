@@ -118,78 +118,24 @@ where
         bail!("DICOMweb grouped launch requested no groups");
     }
 
-    let mut selected_instances_by_group = Vec::with_capacity(request.groups.len());
-
-    for (group_index, group_series_uids) in request.groups.iter().enumerate() {
-        if group_series_uids.is_empty() {
-            bail!(
-                "DICOMweb group {} did not include any series UIDs",
-                group_index
-            );
-        }
-        let mut reduced_by_series = Vec::<Vec<MetadataInstance>>::new();
-
-        for series_uid in group_series_uids {
-            let metadata_instances = fetch_instance_metadata(
-                &client,
-                &base,
-                &request.study_uid,
-                Some(series_uid.as_str()),
-                auth,
-            )
-            .with_context(|| {
-                format!(
-                    "Failed fetching DICOMweb metadata for group {} series {}",
-                    group_index, series_uid
-                )
-            })?;
-
-            if metadata_instances.is_empty() {
-                bail!(
-                    "Group {} series {} returned no DICOM instances",
-                    group_index,
-                    series_uid
-                );
-            }
-
-            let mut reduced = reduce_series_instances(metadata_instances).with_context(|| {
-                format!(
-                    "Group {} series {} did not resolve to a supported instance set",
-                    group_index, series_uid
-                )
-            })?;
-            reduced_by_series.push(std::mem::take(&mut reduced));
-        }
-
-        let selected_instances = select_group_instances_from_reduced_sets(reduced_by_series);
-        let displayable_image_count = displayable_group_image_count(&selected_instances);
-
-        if displayable_image_count > 0 && !matches!(displayable_image_count, 1..=4 | 8) {
-            bail!(
-                "DICOMweb group {} resolved to {} displayable image instances; each group must resolve to 1, 2, 3, 4, or 8 displayable images",
-                group_index,
-                displayable_image_count
-            );
-        }
-        if displayable_image_count == 0 && !has_displayable_group_content(&selected_instances) {
-            bail!(
-                "DICOMweb group {} resolved to no displayable images or structured reports",
-                group_index
-            );
-        }
-
-        selected_instances_by_group.push(selected_instances);
-    }
-
     let open_group = request
         .open_group
-        .min(selected_instances_by_group.len().saturating_sub(1));
+        .min(request.groups.len().saturating_sub(1));
 
-    let mut downloaded_groups = (0..selected_instances_by_group.len())
+    let mut downloaded_groups = (0..request.groups.len())
         .map(|_| None::<Vec<PathBuf>>)
         .collect::<Vec<_>>();
 
-    if let Some(count) = active_group_instance_count(&selected_instances_by_group[open_group]) {
+    let active_group_instances = resolve_group_instances(
+        &client,
+        &base,
+        &request.study_uid,
+        auth,
+        open_group,
+        &request.groups[open_group],
+    )?;
+
+    if let Some(count) = active_group_instance_count(&active_group_instances) {
         on_active_path(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(count));
     }
     downloaded_groups[open_group] = Some(download_instances_streaming(
@@ -198,18 +144,29 @@ where
         &request.study_uid,
         &cache_dir,
         auth,
-        &selected_instances_by_group[open_group],
+        &active_group_instances,
         &mut on_active_path,
     )?);
 
-    for group_index in (0..selected_instances_by_group.len()).filter(|i| *i != open_group) {
+    for group_index in ordered_group_indices(request.groups.len(), open_group)
+        .into_iter()
+        .skip(1)
+    {
+        let selected_instances = resolve_group_instances(
+            &client,
+            &base,
+            &request.study_uid,
+            auth,
+            group_index,
+            &request.groups[group_index],
+        )?;
         let group_paths = download_instances_parallel(
             &client,
             &base,
             &request.study_uid,
             &cache_dir,
             auth,
-            &selected_instances_by_group[group_index],
+            &selected_instances,
         )?;
         downloaded_groups[group_index] = Some(group_paths);
     }
@@ -231,6 +188,82 @@ where
         groups: downloaded_groups,
         open_group,
     })
+}
+
+fn resolve_group_instances(
+    client: &Client,
+    base: &str,
+    study_uid: &str,
+    auth: Option<(&str, &str)>,
+    group_index: usize,
+    group_series_uids: &[String],
+) -> Result<Vec<MetadataInstance>> {
+    if group_series_uids.is_empty() {
+        bail!(
+            "DICOMweb group {} did not include any series UIDs",
+            group_index
+        );
+    }
+
+    let mut reduced_by_series = Vec::<Vec<MetadataInstance>>::new();
+
+    for series_uid in group_series_uids {
+        let metadata_instances =
+            fetch_instance_metadata(client, base, study_uid, Some(series_uid.as_str()), auth)
+                .with_context(|| {
+                    format!(
+                        "Failed fetching DICOMweb metadata for group {} series {}",
+                        group_index, series_uid
+                    )
+                })?;
+
+        if metadata_instances.is_empty() {
+            bail!(
+                "Group {} series {} returned no DICOM instances",
+                group_index,
+                series_uid
+            );
+        }
+
+        let reduced = reduce_series_instances(metadata_instances).with_context(|| {
+            format!(
+                "Group {} series {} did not resolve to a supported instance set",
+                group_index, series_uid
+            )
+        })?;
+        reduced_by_series.push(reduced);
+    }
+
+    let selected_instances = select_group_instances_from_reduced_sets(reduced_by_series);
+    let displayable_image_count = displayable_group_image_count(&selected_instances);
+
+    if displayable_image_count > 0 && !matches!(displayable_image_count, 1..=4 | 8) {
+        bail!(
+            "DICOMweb group {} resolved to {} displayable image instances; each group must resolve to 1, 2, 3, 4, or 8 displayable images",
+            group_index,
+            displayable_image_count
+        );
+    }
+    if displayable_image_count == 0 && !has_displayable_group_content(&selected_instances) {
+        bail!(
+            "DICOMweb group {} resolved to no displayable images or structured reports",
+            group_index
+        );
+    }
+
+    Ok(selected_instances)
+}
+
+fn ordered_group_indices(group_count: usize, open_group: usize) -> Vec<usize> {
+    if group_count == 0 {
+        return Vec::new();
+    }
+
+    let open_group = open_group.min(group_count.saturating_sub(1));
+    let mut indices = Vec::with_capacity(group_count);
+    indices.push(open_group);
+    indices.extend((0..group_count).filter(|group_index| *group_index != open_group));
+    indices
 }
 
 fn select_group_instances_from_reduced_sets(
@@ -1486,6 +1519,16 @@ mod tests {
         let accepts = preferred_accepts_for_instance(None);
         assert_eq!(accepts[0], "application/dicom");
         assert_eq!(accepts[1], "application/dicom; transfer-syntax=*");
+    }
+
+    #[test]
+    fn ordered_group_indices_prioritize_open_group() {
+        assert_eq!(ordered_group_indices(4, 2), vec![2, 0, 1, 3]);
+    }
+
+    #[test]
+    fn ordered_group_indices_clamp_out_of_range_open_group() {
+        assert_eq!(ordered_group_indices(3, 99), vec![2, 0, 1]);
     }
 
     #[test]
