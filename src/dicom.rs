@@ -66,6 +66,8 @@ pub const STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX: &str = "1.2.840.10008.5.1.4.1.
 pub const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
 #[cfg(test)]
 pub const BASIC_TEXT_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.11";
+// Treat cumulative_delta from read_per_frame_image_positions as meaningful only above 0.001 mm so float noise does not flip reverse-order detection.
+const IMAGE_POSITION_PATIENT_DOMINANT_DELTA_TOLERANCE_MM: f32 = 0.001;
 
 #[derive(Debug, Clone)]
 pub enum DicomSource {
@@ -318,6 +320,7 @@ pub struct DicomImage {
     pub image_laterality: Option<String>,
     pub instance_number: Option<i32>,
     pub sop_instance_uid: Option<String>,
+    reverse_frame_order: bool,
     pub gsps_overlay: Option<GspsOverlay>,
     pub metadata: Vec<(String, String)>,
 }
@@ -359,19 +362,53 @@ impl DicomImage {
         self.frame_count
     }
 
+    pub(crate) fn display_frame_index_to_stored(&self, frame_index: usize) -> Option<usize> {
+        if frame_index >= self.frame_count {
+            return None;
+        }
+
+        if self.reverse_frame_order {
+            Some(
+                self.frame_count
+                    .saturating_sub(1)
+                    .saturating_sub(frame_index),
+            )
+        } else {
+            Some(frame_index)
+        }
+    }
+
+    pub(crate) fn stored_frame_index_to_display(&self, frame_index: usize) -> Option<usize> {
+        if frame_index >= self.frame_count {
+            return None;
+        }
+
+        if self.reverse_frame_order {
+            Some(
+                self.frame_count
+                    .saturating_sub(1)
+                    .saturating_sub(frame_index),
+            )
+        } else {
+            Some(frame_index)
+        }
+    }
+
     pub fn frame_mono_pixels(&self, frame_index: usize) -> Option<Arc<[i32]>> {
+        let stored_frame_index = self.display_frame_index_to_stored(frame_index)?;
         match &self.mono_frames {
             MonoFrames::None => None,
-            MonoFrames::Eager(frames) => frames.get(frame_index).cloned(),
-            MonoFrames::Lazy(lazy) => lazy.frame(frame_index),
+            MonoFrames::Eager(frames) => frames.get(stored_frame_index).cloned(),
+            MonoFrames::Lazy(lazy) => lazy.frame(stored_frame_index),
         }
     }
 
     pub fn frame_rgb_pixels(&self, frame_index: usize) -> Option<Arc<[u8]>> {
+        let stored_frame_index = self.display_frame_index_to_stored(frame_index)?;
         match &self.rgb_frames {
             RgbFrames::None => None,
-            RgbFrames::Eager(frames) => frames.get(frame_index).cloned(),
-            RgbFrames::Lazy(lazy) => lazy.frame(frame_index),
+            RgbFrames::Eager(frames) => frames.get(stored_frame_index).cloned(),
+            RgbFrames::Lazy(lazy) => lazy.frame(stored_frame_index),
         }
     }
 }
@@ -509,6 +546,26 @@ fn read_item_multi_int(item: &InMemDicomObject, tag: Tag) -> Option<Vec<i32>> {
         })
 }
 
+fn prime_reverse_frame_cache<T, F>(
+    frame_count: usize,
+    reverse_frame_order: bool,
+    first_frame_pixels: Arc<[T]>,
+    decode_initial_display_frame: F,
+) -> Result<Vec<Option<Arc<[T]>>>>
+where
+    F: FnOnce(usize) -> Result<Arc<[T]>>,
+{
+    let mut cache = vec![None; frame_count];
+    cache[0] = Some(Arc::clone(&first_frame_pixels));
+
+    if reverse_frame_order {
+        let initial_display_frame = frame_count.saturating_sub(1);
+        cache[initial_display_frame] = Some(decode_initial_display_frame(initial_display_frame)?);
+    }
+
+    Ok(cache)
+}
+
 pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     let source = source.into();
     let obj = open_dicom_object(&source)?;
@@ -566,6 +623,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     let image_laterality = read_laterality(&obj);
     let instance_number = read_int_first(&obj, "InstanceNumber");
     let sop_instance_uid = read_string(&obj, "SOPInstanceUID");
+    let reverse_frame_order = infer_reverse_frame_order(&obj, frame_count);
     let metadata = collect_metadata(&obj);
 
     match samples_per_pixel {
@@ -594,11 +652,49 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
             let default_width = read_float_first(&obj, "WindowWidth")
                 .unwrap_or_else(|| (max_value - min_value).max(1) as f32);
 
+            let first_frame_pixels = Arc::<[i32]>::from(first_frame_pixels.into_boxed_slice());
+
             let mono_frames = if frame_count == 1 {
-                MonoFrames::Eager(vec![Arc::<[i32]>::from(first_frame_pixels.into_boxed_slice())])
+                MonoFrames::Eager(vec![first_frame_pixels])
             } else {
-                let mut cache = vec![None; frame_count];
-                cache[0] = Some(Arc::<[i32]>::from(first_frame_pixels.into_boxed_slice()));
+                let cache = prime_reverse_frame_cache(
+                    frame_count,
+                    reverse_frame_order,
+                    Arc::clone(&first_frame_pixels),
+                    |initial_display_frame| {
+                        let decoded_initial_display =
+                            obj.decode_pixel_data_frame(initial_display_frame as u32)
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to decode PixelData frame {} for initial reverse-order preview",
+                                        initial_display_frame
+                                    )
+                                })?;
+                        if decoded_initial_display.samples_per_pixel() != 1 {
+                            bail!(
+                                "Initial reverse-order preview expected monochrome pixels, got SamplesPerPixel={}",
+                                decoded_initial_display.samples_per_pixel()
+                            );
+                        }
+                        let initial_display_pixels: Vec<i32> = decoded_initial_display
+                            .to_vec_frame(0)
+                            .with_context(|| {
+                                format!(
+                                    "Could not convert decoded frame {} to i32 samples for initial reverse-order preview",
+                                    initial_display_frame
+                                )
+                            })?;
+                        if initial_display_pixels.len() != width * height {
+                            bail!(
+                                "Decoded pixel count mismatch in frame {}: got {}, expected {}",
+                                initial_display_frame,
+                                initial_display_pixels.len(),
+                                width * height
+                            );
+                        }
+                        Ok(Arc::<[i32]>::from(initial_display_pixels.into_boxed_slice()))
+                    },
+                )?;
                 MonoFrames::Lazy(LazyMonoFrames {
                     source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
@@ -624,6 +720,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 image_laterality,
                 instance_number,
                 sop_instance_uid,
+                reverse_frame_order,
                 gsps_overlay: None,
                 metadata,
             })
@@ -662,11 +759,58 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 );
             }
 
+            let first_frame_pixels = Arc::<[u8]>::from(first_frame_pixels.into_boxed_slice());
+
             let rgb_frames = if frame_count == 1 {
-                RgbFrames::Eager(vec![Arc::<[u8]>::from(first_frame_pixels.into_boxed_slice())])
+                RgbFrames::Eager(vec![first_frame_pixels])
             } else {
-                let mut cache = vec![None; frame_count];
-                cache[0] = Some(Arc::<[u8]>::from(first_frame_pixels.into_boxed_slice()));
+                let cache = prime_reverse_frame_cache(
+                    frame_count,
+                    reverse_frame_order,
+                    Arc::clone(&first_frame_pixels),
+                    |initial_display_frame| {
+                        let decoded_initial_display =
+                            obj.decode_pixel_data_frame(initial_display_frame as u32)
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to decode PixelData frame {} for initial reverse-order preview",
+                                        initial_display_frame
+                                    )
+                                })?;
+                        let initial_display_pixels: Vec<u8> = if bits_allocated == 8 {
+                            decoded_initial_display.to_vec_frame(0).with_context(|| {
+                                format!(
+                                    "Could not convert decoded frame {} to u8 samples for initial reverse-order preview",
+                                    initial_display_frame
+                                )
+                            })?
+                        } else {
+                            let bits_shift =
+                                decoded_initial_display.bits_stored().saturating_sub(8);
+                            let frame_pixels_u16: Vec<u16> =
+                                decoded_initial_display.to_vec_frame(0).with_context(|| {
+                                    format!(
+                                        "Could not convert decoded frame {} to u16 samples for initial reverse-order preview",
+                                        initial_display_frame
+                                    )
+                                })?;
+                            frame_pixels_u16
+                                .into_iter()
+                                .map(|sample| (sample >> bits_shift) as u8)
+                                .collect()
+                        };
+
+                        if initial_display_pixels.len() != expected_len {
+                            bail!(
+                                "Decoded color pixel count mismatch in frame {}: got {}, expected {}",
+                                initial_display_frame,
+                                initial_display_pixels.len(),
+                                expected_len
+                            );
+                        }
+                        Ok(Arc::<[u8]>::from(initial_display_pixels.into_boxed_slice()))
+                    },
+                )?;
                 RgbFrames::Lazy(LazyRgbFrames {
                     source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
@@ -692,6 +836,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 image_laterality,
                 instance_number,
                 sop_instance_uid,
+                reverse_frame_order,
                 gsps_overlay: None,
                 metadata,
             })
@@ -1317,6 +1462,55 @@ fn read_laterality(obj: &DefaultDicomObject) -> Option<String> {
         .and_then(|raw| normalize_laterality(&raw))
 }
 
+fn read_per_frame_image_positions(obj: &DefaultDicomObject) -> Vec<[f32; 3]> {
+    const PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE: Tag = Tag(0x5200, 0x9230);
+    const PLANE_POSITION_SEQUENCE: Tag = Tag(0x0020, 0x9113);
+    const IMAGE_POSITION_PATIENT: Tag = Tag(0x0020, 0x0032);
+
+    sequence_items_from_object(obj, PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE)
+        .into_iter()
+        .flatten()
+        .filter_map(|frame_item| {
+            let plane_position_item =
+                sequence_items_from_item(frame_item, PLANE_POSITION_SEQUENCE)?.first()?;
+            let values = read_item_multi_float(plane_position_item, IMAGE_POSITION_PATIENT)?;
+            if values.len() < 3 {
+                return None;
+            }
+            Some([values[0], values[1], values[2]])
+        })
+        .collect()
+}
+
+fn infer_reverse_frame_order(obj: &DefaultDicomObject, frame_count: usize) -> bool {
+    if frame_count <= 1 {
+        return false;
+    }
+
+    let frame_positions = read_per_frame_image_positions(obj);
+    if frame_positions.len() != frame_count {
+        return false;
+    }
+
+    let mut cumulative_delta = [0.0_f32; 3];
+    for frame_pair in frame_positions.windows(2) {
+        let [previous, current] = frame_pair else {
+            continue;
+        };
+        for axis in 0..3 {
+            cumulative_delta[axis] += current[axis] - previous[axis];
+        }
+    }
+
+    let (_, dominant_delta) = cumulative_delta
+        .into_iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+        .unwrap_or((0, 0.0));
+
+    dominant_delta > IMAGE_POSITION_PATIENT_DOMINANT_DELTA_TOLERANCE_MM
+}
+
 fn read_float_first(obj: &DefaultDicomObject, name: &str) -> Option<f32> {
     obj.element_by_name(name)
         .ok()
@@ -1366,6 +1560,14 @@ impl DicomImage {
         gsps_overlay: Option<GspsOverlay>,
         frame_count: usize,
     ) -> Self {
+        Self::test_stub_with_mono_frames_and_reverse(gsps_overlay, frame_count, false)
+    }
+
+    pub(crate) fn test_stub_with_mono_frames_and_reverse(
+        gsps_overlay: Option<GspsOverlay>,
+        frame_count: usize,
+        reverse_frame_order: bool,
+    ) -> Self {
         let mono_frames = if frame_count == 0 {
             MonoFrames::None
         } else {
@@ -1393,6 +1595,7 @@ impl DicomImage {
             image_laterality: None,
             instance_number: None,
             sop_instance_uid: None,
+            reverse_frame_order,
             gsps_overlay,
             metadata: Vec::new(),
         }
@@ -1403,8 +1606,115 @@ impl DicomImage {
 mod tests {
     use super::*;
     use dicom_core::value::DataSetSequence;
-    use dicom_core::{DataElement, VR};
+    use dicom_core::{DataElement, PrimitiveValue, VR};
     use dicom_object::FileMetaTableBuilder;
+
+    fn multiframe_position_item(image_position_patient: &str) -> InMemDicomObject {
+        let plane_position = InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0020, 0x0032),
+            VR::DS,
+            image_position_patient,
+        )]);
+        InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0020, 0x9113),
+            VR::SQ,
+            DataSetSequence::from(vec![plane_position]),
+        )])
+    }
+
+    fn multiframe_position_test_object_from_items(
+        frame_items: Vec<InMemDicomObject>,
+        frame_count: usize,
+    ) -> DefaultDicomObject {
+        let object = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, "1.2.840.10008.5.1.4.1.1.4.1"),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "MG"),
+            DataElement::new(Tag(0x0028, 0x0008), VR::IS, frame_count.to_string()),
+            DataElement::new(
+                Tag(0x5200, 0x9230),
+                VR::SQ,
+                DataSetSequence::from(frame_items),
+            ),
+        ])
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.4.1")
+                .media_storage_sop_instance_uid("4.3.2.10"),
+        )
+        .expect("multi-frame test object should build file meta");
+
+        let mut bytes = Vec::new();
+        object
+            .write_all(&mut bytes)
+            .expect("multi-frame test object should serialize");
+        open_dicom_object_from_bytes(&bytes, "multiframe-position-test")
+            .expect("serialized multi-frame test object should parse")
+    }
+
+    fn multiframe_position_test_object(frame_positions: &[&str]) -> DefaultDicomObject {
+        multiframe_position_test_object_from_items(
+            frame_positions
+                .iter()
+                .map(|position| multiframe_position_item(position))
+                .collect(),
+            frame_positions.len(),
+        )
+    }
+
+    fn multiframe_mono_test_bytes(frame_positions: &[&str], pixel_values: &[u8]) -> Vec<u8> {
+        assert_eq!(
+            frame_positions.len(),
+            pixel_values.len(),
+            "test frames and pixel values should align"
+        );
+
+        let object = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, "1.2.840.10008.5.1.4.1.1.4.1"),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "MG"),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0004), VR::CS, "MONOCHROME2"),
+            DataElement::new(
+                Tag(0x0028, 0x0008),
+                VR::IS,
+                frame_positions.len().to_string(),
+            ),
+            DataElement::new(Tag(0x0028, 0x0010), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0011), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(7u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(0u16)),
+            DataElement::new(
+                Tag(0x5200, 0x9230),
+                VR::SQ,
+                DataSetSequence::from(
+                    frame_positions
+                        .iter()
+                        .map(|position| multiframe_position_item(position))
+                        .collect::<Vec<_>>(),
+                ),
+            ),
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OB,
+                PrimitiveValue::from(pixel_values.to_vec()),
+            ),
+        ])
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.4.1")
+                .media_storage_sop_instance_uid("4.3.2.11"),
+        )
+        .expect("multi-frame pixel test object should build file meta");
+
+        let mut bytes = Vec::new();
+        object
+            .write_all(&mut bytes)
+            .expect("multi-frame pixel test object should serialize");
+        bytes
+    }
 
     fn unique_test_file_path(prefix: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -1706,5 +2016,69 @@ mod tests {
         );
         assert_eq!(report.content[1].label, "Heart Rate");
         assert_eq!(report.content[1].value.as_deref(), Some("72 bpm"));
+    }
+
+    #[test]
+    fn infer_reverse_frame_order_when_patient_positions_ascend() {
+        let descending = multiframe_position_test_object(&["0\\0\\3", "0\\0\\2", "0\\0\\1"]);
+        let ascending = multiframe_position_test_object(&["0\\0\\1", "0\\0\\2", "0\\0\\3"]);
+
+        assert_eq!(
+            read_per_frame_image_positions(&descending),
+            vec![[0.0, 0.0, 3.0], [0.0, 0.0, 2.0], [0.0, 0.0, 1.0]]
+        );
+        assert!(!infer_reverse_frame_order(&descending, 3));
+        assert!(infer_reverse_frame_order(&ascending, 3));
+    }
+
+    #[test]
+    fn infer_reverse_frame_order_requires_positions_for_every_frame() {
+        let partial = multiframe_position_test_object_from_items(
+            vec![
+                multiframe_position_item("0\\0\\1"),
+                InMemDicomObject::new_empty(),
+                multiframe_position_item("0\\0\\3"),
+            ],
+            3,
+        );
+
+        assert_eq!(
+            read_per_frame_image_positions(&partial),
+            vec![[0.0, 0.0, 1.0], [0.0, 0.0, 3.0]]
+        );
+        assert!(!infer_reverse_frame_order(&partial, 3));
+    }
+
+    #[test]
+    fn frame_pixel_access_uses_display_order_when_reversed() {
+        let image = DicomImage::test_stub_with_mono_frames_and_reverse(None, 4, true);
+
+        assert_eq!(image.frame_mono_pixels(0).as_deref(), Some([3].as_slice()));
+        assert_eq!(image.frame_mono_pixels(1).as_deref(), Some([2].as_slice()));
+        assert_eq!(image.frame_mono_pixels(3).as_deref(), Some([0].as_slice()));
+        assert_eq!(image.stored_frame_index_to_display(0), Some(3));
+        assert_eq!(image.stored_frame_index_to_display(3), Some(0));
+    }
+
+    #[test]
+    fn frame_index_mapping_rejects_out_of_range_inputs() {
+        let image = DicomImage::test_stub_with_mono_frames_and_reverse(None, 4, true);
+
+        assert_eq!(image.display_frame_index_to_stored(4), None);
+        assert_eq!(image.stored_frame_index_to_display(4), None);
+        assert_eq!(image.frame_mono_pixels(4), None);
+    }
+
+    #[test]
+    fn load_dicom_primes_initial_display_frame_for_reversed_multiframe_images() {
+        let bytes = multiframe_mono_test_bytes(&["0\\0\\1", "0\\0\\2", "0\\0\\3"], &[11, 22, 33]);
+        let source = DicomSource::from_memory("reverse-multiframe.dcm", bytes);
+
+        let image = load_dicom(source).expect("reverse multiframe test object should load");
+
+        assert_eq!(image.frame_count(), 3);
+        assert_eq!(image.frame_mono_pixels(1).as_deref(), None);
+        assert_eq!(image.frame_mono_pixels(0).as_deref(), Some([33].as_slice()));
+        assert_eq!(image.frame_mono_pixels(2).as_deref(), Some([11].as_slice()));
     }
 }

@@ -38,7 +38,8 @@ Its primary purpose is consistency during development, not full architecture cov
 13. Grouped DICOMweb launch MUST resolve and stream the `open_group` before background groups so first-image latency is driven by the active group only.
 14. Background DICOMweb groups MUST stage into history as each group download completes; history thumbnails and group switching MUST NOT wait for the final grouped download result.
 15. If the user switches away from a streaming DICOMweb active group, remaining active-group work MUST continue staging into history and MUST NOT clear, replace, or visually mask the currently displayed study.
-16. DICOM content inside the viewer MUST use explicit `DicomSource` ownership; DICOMweb bytes MUST be represented as `DicomSource::Memory`, not temp files or a global backing store.
+16. Multi-frame images with per-frame `ImagePositionPatient` MUST expose frames in logical patient-position order; if the dominant per-frame patient-position progression increases across stored frames, display and cine MUST reverse with it, and GSPS frame lookups MUST translate the displayed frame back to the referenced stored DICOM frame.
+17. DICOM content inside the viewer MUST use explicit `DicomSource` ownership; DICOMweb bytes MUST be represented as `DicomSource::Memory`, not temp files or a global backing store.
 
 ## Change Rules
 

@@ -398,7 +398,12 @@ impl DicomViewerApp {
                 None => return (0..frame_count).collect(),
                 Some(referenced_frames) => {
                     for frame_number in referenced_frames {
-                        let Some(frame_index) = frame_number.checked_sub(1) else {
+                        let Some(stored_frame_index) = frame_number.checked_sub(1) else {
+                            continue;
+                        };
+                        let Some(frame_index) =
+                            image.stored_frame_index_to_display(stored_frame_index)
+                        else {
                             continue;
                         };
                         if frame_index < frame_count {
@@ -3103,11 +3108,14 @@ impl DicomViewerApp {
         if overlay.is_empty() {
             return;
         }
+        let Some(stored_frame_index) = image.display_frame_index_to_stored(frame_index) else {
+            return;
+        };
 
         let stroke = egui::Stroke::new(1.6, PERSPECTA_BRAND_BLUE);
         let marker_half = (image_rect.width().min(image_rect.height()) * 0.008).clamp(2.0, 5.0);
 
-        for graphic in overlay.graphics_for_frame(frame_index) {
+        for graphic in overlay.graphics_for_frame(stored_frame_index) {
             match graphic {
                 GspsGraphic::Point { x, y, units } => {
                     let center = Self::gsps_point_to_screen(
@@ -5420,6 +5428,50 @@ mod tests {
 
         assert!(app.gsps_overlay_visible);
         assert_eq!(app.current_frame, 3);
+    }
+
+    #[test]
+    fn gsps_target_frames_follow_reversed_display_order() {
+        let overlay = GspsOverlay {
+            graphics: vec![crate::dicom::GspsOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 1.0,
+                    y: 1.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: Some(vec![1, 4]),
+            }],
+        };
+        let image = DicomImage::test_stub_with_mono_frames_and_reverse(Some(overlay), 4, true);
+
+        assert_eq!(DicomViewerApp::gsps_target_frames(&image, 4), vec![0, 3]);
+    }
+
+    #[test]
+    fn reversed_display_frame_maps_back_to_stored_gsps_frame() {
+        let overlay = GspsOverlay {
+            graphics: vec![crate::dicom::GspsOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 1.0,
+                    y: 1.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: Some(vec![1]),
+            }],
+        };
+        let image = DicomImage::test_stub_with_mono_frames_and_reverse(Some(overlay), 4, true);
+        let stored_frame_index = image
+            .display_frame_index_to_stored(3)
+            .expect("display frame should map to stored frame");
+
+        let overlay = image
+            .gsps_overlay
+            .as_ref()
+            .expect("test image should keep GSPS overlay");
+
+        assert_eq!(stored_frame_index, 0);
+        assert_eq!(overlay.graphics_for_frame(stored_frame_index).count(), 1);
+        assert_eq!(overlay.graphics_for_frame(3).count(), 0);
     }
 
     #[test]
