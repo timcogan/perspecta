@@ -2053,8 +2053,8 @@ mod tests {
         let image = load_dicom(source).expect("reverse multiframe test object should load");
 
         assert_eq!(image.frame_count(), 3);
-        assert_eq!(image.frame_mono_pixels(0).as_deref(), Some([33].as_slice()));
         assert_eq!(image.frame_mono_pixels(1).as_deref(), None);
+        assert_eq!(image.frame_mono_pixels(0).as_deref(), Some([33].as_slice()));
         assert_eq!(image.frame_mono_pixels(2).as_deref(), Some([11].as_slice()));
     }
 }
