@@ -785,6 +785,8 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                                 )
                             })?
                         } else {
+                            let bits_shift =
+                                decoded_initial_display.bits_stored().saturating_sub(8);
                             let frame_pixels_u16: Vec<u16> =
                                 decoded_initial_display.to_vec_frame(0).with_context(|| {
                                     format!(
