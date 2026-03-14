@@ -546,6 +546,26 @@ fn read_item_multi_int(item: &InMemDicomObject, tag: Tag) -> Option<Vec<i32>> {
         })
 }
 
+fn prime_reverse_frame_cache<T, F>(
+    frame_count: usize,
+    reverse_frame_order: bool,
+    first_frame_pixels: Arc<[T]>,
+    decode_initial_display_frame: F,
+) -> Result<Vec<Option<Arc<[T]>>>>
+where
+    F: FnOnce(usize) -> Result<Arc<[T]>>,
+{
+    let mut cache = vec![None; frame_count];
+    cache[0] = Some(Arc::clone(&first_frame_pixels));
+
+    if reverse_frame_order {
+        let initial_display_frame = frame_count.saturating_sub(1);
+        cache[initial_display_frame] = Some(decode_initial_display_frame(initial_display_frame)?);
+    }
+
+    Ok(cache)
+}
+
 pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     let source = source.into();
     let obj = open_dicom_object(&source)?;
@@ -637,43 +657,44 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
             let mono_frames = if frame_count == 1 {
                 MonoFrames::Eager(vec![first_frame_pixels])
             } else {
-                let mut cache = vec![None; frame_count];
-                cache[0] = Some(Arc::clone(&first_frame_pixels));
-                if reverse_frame_order {
-                    let initial_display_frame = frame_count.saturating_sub(1);
-                    let decoded_initial_display =
-                        obj.decode_pixel_data_frame(initial_display_frame as u32)
+                let cache = prime_reverse_frame_cache(
+                    frame_count,
+                    reverse_frame_order,
+                    Arc::clone(&first_frame_pixels),
+                    |initial_display_frame| {
+                        let decoded_initial_display =
+                            obj.decode_pixel_data_frame(initial_display_frame as u32)
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to decode PixelData frame {} for initial reverse-order preview",
+                                        initial_display_frame
+                                    )
+                                })?;
+                        if decoded_initial_display.samples_per_pixel() != 1 {
+                            bail!(
+                                "Initial reverse-order preview expected monochrome pixels, got SamplesPerPixel={}",
+                                decoded_initial_display.samples_per_pixel()
+                            );
+                        }
+                        let initial_display_pixels: Vec<i32> = decoded_initial_display
+                            .to_vec_frame(0)
                             .with_context(|| {
                                 format!(
-                                    "Failed to decode PixelData frame {} for initial reverse-order preview",
+                                    "Could not convert decoded frame {} to i32 samples for initial reverse-order preview",
                                     initial_display_frame
                                 )
                             })?;
-                    if decoded_initial_display.samples_per_pixel() != 1 {
-                        bail!(
-                            "Initial reverse-order preview expected monochrome pixels, got SamplesPerPixel={}",
-                            decoded_initial_display.samples_per_pixel()
-                        );
-                    }
-                    let initial_display_pixels: Vec<i32> = decoded_initial_display
-                        .to_vec_frame(0)
-                        .with_context(|| {
-                            format!(
-                                "Could not convert decoded frame {} to i32 samples for initial reverse-order preview",
-                                initial_display_frame
-                            )
-                        })?;
-                    if initial_display_pixels.len() != width * height {
-                        bail!(
-                            "Decoded pixel count mismatch in frame {}: got {}, expected {}",
-                            initial_display_frame,
-                            initial_display_pixels.len(),
-                            width * height
-                        );
-                    }
-                    cache[initial_display_frame] =
-                        Some(Arc::<[i32]>::from(initial_display_pixels.into_boxed_slice()));
-                }
+                        if initial_display_pixels.len() != width * height {
+                            bail!(
+                                "Decoded pixel count mismatch in frame {}: got {}, expected {}",
+                                initial_display_frame,
+                                initial_display_pixels.len(),
+                                width * height
+                            );
+                        }
+                        Ok(Arc::<[i32]>::from(initial_display_pixels.into_boxed_slice()))
+                    },
+                )?;
                 MonoFrames::Lazy(LazyMonoFrames {
                     source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
@@ -743,50 +764,51 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
             let rgb_frames = if frame_count == 1 {
                 RgbFrames::Eager(vec![first_frame_pixels])
             } else {
-                let mut cache = vec![None; frame_count];
-                cache[0] = Some(Arc::clone(&first_frame_pixels));
-                if reverse_frame_order {
-                    let initial_display_frame = frame_count.saturating_sub(1);
-                    let decoded_initial_display =
-                        obj.decode_pixel_data_frame(initial_display_frame as u32)
-                            .with_context(|| {
-                                format!(
-                                    "Failed to decode PixelData frame {} for initial reverse-order preview",
-                                    initial_display_frame
-                                )
-                            })?;
-                    let initial_display_pixels: Vec<u8> = if bits_allocated == 8 {
-                        decoded_initial_display.to_vec_frame(0).with_context(|| {
-                            format!(
-                                "Could not convert decoded frame {} to u8 samples for initial reverse-order preview",
-                                initial_display_frame
-                            )
-                        })?
-                    } else {
-                        let frame_pixels_u16: Vec<u16> =
+                let cache = prime_reverse_frame_cache(
+                    frame_count,
+                    reverse_frame_order,
+                    Arc::clone(&first_frame_pixels),
+                    |initial_display_frame| {
+                        let decoded_initial_display =
+                            obj.decode_pixel_data_frame(initial_display_frame as u32)
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to decode PixelData frame {} for initial reverse-order preview",
+                                        initial_display_frame
+                                    )
+                                })?;
+                        let initial_display_pixels: Vec<u8> = if bits_allocated == 8 {
                             decoded_initial_display.to_vec_frame(0).with_context(|| {
                                 format!(
-                                    "Could not convert decoded frame {} to u16 samples for initial reverse-order preview",
+                                    "Could not convert decoded frame {} to u8 samples for initial reverse-order preview",
                                     initial_display_frame
                                 )
-                            })?;
-                        frame_pixels_u16
-                            .into_iter()
-                            .map(|sample| (sample >> bits_shift) as u8)
-                            .collect()
-                    };
+                            })?
+                        } else {
+                            let frame_pixels_u16: Vec<u16> =
+                                decoded_initial_display.to_vec_frame(0).with_context(|| {
+                                    format!(
+                                        "Could not convert decoded frame {} to u16 samples for initial reverse-order preview",
+                                        initial_display_frame
+                                    )
+                                })?;
+                            frame_pixels_u16
+                                .into_iter()
+                                .map(|sample| (sample >> bits_shift) as u8)
+                                .collect()
+                        };
 
-                    if initial_display_pixels.len() != expected_len {
-                        bail!(
-                            "Decoded color pixel count mismatch in frame {}: got {}, expected {}",
-                            initial_display_frame,
-                            initial_display_pixels.len(),
-                            expected_len
-                        );
-                    }
-                    cache[initial_display_frame] =
-                        Some(Arc::<[u8]>::from(initial_display_pixels.into_boxed_slice()));
-                }
+                        if initial_display_pixels.len() != expected_len {
+                            bail!(
+                                "Decoded color pixel count mismatch in frame {}: got {}, expected {}",
+                                initial_display_frame,
+                                initial_display_pixels.len(),
+                                expected_len
+                            );
+                        }
+                        Ok(Arc::<[u8]>::from(initial_display_pixels.into_boxed_slice()))
+                    },
+                )?;
                 RgbFrames::Lazy(LazyRgbFrames {
                     source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
