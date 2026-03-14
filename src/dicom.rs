@@ -1464,7 +1464,7 @@ fn infer_reverse_frame_order(obj: &DefaultDicomObject, frame_count: usize) -> bo
     }
 
     let frame_positions = read_per_frame_image_positions(obj);
-    if frame_positions.len() < 2 {
+    if frame_positions.len() != frame_count {
         return false;
     }
 
@@ -1598,24 +1598,18 @@ mod tests {
         )])
     }
 
-    fn multiframe_position_test_object(frame_positions: &[&str]) -> DefaultDicomObject {
+    fn multiframe_position_test_object_from_items(
+        frame_items: Vec<InMemDicomObject>,
+        frame_count: usize,
+    ) -> DefaultDicomObject {
         let object = InMemDicomObject::from_element_iter([
             DataElement::new(Tag(0x0008, 0x0016), VR::UI, "1.2.840.10008.5.1.4.1.1.4.1"),
             DataElement::new(Tag(0x0008, 0x0060), VR::CS, "MG"),
-            DataElement::new(
-                Tag(0x0028, 0x0008),
-                VR::IS,
-                frame_positions.len().to_string(),
-            ),
+            DataElement::new(Tag(0x0028, 0x0008), VR::IS, frame_count.to_string()),
             DataElement::new(
                 Tag(0x5200, 0x9230),
                 VR::SQ,
-                DataSetSequence::from(
-                    frame_positions
-                        .iter()
-                        .map(|position| multiframe_position_item(position))
-                        .collect::<Vec<_>>(),
-                ),
+                DataSetSequence::from(frame_items),
             ),
         ])
         .with_meta(
@@ -1632,6 +1626,16 @@ mod tests {
             .expect("multi-frame test object should serialize");
         open_dicom_object_from_bytes(&bytes, "multiframe-position-test")
             .expect("serialized multi-frame test object should parse")
+    }
+
+    fn multiframe_position_test_object(frame_positions: &[&str]) -> DefaultDicomObject {
+        multiframe_position_test_object_from_items(
+            frame_positions
+                .iter()
+                .map(|position| multiframe_position_item(position))
+                .collect(),
+            frame_positions.len(),
+        )
     }
 
     fn multiframe_mono_test_bytes(frame_positions: &[&str], pixel_values: &[u8]) -> Vec<u8> {
@@ -2001,6 +2005,24 @@ mod tests {
         );
         assert!(!infer_reverse_frame_order(&descending, 3));
         assert!(infer_reverse_frame_order(&ascending, 3));
+    }
+
+    #[test]
+    fn infer_reverse_frame_order_requires_positions_for_every_frame() {
+        let partial = multiframe_position_test_object_from_items(
+            vec![
+                multiframe_position_item("0\\0\\1"),
+                InMemDicomObject::new_empty(),
+                multiframe_position_item("0\\0\\3"),
+            ],
+            3,
+        );
+
+        assert_eq!(
+            read_per_frame_image_positions(&partial),
+            vec![[0.0, 0.0, 1.0], [0.0, 0.0, 3.0]]
+        );
+        assert!(!infer_reverse_frame_order(&partial, 3));
     }
 
     #[test]
