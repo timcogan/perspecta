@@ -353,6 +353,35 @@ impl DicomViewerApp {
             .filter(|overlay| !overlay.is_empty());
     }
 
+    fn attach_pending_gsps_overlays_to_current_study(&mut self) {
+        if let Some(image) = self.image.as_mut() {
+            Self::attach_matching_gsps_overlay(image, &self.pending_gsps_overlays);
+        }
+        for viewport in self.mammo_group.iter_mut().filter_map(Option::as_mut) {
+            Self::attach_matching_gsps_overlay(&mut viewport.image, &self.pending_gsps_overlays);
+        }
+    }
+
+    fn merge_pending_gsps_overlays(&mut self, overlays: HashMap<String, GspsOverlay>) {
+        if overlays.is_empty() {
+            return;
+        }
+
+        Self::merge_gsps_overlays(&mut self.pending_gsps_overlays, overlays);
+        self.attach_pending_gsps_overlays_to_current_study();
+        self.sync_current_state_to_history();
+    }
+
+    fn collect_grouped_gsps_overlays(
+        prepared_groups: &[PreparedLoadPaths],
+    ) -> HashMap<String, GspsOverlay> {
+        let mut overlays = HashMap::new();
+        for group in prepared_groups {
+            Self::merge_gsps_overlays(&mut overlays, group.gsps_overlays.clone());
+        }
+        overlays
+    }
+
     fn has_available_gsps_overlay(&self) -> bool {
         if let Some(image) = self.image.as_ref() {
             return image
@@ -1572,6 +1601,8 @@ impl DicomViewerApp {
                         self.current_frame = self.current_frame.min(frame_count.saturating_sub(1));
                     }
                 }
+                self.attach_pending_gsps_overlays_to_current_study();
+                self.sync_current_state_to_history();
                 self.clear_load_error();
                 self.rebuild_texture(ctx);
                 log::info!("Loaded study from memory cache.");
@@ -1612,6 +1643,8 @@ impl DicomViewerApp {
                 self.mammo_selected_index = selected_index
                     .unwrap_or(group.selected_index)
                     .min(self.mammo_group.len().saturating_sub(1));
+                self.attach_pending_gsps_overlays_to_current_study();
+                self.sync_current_state_to_history();
                 self.clear_load_error();
                 log::info!("Loaded grouped study from memory cache.");
                 ctx.request_repaint();
@@ -1952,17 +1985,7 @@ impl DicomViewerApp {
             match classify_dicom_path(&path) {
                 Ok(DicomPathKind::Gsps) => match load_gsps_overlays(&path) {
                     Ok(overlays) => {
-                        Self::merge_gsps_overlays(&mut self.pending_gsps_overlays, overlays);
-                        if let Some(image) = self.image.as_mut() {
-                            Self::attach_matching_gsps_overlay(image, &self.pending_gsps_overlays);
-                        }
-                        for viewport in self.mammo_group.iter_mut().filter_map(Option::as_mut) {
-                            Self::attach_matching_gsps_overlay(
-                                &mut viewport.image,
-                                &self.pending_gsps_overlays,
-                            );
-                        }
-                        self.sync_current_state_to_history();
+                        self.merge_pending_gsps_overlays(overlays);
                     }
                     Err(err) => {
                         log::warn!("Could not parse streamed GSPS input: {err:#}");
@@ -2173,6 +2196,8 @@ impl DicomViewerApp {
                             .iter()
                             .map(|group| Self::prepare_load_paths(group.clone()))
                             .collect::<Vec<_>>();
+                        let grouped_gsps_overlays =
+                            Self::collect_grouped_gsps_overlays(&prepared_groups);
                         let validated_open_group = if prepared_groups.is_empty() {
                             0
                         } else {
@@ -2241,6 +2266,7 @@ impl DicomViewerApp {
                             self.move_current_history_to_front();
                             grouped_ready = active_group_is_displayed;
                         }
+                        self.merge_pending_gsps_overlays(grouped_gsps_overlays);
 
                         if streamed_active_complete || !streaming_started {
                             self.dicomweb_active_group_expected = None;
@@ -4777,10 +4803,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dicom_core::{DataElement, Tag, VR};
+    use dicom_core::value::DataSetSequence;
+    use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
     use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 
-    use crate::dicom::{BASIC_TEXT_SR_SOP_CLASS_UID, EXPLICIT_VR_LITTLE_ENDIAN_UID};
+    use crate::dicom::{
+        BASIC_TEXT_SR_SOP_CLASS_UID, EXPLICIT_VR_LITTLE_ENDIAN_UID, GSPS_SOP_CLASS_UID,
+    };
 
     fn test_texture(ctx: &egui::Context, name: &str) -> TextureHandle {
         ctx.load_texture(
@@ -4863,6 +4892,112 @@ mod tests {
             .write_to_file(&path)
             .expect("memory SR test object should write to disk");
         let bytes = fs::read(&path).expect("memory SR test bytes should read from disk");
+        let _ = fs::remove_file(&path);
+        DicomSource::from_memory(preferred_name, bytes)
+    }
+
+    fn test_memory_image_source(
+        preferred_name: &str,
+        study_uid: &str,
+        series_uid: &str,
+        instance_uid: &str,
+    ) -> DicomSource {
+        let image_sop_class_uid = "1.2.840.10008.5.1.4.1.1.1.2";
+        let image_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, image_sop_class_uid),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, instance_uid),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "MG"),
+            DataElement::new(Tag(0x0020, 0x000D), VR::UI, study_uid),
+            DataElement::new(Tag(0x0020, 0x000E), VR::UI, series_uid),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0004), VR::CS, "MONOCHROME2"),
+            DataElement::new(Tag(0x0028, 0x0010), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0011), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(7u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(0u16)),
+            DataElement::new(Tag(0x7FE0, 0x0010), VR::OB, PrimitiveValue::from(vec![0u8])),
+        ]);
+
+        let image_obj = image_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(image_sop_class_uid)
+                    .media_storage_sop_instance_uid(instance_uid),
+            )
+            .expect("memory image test object should build file meta");
+
+        let path = unique_test_file_path("memory-image-source");
+        image_obj
+            .write_to_file(&path)
+            .expect("memory image test object should write to disk");
+        let bytes = fs::read(&path).expect("memory image test bytes should read from disk");
+        let _ = fs::remove_file(&path);
+        DicomSource::from_memory(preferred_name, bytes)
+    }
+
+    fn test_memory_gsps_source(
+        preferred_name: &str,
+        study_uid: &str,
+        series_uid: &str,
+        instance_uid: &str,
+        referenced_instance_uid: &str,
+    ) -> DicomSource {
+        let referenced_image = InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0008, 0x1155),
+            VR::UI,
+            referenced_instance_uid,
+        )]);
+        let graphic = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0070, 0x0005), VR::CS, "PIXEL"),
+            DataElement::new(
+                Tag(0x0070, 0x0022),
+                VR::FL,
+                PrimitiveValue::F32(vec![1.0, 1.0].into()),
+            ),
+            DataElement::new(Tag(0x0070, 0x0023), VR::CS, "POINT"),
+        ]);
+        let annotation = InMemDicomObject::from_element_iter([
+            DataElement::new(
+                Tag(0x0008, 0x1140),
+                VR::SQ,
+                DataSetSequence::from(vec![referenced_image]),
+            ),
+            DataElement::new(
+                Tag(0x0070, 0x0009),
+                VR::SQ,
+                DataSetSequence::from(vec![graphic]),
+            ),
+        ]);
+        let gsps_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, GSPS_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, instance_uid),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "PR"),
+            DataElement::new(Tag(0x0020, 0x000D), VR::UI, study_uid),
+            DataElement::new(Tag(0x0020, 0x000E), VR::UI, series_uid),
+            DataElement::new(
+                Tag(0x0070, 0x0001),
+                VR::SQ,
+                DataSetSequence::from(vec![annotation]),
+            ),
+        ]);
+
+        let gsps_obj = gsps_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(GSPS_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid(instance_uid),
+            )
+            .expect("memory GSPS test object should build file meta");
+
+        let path = unique_test_file_path("memory-gsps-source");
+        gsps_obj
+            .write_to_file(&path)
+            .expect("memory GSPS test object should write to disk");
+        let bytes = fs::read(&path).expect("memory GSPS test bytes should read from disk");
         let _ = fs::remove_file(&path);
         DicomSource::from_memory(preferred_name, bytes)
     }
@@ -6063,6 +6198,253 @@ mod tests {
         assert_eq!(app.current_history_id(), Some(displayed_history_id));
         assert!(app.history_preload_receiver.is_some());
         assert!(app.history_entries.is_empty());
+    }
+
+    #[test]
+    fn poll_dicomweb_grouped_backfills_gsps_for_displayed_open_group() {
+        let study_uid = "1.2.840.10008.100.1";
+        let series_uid = "1.2.840.10008.100.2";
+        let gsps_series_uid = "1.2.840.10008.100.3";
+        let image_a_uid = "1.2.840.10008.100.10";
+        let image_b_uid = "1.2.840.10008.100.11";
+        let gsps_uid = "1.2.840.10008.100.20";
+
+        let image_a_source =
+            test_memory_image_source("active-a", study_uid, series_uid, image_a_uid);
+        let image_b_source =
+            test_memory_image_source("active-b", study_uid, series_uid, image_b_uid);
+        let gsps_source = test_memory_gsps_source(
+            "active-b-gsps",
+            study_uid,
+            gsps_series_uid,
+            gsps_uid,
+            image_b_uid,
+        );
+
+        let current_group_paths = vec![image_a_source.clone(), image_b_source.clone()];
+        let expected_history_id = history_id_from_paths(current_group_paths.as_slice());
+
+        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        tx.send(Ok(DicomWebDownloadResult::Grouped {
+            groups: vec![vec![
+                image_a_source.clone(),
+                image_b_source.clone(),
+                gsps_source,
+            ]],
+            open_group: 0,
+        }))
+        .expect("grouped result should send");
+
+        let ctx = egui::Context::default();
+        let mut image_a = DicomImage::test_stub_with_mono_frames(None, 1);
+        image_a.sop_instance_uid = Some(image_a_uid.to_string());
+        let mut image_b = DicomImage::test_stub_with_mono_frames(None, 1);
+        image_b.sop_instance_uid = Some(image_b_uid.to_string());
+
+        let mut app = DicomViewerApp {
+            dicomweb_receiver: Some(rx),
+            dicomweb_active_group_expected: Some(2),
+            dicomweb_active_group_paths: vec![(&image_a_source).into(), (&image_b_source).into()],
+            mammo_group: vec![
+                Some(MammoViewport {
+                    path: (&image_a_source).into(),
+                    image: image_a,
+                    texture: test_texture(&ctx, "displayed-active-a"),
+                    label: "A".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+                Some(MammoViewport {
+                    path: (&image_b_source).into(),
+                    image: image_b,
+                    texture: test_texture(&ctx, "displayed-active-b"),
+                    label: "B".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+            ],
+            ..Default::default()
+        };
+
+        app.poll_dicomweb_download(&ctx);
+
+        let displayed_viewport = app
+            .loaded_mammo_viewports()
+            .find(|viewport| viewport.path == (&image_b_source).into())
+            .expect("displayed group should keep second viewport");
+        assert!(
+            displayed_viewport.image.gsps_overlay.is_some(),
+            "open group should receive GSPS without needing history cycling"
+        );
+        assert!(app.has_available_gsps_overlay());
+
+        let history_entry = app
+            .history_entries
+            .iter()
+            .find(|entry| entry.id == expected_history_id)
+            .expect("displayed group should be cached in history");
+        let HistoryKind::Group(group) = &history_entry.kind else {
+            panic!("expected grouped history entry");
+        };
+        let cached_viewport = group
+            .viewports
+            .iter()
+            .find(|viewport| viewport.path == (&image_b_source).into())
+            .expect("history group should keep second viewport");
+        assert!(
+            cached_viewport.image.gsps_overlay.is_some(),
+            "history cache should preserve the backfilled GSPS overlay"
+        );
+    }
+
+    #[test]
+    fn poll_dicomweb_grouped_backfills_gsps_on_first_open_of_background_history_group() {
+        let study_uid = "1.2.840.10008.101.1";
+        let active_series_uid = "1.2.840.10008.101.2";
+        let background_series_a_uid = "1.2.840.10008.101.3";
+        let background_series_b_uid = "1.2.840.10008.101.4";
+        let background_gsps_series_uid = "1.2.840.10008.101.5";
+        let active_image_uid = "1.2.840.10008.101.10";
+        let background_image_a_uid = "1.2.840.10008.101.11";
+        let background_image_b_uid = "1.2.840.10008.101.12";
+        let background_gsps_uid = "1.2.840.10008.101.20";
+
+        let active_source = test_memory_image_source(
+            "active-single",
+            study_uid,
+            active_series_uid,
+            active_image_uid,
+        );
+        let background_image_a_source = test_memory_image_source(
+            "background-a",
+            study_uid,
+            background_series_a_uid,
+            background_image_a_uid,
+        );
+        let background_image_b_source = test_memory_image_source(
+            "background-b",
+            study_uid,
+            background_series_b_uid,
+            background_image_b_uid,
+        );
+        let background_gsps_source = test_memory_gsps_source(
+            "background-b-gsps",
+            study_uid,
+            background_gsps_series_uid,
+            background_gsps_uid,
+            background_image_b_uid,
+        );
+
+        let mut background_image_a = DicomImage::test_stub_with_mono_frames(None, 1);
+        background_image_a.sop_instance_uid = Some(background_image_a_uid.to_string());
+        let mut background_image_b = DicomImage::test_stub_with_mono_frames(None, 1);
+        background_image_b.sop_instance_uid = Some(background_image_b_uid.to_string());
+
+        let background_group_paths = vec![
+            background_image_a_source.clone(),
+            background_image_b_source.clone(),
+        ];
+        let background_history_id = history_id_from_paths(background_group_paths.as_slice());
+
+        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        tx.send(Ok(DicomWebDownloadResult::Grouped {
+            groups: vec![
+                vec![active_source.clone()],
+                vec![
+                    background_image_a_source.clone(),
+                    background_image_b_source.clone(),
+                    background_gsps_source,
+                ],
+            ],
+            open_group: 0,
+        }))
+        .expect("grouped result should send");
+
+        let ctx = egui::Context::default();
+        let mut active_image = DicomImage::test_stub_with_mono_frames(None, 1);
+        active_image.sop_instance_uid = Some(active_image_uid.to_string());
+
+        let mut app = DicomViewerApp {
+            dicomweb_receiver: Some(rx),
+            dicomweb_active_group_expected: Some(1),
+            dicomweb_active_group_paths: vec![(&active_source).into()],
+            image: Some(active_image),
+            current_single_path: Some((&active_source).into()),
+            texture: Some(test_texture(&ctx, "active-single-history-open")),
+            history_entries: vec![HistoryEntry {
+                id: background_history_id.clone(),
+                kind: HistoryKind::Group(HistoryGroupData {
+                    viewports: vec![
+                        HistoryGroupViewportData {
+                            path: (&background_image_a_source).into(),
+                            image: background_image_a,
+                            texture: test_texture(&ctx, "background-history-a"),
+                            label: "A".to_string(),
+                            window_center: 0.0,
+                            window_width: 1.0,
+                            current_frame: 0,
+                        },
+                        HistoryGroupViewportData {
+                            path: (&background_image_b_source).into(),
+                            image: background_image_b,
+                            texture: test_texture(&ctx, "background-history-b"),
+                            label: "B".to_string(),
+                            window_center: 0.0,
+                            window_width: 1.0,
+                            current_frame: 0,
+                        },
+                    ],
+                    selected_index: 0,
+                }),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        app.poll_dicomweb_download(&ctx);
+
+        assert!(
+            app.pending_gsps_overlays
+                .contains_key(background_image_b_uid),
+            "grouped download should retain GSPS from background groups"
+        );
+
+        app.open_history_entry(0, &ctx);
+
+        let displayed_viewport = app
+            .loaded_mammo_viewports()
+            .find(|viewport| viewport.path == (&background_image_b_source).into())
+            .expect("background group should open from history");
+        assert!(
+            displayed_viewport.image.gsps_overlay.is_some(),
+            "background group should show GSPS on first open"
+        );
+
+        let history_entry = app
+            .history_entries
+            .iter()
+            .find(|entry| entry.id == background_history_id)
+            .expect("background history entry should remain available");
+        let HistoryKind::Group(group) = &history_entry.kind else {
+            panic!("expected grouped history entry");
+        };
+        let cached_viewport = group
+            .viewports
+            .iter()
+            .find(|viewport| viewport.path == (&background_image_b_source).into())
+            .expect("background history should keep second viewport");
+        assert!(
+            cached_viewport.image.gsps_overlay.is_some(),
+            "background history cache should be repaired on first open"
+        );
     }
 
     #[test]
