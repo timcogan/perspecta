@@ -62,8 +62,9 @@ pub const METADATA_FIELD_NAMES: &[&str] = &[
 
 pub const GSPS_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.11.1";
 pub const STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX: &str = "1.2.840.10008.5.1.4.1.1.88.";
-#[cfg(test)]
 pub const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
+const IMPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2";
+const EXPLICIT_VR_BIG_ENDIAN_UID: &str = "1.2.840.10008.1.2.2";
 #[cfg(test)]
 pub const BASIC_TEXT_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.11";
 // Treat cumulative_delta from read_per_frame_image_positions as meaningful only above 0.001 mm so float noise does not flip reverse-order detection.
@@ -1054,21 +1055,9 @@ fn open_dicom_object(source: impl Into<DicomSource>) -> Result<DefaultDicomObjec
     match open_file(path) {
         Ok(obj) => Ok(obj),
         Err(err) => {
-            if is_missing_meta_group_length_error(&err) {
-                let bytes =
-                    fs::read(path).with_context(|| format!("Could not read {}", path.display()))?;
-
-                if let Some(repaired) = repair_missing_meta_group_length(&bytes) {
-                    return from_reader(Cursor::new(repaired)).with_context(|| {
-                        format!(
-                            "Could not open {} after repairing missing File Meta Information Group Length (0002,0000)",
-                            path.display()
-                        )
-                    });
-                }
-            }
-
-            Err(err).with_context(|| format!("Could not open {}", path.display()))
+            let bytes =
+                fs::read(path).with_context(|| format!("Could not read {}", path.display()))?;
+            try_open_dicom_object_with_repairs(&bytes, &path.display().to_string(), err)
         }
     }
 }
@@ -1076,20 +1065,42 @@ fn open_dicom_object(source: impl Into<DicomSource>) -> Result<DefaultDicomObjec
 fn open_dicom_object_from_bytes(bytes: &[u8], source_label: &str) -> Result<DefaultDicomObject> {
     match from_reader(Cursor::new(bytes)) {
         Ok(obj) => Ok(obj),
-        Err(err) => {
-            if is_missing_meta_group_length_error(&err) {
-                if let Some(repaired) = repair_missing_meta_group_length(bytes) {
-                    return from_reader(Cursor::new(repaired)).with_context(|| {
-                        format!(
-                            "Could not open {source_label} after repairing missing File Meta Information Group Length (0002,0000)"
-                        )
-                    });
-                }
-            }
+        Err(err) => try_open_dicom_object_with_repairs(bytes, source_label, err),
+    }
+}
 
-            Err(err).with_context(|| format!("Could not open {source_label}"))
+fn try_open_dicom_object_with_repairs(
+    bytes: &[u8],
+    source_label: &str,
+    original_error: ReadError,
+) -> Result<DefaultDicomObject> {
+    let mut repaired_meta = None;
+
+    if is_missing_meta_group_length_error(&original_error) {
+        if let Some(repaired) = repair_missing_meta_group_length(bytes) {
+            log::debug!(
+                "Applying DICOM repair for {source_label}: inserted missing File Meta Information Group Length (0002,0000)"
+            );
+            if let Ok(obj) = from_reader(Cursor::new(repaired.as_slice())) {
+                return Ok(obj);
+            }
+            repaired_meta = Some(repaired);
         }
     }
+
+    let repair_input = repaired_meta.as_deref().unwrap_or(bytes);
+    if let Some(repaired) = repair_private_malformed_binary_vrs_to_un(repair_input) {
+        log::debug!(
+            "Applying DICOM repair for {source_label}: degraded malformed private explicit-VR binary fields to UN"
+        );
+        return from_reader(Cursor::new(repaired.as_slice())).with_context(|| {
+            format!(
+                "Could not open {source_label} after degrading malformed private explicit-VR binary fields to UN"
+            )
+        });
+    }
+
+    Err(original_error).with_context(|| format!("Could not open {source_label}"))
 }
 
 fn sanitize_memory_source_label(value: &str) -> String {
@@ -1233,6 +1244,384 @@ fn repair_missing_meta_group_length(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(repaired)
 }
 
+fn repair_private_malformed_binary_vrs_to_un(bytes: &[u8]) -> Option<Vec<u8>> {
+    let offset = detect_dicom_prefix_offset(bytes)?;
+    if !transfer_syntax_uses_explicit_vr_little_endian(&file_meta_transfer_syntax_uid(
+        bytes, offset,
+    )?) {
+        return None;
+    }
+
+    let dataset_start = dataset_start_offset(bytes, offset)?;
+    let mut repaired = Vec::with_capacity(bytes.len() + 64);
+    repaired.extend_from_slice(&bytes[..dataset_start]);
+
+    let mut position = dataset_start;
+    let mut modified = false;
+    let mut containers = Vec::new();
+
+    while position < bytes.len() {
+        close_defined_containers(&mut containers, position, &mut repaired)?;
+
+        if position + 8 > bytes.len() {
+            return None;
+        }
+
+        let group = u16::from_le_bytes([bytes[position], bytes[position + 1]]);
+        let element = u16::from_le_bytes([bytes[position + 2], bytes[position + 3]]);
+
+        if group == 0xFFFE {
+            let value_len = u32::from_le_bytes([
+                bytes[position + 4],
+                bytes[position + 5],
+                bytes[position + 6],
+                bytes[position + 7],
+            ]);
+            let header_end = position.checked_add(8)?;
+            repaired.extend_from_slice(&bytes[position..header_end]);
+            position = header_end;
+
+            match element {
+                0xE000 => {
+                    push_item_container(&mut containers, position, repaired.len(), value_len)?;
+                }
+                0xE00D => {
+                    let container = containers.pop()?;
+                    if container.kind != ContainerKind::UndefinedItem {
+                        return None;
+                    }
+                }
+                0xE0DD => {
+                    let container = containers.pop()?;
+                    if container.kind != ContainerKind::UndefinedSequence {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+
+            continue;
+        }
+
+        if group == 0x7FE0 && element == 0x0010 && containers.is_empty() {
+            repaired.extend_from_slice(&bytes[position..]);
+            position = bytes.len();
+            break;
+        }
+
+        let vr = [bytes[position + 4], bytes[position + 5]];
+        let (header_len, value_len, undefined_len) =
+            read_dataset_explicit_vr_length(bytes, position, vr)?;
+        let value_start = position.checked_add(header_len)?;
+
+        if undefined_len {
+            if vr != *b"SQ" {
+                return None;
+            }
+
+            repaired.extend_from_slice(&bytes[position..value_start]);
+            containers.push(ContainerState::new_undefined_sequence());
+            position = value_start;
+            continue;
+        }
+
+        let value_end = value_start.checked_add(value_len as usize)?;
+        if value_end > bytes.len() {
+            return None;
+        }
+
+        if vr == *b"SQ" {
+            let header_start_out = repaired.len();
+            repaired.extend_from_slice(&bytes[position..value_start]);
+            let length_field_out = header_start_out.checked_add(header_len)?.checked_sub(4)?;
+            containers.push(ContainerState::new_defined_sequence(
+                value_end,
+                length_field_out,
+                repaired.len(),
+            ));
+            position = value_start;
+            continue;
+        }
+
+        let value_bytes = &bytes[value_start..value_end];
+        if group % 2 == 1 && should_degrade_private_binary_vr_to_un(vr, value_len, value_bytes) {
+            append_explicit_vr_un_element(&mut repaired, group, element, value_bytes)?;
+            modified = true;
+        } else {
+            repaired.extend_from_slice(&bytes[position..value_end]);
+        }
+        position = value_end;
+    }
+
+    close_defined_containers(&mut containers, position, &mut repaired)?;
+    if !containers.is_empty() || position != bytes.len() {
+        return None;
+    }
+
+    modified.then_some(repaired)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContainerKind {
+    DefinedItem,
+    DefinedSequence,
+    UndefinedItem,
+    UndefinedSequence,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ContainerState {
+    kind: ContainerKind,
+    original_end: Option<usize>,
+    length_field_out: Option<usize>,
+    value_start_out: usize,
+}
+
+impl ContainerState {
+    fn new_defined_item(
+        original_end: usize,
+        length_field_out: usize,
+        value_start_out: usize,
+    ) -> Self {
+        Self {
+            kind: ContainerKind::DefinedItem,
+            original_end: Some(original_end),
+            length_field_out: Some(length_field_out),
+            value_start_out,
+        }
+    }
+
+    fn new_defined_sequence(
+        original_end: usize,
+        length_field_out: usize,
+        value_start_out: usize,
+    ) -> Self {
+        Self {
+            kind: ContainerKind::DefinedSequence,
+            original_end: Some(original_end),
+            length_field_out: Some(length_field_out),
+            value_start_out,
+        }
+    }
+
+    fn new_undefined_sequence() -> Self {
+        Self {
+            kind: ContainerKind::UndefinedSequence,
+            original_end: None,
+            length_field_out: None,
+            value_start_out: 0,
+        }
+    }
+}
+
+fn push_item_container(
+    containers: &mut Vec<ContainerState>,
+    value_start_in: usize,
+    value_start_out: usize,
+    value_len: u32,
+) -> Option<()> {
+    if value_len == u32::MAX {
+        containers.push(ContainerState {
+            kind: ContainerKind::UndefinedItem,
+            original_end: None,
+            length_field_out: None,
+            value_start_out: 0,
+        });
+        return Some(());
+    }
+
+    let original_end = value_start_in.checked_add(value_len as usize)?;
+    let length_field_out = value_start_out.checked_sub(4)?;
+    containers.push(ContainerState::new_defined_item(
+        original_end,
+        length_field_out,
+        value_start_out,
+    ));
+    Some(())
+}
+
+fn close_defined_containers(
+    containers: &mut Vec<ContainerState>,
+    position: usize,
+    repaired: &mut [u8],
+) -> Option<()> {
+    while containers
+        .last()
+        .is_some_and(|container| container.original_end == Some(position))
+    {
+        let container = containers.pop()?;
+        let length_field_out = container.length_field_out?;
+        let value_len = repaired.len().checked_sub(container.value_start_out)?;
+        let value_len = u32::try_from(value_len).ok()?;
+        repaired
+            .get_mut(length_field_out..length_field_out + 4)?
+            .copy_from_slice(&value_len.to_le_bytes());
+    }
+    Some(())
+}
+
+fn should_degrade_private_binary_vr_to_un(vr: [u8; 2], value_len: u32, value_bytes: &[u8]) -> bool {
+    match vr {
+        [b'F', b'D'] => value_len % 8 != 0 && bytes_look_like_dicom_numeric_text(value_bytes),
+        [b'F', b'L'] => value_len % 4 != 0 && bytes_look_like_dicom_numeric_text(value_bytes),
+        [b'S', b'S'] | [b'U', b'S'] | [b'O', b'W'] => value_len % 2 != 0,
+        [b'S', b'L'] | [b'U', b'L'] | [b'O', b'L'] | [b'O', b'F'] | [b'A', b'T'] => {
+            value_len % 4 != 0
+        }
+        [b'S', b'V'] | [b'U', b'V'] | [b'O', b'D'] | [b'O', b'V'] => value_len % 8 != 0,
+        _ => false,
+    }
+}
+
+fn append_explicit_vr_un_element(
+    repaired: &mut Vec<u8>,
+    group: u16,
+    element: u16,
+    value_bytes: &[u8],
+) -> Option<()> {
+    let value_len = u32::try_from(value_bytes.len()).ok()?;
+    repaired.extend_from_slice(&group.to_le_bytes());
+    repaired.extend_from_slice(&element.to_le_bytes());
+    repaired.extend_from_slice(b"UN");
+    repaired.extend_from_slice(&0u16.to_le_bytes());
+    repaired.extend_from_slice(&value_len.to_le_bytes());
+    repaired.extend_from_slice(value_bytes);
+    Some(())
+}
+
+fn file_meta_transfer_syntax_uid(bytes: &[u8], meta_offset: usize) -> Option<String> {
+    if bytes.len() < meta_offset + 8 {
+        return None;
+    }
+
+    let mut position = meta_offset;
+    while position + 8 <= bytes.len() {
+        let group = u16::from_le_bytes([bytes[position], bytes[position + 1]]);
+        let element = u16::from_le_bytes([bytes[position + 2], bytes[position + 3]]);
+        if group != 0x0002 {
+            break;
+        }
+
+        let vr = [bytes[position + 4], bytes[position + 5]];
+        let (header_len, value_len) = read_explicit_vr_element_length(bytes, position, vr)?;
+        let value_start = position.checked_add(header_len)?;
+        let value_end = value_start.checked_add(value_len as usize)?;
+        if value_end > bytes.len() {
+            return None;
+        }
+
+        if element == 0x0010 {
+            if vr != *b"UI" {
+                return None;
+            }
+            return dicom_text_bytes(&bytes[value_start..value_end]);
+        }
+
+        position = value_end;
+    }
+
+    None
+}
+
+fn transfer_syntax_uses_explicit_vr_little_endian(uid: &str) -> bool {
+    uid != IMPLICIT_VR_LITTLE_ENDIAN_UID
+        && uid != EXPLICIT_VR_BIG_ENDIAN_UID
+        && (uid == EXPLICIT_VR_LITTLE_ENDIAN_UID
+            || uid.starts_with("1.2.840.10008.1.2.1.")
+            || uid == "1.2.840.10008.1.2.5"
+            || uid.starts_with("1.2.840.10008.1.2.4."))
+}
+
+fn dicom_text_bytes(bytes: &[u8]) -> Option<String> {
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b' ' | b'\0') {
+        end -= 1;
+    }
+    std::str::from_utf8(&bytes[..end]).ok().map(str::to_string)
+}
+
+fn dataset_start_offset(bytes: &[u8], meta_offset: usize) -> Option<usize> {
+    if bytes.len() < meta_offset + 12 {
+        return None;
+    }
+
+    let first_group = u16::from_le_bytes([bytes[meta_offset], bytes[meta_offset + 1]]);
+    let first_element = u16::from_le_bytes([bytes[meta_offset + 2], bytes[meta_offset + 3]]);
+    if first_group != 0x0002 {
+        return Some(meta_offset);
+    }
+
+    if first_element == 0x0000 {
+        let vr = [bytes[meta_offset + 4], bytes[meta_offset + 5]];
+        let (header_len, value_len) = read_explicit_vr_element_length(bytes, meta_offset, vr)?;
+        if vr != *b"UL" || header_len != 8 || value_len != 4 {
+            return None;
+        }
+
+        let meta_group_len = u32::from_le_bytes([
+            bytes[meta_offset + 8],
+            bytes[meta_offset + 9],
+            bytes[meta_offset + 10],
+            bytes[meta_offset + 11],
+        ]);
+        return meta_offset
+            .checked_add(header_len)?
+            .checked_add(value_len as usize)?
+            .checked_add(meta_group_len as usize);
+    }
+
+    scan_meta_group_len_without_group_length(bytes, meta_offset)?.checked_add(meta_offset)
+}
+
+fn vr_uses_u32_length(vr: [u8; 2]) -> bool {
+    matches!(
+        vr,
+        [b'O', b'B']
+            | [b'O', b'D']
+            | [b'O', b'F']
+            | [b'O', b'L']
+            | [b'O', b'V']
+            | [b'O', b'W']
+            | [b'S', b'Q']
+            | [b'U', b'C']
+            | [b'U', b'R']
+            | [b'U', b'T']
+            | [b'U', b'N']
+    )
+}
+
+fn read_dataset_explicit_vr_length(
+    bytes: &[u8],
+    position: usize,
+    vr: [u8; 2],
+) -> Option<(usize, u32, bool)> {
+    if vr_uses_u32_length(vr) {
+        if position + 12 > bytes.len() {
+            return None;
+        }
+        let value_len = u32::from_le_bytes([
+            bytes[position + 8],
+            bytes[position + 9],
+            bytes[position + 10],
+            bytes[position + 11],
+        ]);
+        Some((12, value_len, value_len == u32::MAX))
+    } else {
+        let value_len = u16::from_le_bytes([bytes[position + 6], bytes[position + 7]]) as u32;
+        Some((8, value_len, false))
+    }
+}
+
+fn bytes_look_like_dicom_numeric_text(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes.iter().all(|byte| {
+            matches!(
+                byte,
+                b'0'..=b'9' | b' ' | b'+' | b'-' | b'.' | b'e' | b'E' | b'\\'
+            )
+        })
+}
+
 fn detect_dicom_prefix_offset(bytes: &[u8]) -> Option<usize> {
     if bytes.len() >= 132 && &bytes[128..132] == b"DICM" {
         return Some(132);
@@ -1275,21 +1664,7 @@ fn read_explicit_vr_element_length(
     position: usize,
     vr: [u8; 2],
 ) -> Option<(usize, u32)> {
-    let uses_u32_len = matches!(
-        vr,
-        [b'O', b'B']
-            | [b'O', b'D']
-            | [b'O', b'F']
-            | [b'O', b'L']
-            | [b'O', b'W']
-            | [b'S', b'Q']
-            | [b'U', b'C']
-            | [b'U', b'R']
-            | [b'U', b'T']
-            | [b'U', b'N']
-    );
-
-    if uses_u32_len {
+    if vr_uses_u32_length(vr) {
         if position + 12 > bytes.len() {
             return None;
         }
@@ -1749,6 +2124,34 @@ mod tests {
         bytes
     }
 
+    fn private_text_test_bytes(value: &str, transfer_syntax_uid: &str) -> Vec<u8> {
+        let dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, "1.2.840.10008.5.1.4.1.1.1"),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "9.99.123456.1"),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "OT"),
+            DataElement::new(Tag(0x0011, 0x0010), VR::LO, "FAKE_CREATOR"),
+            DataElement::new(Tag(0x0011, 0x1011), VR::LO, value),
+        ]);
+        let file_obj = dataset
+            .with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))
+            .expect("test object should build file meta");
+
+        let mut bytes = Vec::new();
+        file_obj
+            .write_all(&mut bytes)
+            .expect("test object should serialize");
+        bytes
+    }
+
+    fn replace_explicit_vr(bytes: &mut [u8], marker: &[u8], new_vr: [u8; 2]) -> usize {
+        let marker_offset = bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("serialized test object should contain target marker");
+        bytes[marker_offset + 4..marker_offset + 6].copy_from_slice(&new_vr);
+        marker_offset
+    }
+
     fn code_item(code_meaning: &str) -> InMemDicomObject {
         InMemDicomObject::from_element_iter([DataElement::new(
             Tag(0x0008, 0x0104),
@@ -1835,15 +2238,163 @@ mod tests {
     }
 
     #[test]
-    fn repair_is_noop_when_group_length_already_exists() {
+    fn repair_is_noop_when_group_length_is_already_correct() {
         let mut bytes = vec![0u8; 128];
         bytes.extend_from_slice(b"DICM");
         bytes.extend_from_slice(&[
-            0x02, 0x00, 0x00, 0x00, b'U', b'L', 0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x00,
+            0x02, 0x00, 0x00, 0x00, b'U', b'L', 0x04, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x02, 0x00,
+            0x10, 0x00, b'U', b'I', 0x14, 0x00, b'T', b'R', b'A', b'N', b'S', b'F', b'E', b'R',
+            b'-', b'S', b'Y', b'N', b'T', b'A', b'X', b'-', b'T', b'E', b'S', b'T', 0x08, 0x00,
             0x16, 0x00, b'U', b'I', 0x02, 0x00, b'1', 0x00,
         ]);
 
         assert!(repair_missing_meta_group_length(&bytes).is_none());
+    }
+
+    #[test]
+    fn open_dicom_object_degrades_private_text_value_mislabelled_as_fd_to_un() {
+        let mut bytes = private_text_test_bytes("123.45", EXPLICIT_VR_LITTLE_ENDIAN_UID);
+        let marker = [
+            0x11, 0x00, 0x11, 0x10, b'L', b'O', 0x06, 0x00, b'1', b'2', b'3', b'.', b'4', b'5',
+        ];
+        replace_explicit_vr(&mut bytes, &marker, *b"FD");
+
+        let obj = open_dicom_object_from_bytes(&bytes, "mislabelled-private-fd")
+            .expect("mislabelled private FD should be degraded to UN");
+
+        assert_eq!(read_string(&obj, "Modality").as_deref(), Some("OT"));
+        let element = obj
+            .element(Tag(0x0011, 0x1011))
+            .expect("degraded private tag should exist");
+        assert_eq!(element.vr(), VR::UN);
+        assert_eq!(
+            element
+                .value()
+                .to_bytes()
+                .expect("UN value should preserve raw bytes")
+                .as_ref(),
+            b"123.45"
+        );
+    }
+
+    #[test]
+    fn repair_degrades_private_text_value_mislabelled_as_fl_to_un() {
+        let mut bytes = private_text_test_bytes("123.45", EXPLICIT_VR_LITTLE_ENDIAN_UID);
+        let marker = [
+            0x11, 0x00, 0x11, 0x10, b'L', b'O', 0x06, 0x00, b'1', b'2', b'3', b'.', b'4', b'5',
+        ];
+        replace_explicit_vr(&mut bytes, &marker, *b"FL");
+
+        let repaired = repair_private_malformed_binary_vrs_to_un(&bytes)
+            .expect("mislabelled private FL should be degraded to UN");
+        let obj = from_reader(Cursor::new(repaired.as_slice()))
+            .expect("repaired private FL should parse");
+        let element = obj
+            .element(Tag(0x0011, 0x1011))
+            .expect("degraded private FL tag should exist");
+        assert_eq!(element.vr(), VR::UN);
+        assert_eq!(
+            element
+                .value()
+                .to_bytes()
+                .expect("UN value should preserve raw bytes")
+                .as_ref(),
+            b"123.45"
+        );
+    }
+
+    #[test]
+    fn repair_degrades_private_binary_vr_with_invalid_length_to_un() {
+        let mut bytes = private_text_test_bytes("123456", EXPLICIT_VR_LITTLE_ENDIAN_UID);
+        let marker = [
+            0x11, 0x00, 0x11, 0x10, b'L', b'O', 0x06, 0x00, b'1', b'2', b'3', b'4', b'5', b'6',
+        ];
+        replace_explicit_vr(&mut bytes, &marker, *b"UL");
+
+        let repaired = repair_private_malformed_binary_vrs_to_un(&bytes)
+            .expect("private UL with invalid length should be degraded to UN");
+        let obj = from_reader(Cursor::new(repaired.as_slice()))
+            .expect("repaired private UL should parse");
+        let element = obj
+            .element(Tag(0x0011, 0x1011))
+            .expect("degraded private UL tag should exist");
+        assert_eq!(element.vr(), VR::UN);
+        assert_eq!(
+            element
+                .value()
+                .to_bytes()
+                .expect("UN value should preserve raw bytes")
+                .as_ref(),
+            b"123456"
+        );
+    }
+
+    #[test]
+    fn repair_ignores_valid_private_fd() {
+        let dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, "1.2.840.10008.5.1.4.1.1.1"),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "1.2.3.4.5"),
+            DataElement::new(Tag(0x0011, 0x0010), VR::LO, "TEST_CREATOR"),
+            DataElement::new(Tag(0x0011, 0x1011), VR::FD, PrimitiveValue::from(123.45f64)),
+        ]);
+        let file_obj = dataset
+            .with_meta(FileMetaTableBuilder::new().transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID))
+            .expect("valid private FD test object should build file meta");
+
+        let mut bytes = Vec::new();
+        file_obj
+            .write_all(&mut bytes)
+            .expect("valid private FD test object should serialize");
+
+        assert!(repair_private_malformed_binary_vrs_to_un(&bytes).is_none());
+    }
+
+    #[test]
+    fn repair_ignores_public_text_value_mislabelled_as_fd() {
+        let dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, "1.2.840.10008.5.1.4.1.1.1"),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "1.2.3.4.5"),
+            DataElement::new(Tag(0x0008, 0x103E), VR::LO, "123.45"),
+        ]);
+        let file_obj = dataset
+            .with_meta(FileMetaTableBuilder::new().transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID))
+            .expect("public FD test object should build file meta");
+
+        let mut bytes = Vec::new();
+        file_obj
+            .write_all(&mut bytes)
+            .expect("public FD test object should serialize");
+
+        let marker = [
+            0x08, 0x00, 0x3E, 0x10, b'L', b'O', 0x06, 0x00, b'1', b'2', b'3', b'.', b'4', b'5',
+        ];
+        replace_explicit_vr(&mut bytes, &marker, *b"FD");
+
+        assert!(repair_private_malformed_binary_vrs_to_un(&bytes).is_none());
+    }
+
+    #[test]
+    fn repair_ignores_non_explicit_vr_little_endian_sources() {
+        let bytes = private_text_test_bytes("123.45", "1.2.840.10008.1.2");
+        assert!(repair_private_malformed_binary_vrs_to_un(&bytes).is_none());
+    }
+
+    #[test]
+    fn repair_accepts_encapsulated_explicit_vr_little_endian_transfer_syntax() {
+        let mut bytes = private_text_test_bytes("123.45", "1.2.840.10008.1.2.4.50");
+        let marker = [
+            0x11, 0x00, 0x11, 0x10, b'L', b'O', 0x06, 0x00, b'1', b'2', b'3', b'.', b'4', b'5',
+        ];
+        replace_explicit_vr(&mut bytes, &marker, *b"FD");
+
+        let repaired = repair_private_malformed_binary_vrs_to_un(&bytes)
+            .expect("encapsulated explicit VR LE syntax should still allow UN degradation");
+        let obj = from_reader(Cursor::new(repaired.as_slice()))
+            .expect("repaired encapsulated explicit VR LE test object should parse");
+        let element = obj
+            .element(Tag(0x0011, 0x1011))
+            .expect("degraded private FD tag should exist");
+        assert_eq!(element.vr(), VR::UN);
     }
 
     #[test]
