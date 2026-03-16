@@ -1076,6 +1076,9 @@ fn try_open_dicom_object_with_repairs(
 
     if is_missing_meta_group_length_error(&original_error) {
         if let Some(repaired) = repair_missing_meta_group_length(bytes) {
+            log::debug!(
+                "Applying DICOM repair for {source_label}: inserted missing File Meta Information Group Length (0002,0000)"
+            );
             if let Ok(obj) = from_reader(Cursor::new(repaired.as_slice())) {
                 return Ok(obj);
             }
@@ -1085,6 +1088,9 @@ fn try_open_dicom_object_with_repairs(
 
     let repair_input = repaired_meta.as_deref().unwrap_or(bytes);
     if let Some(repaired) = repair_private_malformed_binary_vrs_to_un(repair_input) {
+        log::debug!(
+            "Applying DICOM repair for {source_label}: degraded malformed private explicit-VR binary fields to UN"
+        );
         return from_reader(Cursor::new(repaired.as_slice())).with_context(|| {
             format!(
                 "Could not open {source_label} after degrading malformed private explicit-VR binary fields to UN"
