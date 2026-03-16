@@ -63,6 +63,8 @@ pub const METADATA_FIELD_NAMES: &[&str] = &[
 pub const GSPS_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.11.1";
 pub const STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX: &str = "1.2.840.10008.5.1.4.1.1.88.";
 pub const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
+const IMPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2";
+const EXPLICIT_VR_BIG_ENDIAN_UID: &str = "1.2.840.10008.1.2.2";
 #[cfg(test)]
 pub const BASIC_TEXT_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.11";
 // Treat cumulative_delta from read_per_frame_image_positions as meaningful only above 0.001 mm so float noise does not flip reverse-order detection.
@@ -1244,7 +1246,9 @@ fn repair_missing_meta_group_length(bytes: &[u8]) -> Option<Vec<u8>> {
 
 fn repair_private_malformed_binary_vrs_to_un(bytes: &[u8]) -> Option<Vec<u8>> {
     let offset = detect_dicom_prefix_offset(bytes)?;
-    if file_meta_transfer_syntax_uid(bytes, offset)?.as_str() != EXPLICIT_VR_LITTLE_ENDIAN_UID {
+    if !transfer_syntax_uses_explicit_vr_little_endian(&file_meta_transfer_syntax_uid(
+        bytes, offset,
+    )?) {
         return None;
     }
 
@@ -1517,6 +1521,15 @@ fn file_meta_transfer_syntax_uid(bytes: &[u8], meta_offset: usize) -> Option<Str
     }
 
     None
+}
+
+fn transfer_syntax_uses_explicit_vr_little_endian(uid: &str) -> bool {
+    uid != IMPLICIT_VR_LITTLE_ENDIAN_UID
+        && uid != EXPLICIT_VR_BIG_ENDIAN_UID
+        && (uid == EXPLICIT_VR_LITTLE_ENDIAN_UID
+            || uid.starts_with("1.2.840.10008.1.2.1.")
+            || uid == "1.2.840.10008.1.2.5"
+            || uid.starts_with("1.2.840.10008.1.2.4."))
 }
 
 fn dicom_text_bytes(bytes: &[u8]) -> Option<String> {
@@ -2364,6 +2377,24 @@ mod tests {
     fn repair_ignores_non_explicit_vr_little_endian_sources() {
         let bytes = private_text_test_bytes("123.45", "1.2.840.10008.1.2");
         assert!(repair_private_malformed_binary_vrs_to_un(&bytes).is_none());
+    }
+
+    #[test]
+    fn repair_accepts_encapsulated_explicit_vr_little_endian_transfer_syntax() {
+        let mut bytes = private_text_test_bytes("123.45", "1.2.840.10008.1.2.4.50");
+        let marker = [
+            0x11, 0x00, 0x11, 0x10, b'L', b'O', 0x06, 0x00, b'1', b'2', b'3', b'.', b'4', b'5',
+        ];
+        replace_explicit_vr(&mut bytes, &marker, *b"FD");
+
+        let repaired = repair_private_malformed_binary_vrs_to_un(&bytes)
+            .expect("encapsulated explicit VR LE syntax should still allow UN degradation");
+        let obj = from_reader(Cursor::new(repaired.as_slice()))
+            .expect("repaired encapsulated explicit VR LE test object should parse");
+        let element = obj
+            .element(Tag(0x0011, 0x1011))
+            .expect("degraded private FD tag should exist");
+        assert_eq!(element.vr(), VR::UN);
     }
 
     #[test]
