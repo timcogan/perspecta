@@ -1560,12 +1560,8 @@ fn dataset_start_offset(bytes: &[u8], meta_offset: usize) -> Option<usize> {
     scan_meta_group_len_without_group_length(bytes, meta_offset)?.checked_add(meta_offset)
 }
 
-fn read_dataset_explicit_vr_length(
-    bytes: &[u8],
-    position: usize,
-    vr: [u8; 2],
-) -> Option<(usize, u32, bool)> {
-    let uses_u32_len = matches!(
+fn vr_uses_u32_length(vr: [u8; 2]) -> bool {
+    matches!(
         vr,
         [b'O', b'B']
             | [b'O', b'D']
@@ -1577,9 +1573,15 @@ fn read_dataset_explicit_vr_length(
             | [b'U', b'R']
             | [b'U', b'T']
             | [b'U', b'N']
-    );
+    )
+}
 
-    if uses_u32_len {
+fn read_dataset_explicit_vr_length(
+    bytes: &[u8],
+    position: usize,
+    vr: [u8; 2],
+) -> Option<(usize, u32, bool)> {
+    if vr_uses_u32_length(vr) {
         if position + 12 > bytes.len() {
             return None;
         }
@@ -1648,21 +1650,7 @@ fn read_explicit_vr_element_length(
     position: usize,
     vr: [u8; 2],
 ) -> Option<(usize, u32)> {
-    let uses_u32_len = matches!(
-        vr,
-        [b'O', b'B']
-            | [b'O', b'D']
-            | [b'O', b'F']
-            | [b'O', b'L']
-            | [b'O', b'W']
-            | [b'S', b'Q']
-            | [b'U', b'C']
-            | [b'U', b'R']
-            | [b'U', b'T']
-            | [b'U', b'N']
-    );
-
-    if uses_u32_len {
+    if vr_uses_u32_length(vr) {
         if position + 12 > bytes.len() {
             return None;
         }
