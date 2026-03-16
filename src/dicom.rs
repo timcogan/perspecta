@@ -1567,6 +1567,7 @@ fn vr_uses_u32_length(vr: [u8; 2]) -> bool {
             | [b'O', b'D']
             | [b'O', b'F']
             | [b'O', b'L']
+            | [b'O', b'V']
             | [b'O', b'W']
             | [b'S', b'Q']
             | [b'U', b'C']
