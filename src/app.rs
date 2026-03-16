@@ -1556,6 +1556,9 @@ impl DicomViewerApp {
                 if let Some(path) = self.current_single_path.as_ref() {
                     single.path = path.clone();
                 }
+                if let Some(image) = self.image.as_ref() {
+                    single.image.gsps_overlay = image.gsps_overlay.clone();
+                }
                 if let Some(texture) = self.texture.as_ref() {
                     single.texture = texture.clone();
                 }
@@ -5838,6 +5841,50 @@ mod tests {
         assert!(app.single_load_receiver.is_none());
         assert!(app.mammo_load_receiver.is_none());
         assert!(app.mammo_load_sender.is_none());
+    }
+
+    #[test]
+    fn sync_current_state_to_history_persists_single_view_gsps_backfill() {
+        let ctx = egui::Context::default();
+        let overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 1.0,
+            y: 1.0,
+            units: GspsUnits::Pixel,
+        }]);
+        let texture = test_texture(&ctx, "single-history-gsps-backfill");
+        let path = test_meta("cached-single.dcm");
+        let mut live_image = DicomImage::test_stub(Some(overlay));
+        live_image.sop_instance_uid = Some("9.999.200.1".to_string());
+
+        let mut app = DicomViewerApp {
+            image: Some(live_image),
+            current_single_path: Some(path.clone()),
+            texture: Some(texture.clone()),
+            history_entries: vec![HistoryEntry {
+                id: history_id_from_paths(std::slice::from_ref(&path)),
+                kind: HistoryKind::Single(Box::new(HistorySingleData {
+                    path: path.clone(),
+                    image: DicomImage::test_stub(None),
+                    texture,
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    cine_fps: DEFAULT_CINE_FPS,
+                })),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        app.sync_current_state_to_history();
+
+        let HistoryKind::Single(single) = &app.history_entries[0].kind else {
+            panic!("expected single history entry");
+        };
+        assert!(
+            single.image.gsps_overlay.is_some(),
+            "single-view history entry should keep GSPS backfills from the live image"
+        );
     }
 
     #[test]
