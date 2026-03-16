@@ -297,14 +297,20 @@ impl DicomViewerApp {
 
     fn merge_gsps_overlays(
         destination: &mut HashMap<String, GspsOverlay>,
-        source: HashMap<String, GspsOverlay>,
+        source: &HashMap<String, GspsOverlay>,
     ) {
-        for (sop_uid, mut overlay) in source {
-            destination
-                .entry(sop_uid)
-                .or_default()
-                .graphics
-                .append(&mut overlay.graphics);
+        for (sop_uid, overlay) in source {
+            if overlay.is_empty() {
+                continue;
+            }
+
+            if let Some(existing_overlay) = destination.get_mut(sop_uid) {
+                existing_overlay
+                    .graphics
+                    .extend(overlay.graphics.iter().cloned());
+            } else {
+                destination.insert(sop_uid.clone(), overlay.clone());
+            }
         }
     }
 
@@ -321,7 +327,7 @@ impl DicomViewerApp {
                     prepared.gsps_files_found = prepared.gsps_files_found.saturating_add(1);
                     match load_gsps_overlays(&path) {
                         Ok(overlays) => {
-                            Self::merge_gsps_overlays(&mut prepared.gsps_overlays, overlays)
+                            Self::merge_gsps_overlays(&mut prepared.gsps_overlays, &overlays)
                         }
                         Err(err) => {
                             log::warn!("Could not parse GSPS input: {err:#}");
@@ -409,7 +415,7 @@ impl DicomViewerApp {
     ) -> HashMap<String, GspsOverlay> {
         let mut overlays = HashMap::new();
         for group in prepared_groups {
-            Self::merge_gsps_overlays(&mut overlays, group.gsps_overlays.clone());
+            Self::merge_gsps_overlays(&mut overlays, &group.gsps_overlays);
         }
         overlays
     }
@@ -5471,7 +5477,7 @@ mod tests {
             }]),
         );
 
-        DicomViewerApp::merge_gsps_overlays(&mut destination, source);
+        DicomViewerApp::merge_gsps_overlays(&mut destination, &source);
         assert_eq!(
             destination
                 .get("1.2.3")
