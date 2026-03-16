@@ -353,6 +353,41 @@ impl DicomViewerApp {
             .filter(|overlay| !overlay.is_empty());
     }
 
+    fn collect_image_gsps_overlay(overlays: &mut HashMap<String, GspsOverlay>, image: &DicomImage) {
+        let Some(sop_instance_uid) = image.sop_instance_uid.as_ref() else {
+            return;
+        };
+        let Some(overlay) = image
+            .gsps_overlay
+            .as_ref()
+            .filter(|overlay| !overlay.is_empty())
+        else {
+            return;
+        };
+
+        overlays
+            .entry(sop_instance_uid.clone())
+            .or_default()
+            .graphics
+            .extend(overlay.graphics.iter().cloned());
+    }
+
+    fn gsps_overlays_from_history_kind(kind: &HistoryKind) -> HashMap<String, GspsOverlay> {
+        let mut overlays = HashMap::new();
+        match kind {
+            HistoryKind::Single(single) => {
+                Self::collect_image_gsps_overlay(&mut overlays, &single.image);
+            }
+            HistoryKind::Group(group) => {
+                for viewport in &group.viewports {
+                    Self::collect_image_gsps_overlay(&mut overlays, &viewport.image);
+                }
+            }
+            HistoryKind::Report(_) => {}
+        }
+        overlays
+    }
+
     fn has_available_gsps_overlay(&self) -> bool {
         if let Some(image) = self.image.as_ref() {
             return image
@@ -1494,6 +1529,9 @@ impl DicomViewerApp {
                 if let Some(path) = self.current_single_path.as_ref() {
                     single.path = path.clone();
                 }
+                if let Some(image) = self.image.as_ref() {
+                    single.image = image.clone();
+                }
                 if let Some(texture) = self.texture.as_ref() {
                     single.texture = texture.clone();
                 }
@@ -1514,15 +1552,12 @@ impl DicomViewerApp {
                         .filter_map(Option::as_ref)
                         .find(|viewport| viewport.path == cached_viewport.path)
                     {
+                        cached_viewport.image = active_viewport.image.clone();
                         cached_viewport.texture = active_viewport.texture.clone();
                         cached_viewport.window_center = active_viewport.window_center;
                         cached_viewport.window_width = active_viewport.window_width;
                         cached_viewport.current_frame = active_viewport.current_frame;
                     }
-                    Self::attach_matching_gsps_overlay(
-                        &mut cached_viewport.image,
-                        &self.pending_gsps_overlays,
-                    );
                 }
             }
             HistoryKind::Report(report) => {
@@ -1546,6 +1581,7 @@ impl DicomViewerApp {
         else {
             return;
         };
+        self.pending_gsps_overlays = Self::gsps_overlays_from_history_kind(&kind);
 
         match kind {
             HistoryKind::Single(single) => {
@@ -4898,6 +4934,75 @@ mod tests {
         }
     }
 
+    fn test_image_with_uid(
+        sop_instance_uid: &str,
+        gsps_overlay: Option<GspsOverlay>,
+    ) -> DicomImage {
+        let mut image = DicomImage::test_stub(gsps_overlay);
+        image.sop_instance_uid = Some(sop_instance_uid.to_string());
+        image
+    }
+
+    fn group_history_entry(
+        ctx: &egui::Context,
+        texture_prefix: &str,
+        viewports: Vec<(&str, DicomImage, &str)>,
+        selected_index: usize,
+    ) -> HistoryEntry {
+        let mut paths = Vec::with_capacity(viewports.len());
+        let mut cached_viewports = Vec::with_capacity(viewports.len());
+
+        for (index, (path, image, label)) in viewports.into_iter().enumerate() {
+            let path_buf = PathBuf::from(path);
+            paths.push(path_buf.clone());
+            cached_viewports.push(HistoryGroupViewportData {
+                path: path_buf.into(),
+                image,
+                texture: test_texture(ctx, &format!("{texture_prefix}-{index}")),
+                label: label.to_string(),
+                window_center: 0.0,
+                window_width: 1.0,
+                current_frame: 0,
+            });
+        }
+
+        HistoryEntry {
+            id: history_id_from_paths(&paths),
+            kind: HistoryKind::Group(HistoryGroupData {
+                viewports: cached_viewports,
+                selected_index,
+            }),
+            thumbs: Vec::new(),
+        }
+    }
+
+    fn mammo_group_from_history(group: &HistoryGroupData) -> Vec<Option<MammoViewport>> {
+        group
+            .viewports
+            .iter()
+            .cloned()
+            .map(|viewport| {
+                Some(MammoViewport {
+                    path: viewport.path,
+                    image: viewport.image,
+                    texture: viewport.texture,
+                    label: viewport.label,
+                    window_center: viewport.window_center,
+                    window_width: viewport.window_width,
+                    current_frame: viewport.current_frame,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                })
+            })
+            .collect()
+    }
+
+    fn process_pending_history_open_twice(app: &mut DicomViewerApp, ctx: &egui::Context) {
+        app.process_pending_history_open(ctx);
+        app.process_pending_history_open(ctx);
+    }
+
     #[test]
     fn memory_sources_use_semantic_identity_for_history_and_display_matching() {
         let reopened = test_memory_source(
@@ -5587,6 +5692,54 @@ mod tests {
     }
 
     #[test]
+    fn sync_current_state_to_history_single_preserves_gsps_overlay_with_stale_pending_map() {
+        let ctx = egui::Context::default();
+        let overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 1.0,
+            y: 1.0,
+            units: GspsUnits::Pixel,
+        }]);
+        let unrelated_overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 2.0,
+            y: 2.0,
+            units: GspsUnits::Display,
+        }]);
+        let path = test_meta("active-single.dcm");
+        let mut app = DicomViewerApp {
+            image: Some(test_image_with_uid("1.2.3", Some(overlay))),
+            current_single_path: Some(path.clone()),
+            texture: Some(test_texture(&ctx, "active-single-texture")),
+            pending_gsps_overlays: HashMap::from([("9.9.9".to_string(), unrelated_overlay)]),
+            history_entries: vec![HistoryEntry {
+                id: history_id_from_paths(std::slice::from_ref(&path)),
+                kind: HistoryKind::Single(Box::new(HistorySingleData {
+                    path,
+                    image: test_image_with_uid("1.2.3", None),
+                    texture: test_texture(&ctx, "history-single-texture"),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    cine_fps: DEFAULT_CINE_FPS,
+                })),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        app.sync_current_state_to_history();
+
+        let HistoryKind::Single(single) = &app.history_entries[0].kind else {
+            panic!("history entry should remain single");
+        };
+        assert_eq!(single.image.sop_instance_uid.as_deref(), Some("1.2.3"));
+        assert!(single
+            .image
+            .gsps_overlay
+            .as_ref()
+            .is_some_and(|overlay| !overlay.is_empty()));
+    }
+
+    #[test]
     fn open_history_entry_single_hides_streaming_group_placeholders() {
         let ctx = egui::Context::default();
         let (_tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
@@ -5669,6 +5822,44 @@ mod tests {
         app.open_history_entry(0, &ctx);
 
         assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn open_history_entry_group_restores_pending_gsps_overlays() {
+        let ctx = egui::Context::default();
+        let overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 1.0,
+            y: 1.0,
+            units: GspsUnits::Pixel,
+        }]);
+        let unrelated_overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 2.0,
+            y: 2.0,
+            units: GspsUnits::Display,
+        }]);
+        let mut app = DicomViewerApp {
+            pending_gsps_overlays: HashMap::from([("9.9.9".to_string(), unrelated_overlay)]),
+            history_entries: vec![group_history_entry(
+                &ctx,
+                "history-group-restore",
+                vec![
+                    (
+                        "cached-a.dcm",
+                        test_image_with_uid("1.2.3", Some(overlay)),
+                        "A",
+                    ),
+                    ("cached-b.dcm", test_image_with_uid("1.2.4", None), "B"),
+                ],
+                0,
+            )],
+            ..Default::default()
+        };
+
+        app.open_history_entry(0, &ctx);
+
+        assert!(app.pending_gsps_overlays.contains_key("1.2.3"));
+        assert!(!app.pending_gsps_overlays.contains_key("9.9.9"));
+        assert!(app.has_available_gsps_overlay());
     }
 
     #[test]
@@ -6158,6 +6349,115 @@ mod tests {
         app.process_pending_history_open(&ctx);
 
         assert_eq!(app.current_single_path, Some(test_meta("target.dcm")));
+    }
+
+    #[test]
+    fn cycle_history_entry_preserves_gsps_across_groups() {
+        let ctx = egui::Context::default();
+        let overlay_a = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 1.0,
+            y: 1.0,
+            units: GspsUnits::Pixel,
+        }]);
+        let overlay_b = GspsOverlay::from_graphics(vec![GspsGraphic::Polyline {
+            points: vec![(0.0, 0.0), (1.0, 1.0)],
+            units: GspsUnits::Display,
+            closed: false,
+        }]);
+
+        let entry_a = group_history_entry(
+            &ctx,
+            "history-group-a",
+            vec![
+                (
+                    "group-a-left.dcm",
+                    test_image_with_uid("1.2.3", Some(overlay_a)),
+                    "A-L",
+                ),
+                (
+                    "group-a-right.dcm",
+                    test_image_with_uid("1.2.4", None),
+                    "A-R",
+                ),
+            ],
+            0,
+        );
+        let entry_b = group_history_entry(
+            &ctx,
+            "history-group-b",
+            vec![
+                (
+                    "group-b-left.dcm",
+                    test_image_with_uid("2.3.4", Some(overlay_b)),
+                    "B-L",
+                ),
+                (
+                    "group-b-right.dcm",
+                    test_image_with_uid("2.3.5", None),
+                    "B-R",
+                ),
+            ],
+            0,
+        );
+        let entry_a_id = entry_a.id.clone();
+        let entry_b_id = entry_b.id.clone();
+        let active_group = match &entry_b.kind {
+            HistoryKind::Group(group) => mammo_group_from_history(group),
+            _ => panic!("entry should be a group"),
+        };
+        let initial_pending_gsps = DicomViewerApp::gsps_overlays_from_history_kind(&entry_b.kind);
+        let mut app = DicomViewerApp {
+            mammo_group: active_group,
+            history_entries: vec![entry_b, entry_a],
+            pending_gsps_overlays: initial_pending_gsps,
+            ..Default::default()
+        };
+
+        assert_eq!(app.current_history_id(), Some(entry_b_id.clone()));
+        assert!(app.has_available_gsps_overlay());
+
+        app.cycle_history_entry(1);
+        process_pending_history_open_twice(&mut app, &ctx);
+        assert_eq!(app.current_history_id(), Some(entry_a_id.clone()));
+        assert!(app.has_available_gsps_overlay());
+
+        app.cycle_history_entry(1);
+        process_pending_history_open_twice(&mut app, &ctx);
+        assert_eq!(app.current_history_id(), Some(entry_b_id.clone()));
+        assert!(app.has_available_gsps_overlay());
+
+        app.cycle_history_entry(1);
+        process_pending_history_open_twice(&mut app, &ctx);
+        assert_eq!(app.current_history_id(), Some(entry_a_id.clone()));
+        assert!(app.has_available_gsps_overlay());
+
+        let entry_a = app
+            .history_entries
+            .iter()
+            .find(|entry| entry.id == entry_a_id)
+            .expect("group A history entry should exist");
+        let HistoryKind::Group(group_a) = &entry_a.kind else {
+            panic!("group A history entry should remain a group");
+        };
+        assert!(group_a.viewports.iter().any(|viewport| viewport
+            .image
+            .gsps_overlay
+            .as_ref()
+            .is_some_and(|overlay| !overlay.is_empty())));
+
+        let entry_b = app
+            .history_entries
+            .iter()
+            .find(|entry| entry.id == entry_b_id)
+            .expect("group B history entry should exist");
+        let HistoryKind::Group(group_b) = &entry_b.kind else {
+            panic!("group B history entry should remain a group");
+        };
+        assert!(group_b.viewports.iter().any(|viewport| viewport
+            .image
+            .gsps_overlay
+            .as_ref()
+            .is_some_and(|overlay| !overlay.is_empty())));
     }
 
     #[test]
