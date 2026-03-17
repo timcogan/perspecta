@@ -403,11 +403,47 @@ impl DicomViewerApp {
         self.sync_current_state_to_history();
     }
 
+    fn detach_removed_gsps_overlays_from_current_study(
+        &mut self,
+        removed_sop_uids: &HashSet<String>,
+    ) {
+        if removed_sop_uids.is_empty() {
+            return;
+        }
+
+        if let Some(image) = self.image.as_mut() {
+            if image
+                .sop_instance_uid
+                .as_ref()
+                .is_some_and(|uid| removed_sop_uids.contains(uid))
+            {
+                image.gsps_overlay = None;
+            }
+        }
+        for viewport in self.mammo_group.iter_mut().filter_map(Option::as_mut) {
+            if viewport
+                .image
+                .sop_instance_uid
+                .as_ref()
+                .is_some_and(|uid| removed_sop_uids.contains(uid))
+            {
+                viewport.image.gsps_overlay = None;
+            }
+        }
+    }
+
     fn set_authoritative_pending_gsps_overlays(&mut self, overlays: HashMap<String, GspsOverlay>) {
         let overlays = overlays
             .into_iter()
             .filter(|(_, overlay)| !overlay.is_empty())
             .collect::<HashMap<_, _>>();
+        let removed_sop_uids = self
+            .pending_gsps_overlays
+            .keys()
+            .filter(|uid| !overlays.contains_key(*uid))
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.detach_removed_gsps_overlays_from_current_study(&removed_sop_uids);
         self.authoritative_gsps_overlay_keys = overlays.keys().cloned().collect();
         self.pending_gsps_overlays = overlays;
         self.attach_pending_gsps_overlays_to_current_study();
@@ -5573,6 +5609,70 @@ mod tests {
                 .get("1.2.3")
                 .map(|overlay| overlay.graphics.len()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn authoritative_pending_gsps_snapshot_detaches_removed_current_overlay() {
+        let ctx = egui::Context::default();
+        let stale_overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 1.0,
+            y: 2.0,
+            units: GspsUnits::Pixel,
+        }]);
+        let replacement_overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Polyline {
+            points: vec![(0.0, 0.0), (1.0, 1.0)],
+            units: GspsUnits::Display,
+            closed: false,
+        }]);
+        let path = test_meta("current-single.dcm");
+        let mut live_image = DicomImage::test_stub(Some(stale_overlay.clone()));
+        live_image.sop_instance_uid = Some("1.2.3".to_string());
+
+        let mut app = DicomViewerApp {
+            image: Some(live_image),
+            current_single_path: Some(path.clone()),
+            texture: Some(test_texture(&ctx, "authoritative-gsps-detach")),
+            pending_gsps_overlays: HashMap::from([("1.2.3".to_string(), stale_overlay)]),
+            history_entries: vec![HistoryEntry {
+                id: history_id_from_paths(std::slice::from_ref(&path)),
+                kind: HistoryKind::Single(Box::new(HistorySingleData {
+                    path,
+                    image: DicomImage::test_stub(None),
+                    texture: test_texture(&ctx, "authoritative-gsps-detach-history"),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    cine_fps: DEFAULT_CINE_FPS,
+                })),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        app.set_authoritative_pending_gsps_overlays(HashMap::from([(
+            "9.9.9".to_string(),
+            replacement_overlay,
+        )]));
+
+        assert!(
+            app.image
+                .as_ref()
+                .and_then(|image| image.gsps_overlay.as_ref())
+                .is_none(),
+            "current study should detach overlays that are no longer authoritative"
+        );
+        assert!(!app.pending_gsps_overlays.contains_key("1.2.3"));
+        assert!(app.pending_gsps_overlays.contains_key("9.9.9"));
+        assert!(!app.authoritative_gsps_overlay_keys.contains("1.2.3"));
+        assert!(app.authoritative_gsps_overlay_keys.contains("9.9.9"));
+
+        let HistoryKind::Single(single) = &app.history_entries[0].kind else {
+            panic!("expected single history entry");
+        };
+        assert!(
+            single.image.gsps_overlay.is_none(),
+            "history cache should persist removal of stale authoritative overlays"
         );
     }
 
