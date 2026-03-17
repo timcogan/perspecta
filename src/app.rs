@@ -1625,6 +1625,8 @@ impl DicomViewerApp {
                         .filter_map(Option::as_ref)
                         .find(|viewport| viewport.path == cached_viewport.path)
                     {
+                        cached_viewport.image.gsps_overlay =
+                            active_viewport.image.gsps_overlay.clone();
                         cached_viewport.texture = active_viewport.texture.clone();
                         cached_viewport.window_center = active_viewport.window_center;
                         cached_viewport.window_width = active_viewport.window_width;
@@ -6023,6 +6025,104 @@ mod tests {
         assert!(
             single.image.gsps_overlay.is_some(),
             "single-view history entry should keep GSPS backfills from the live image"
+        );
+    }
+
+    #[test]
+    fn sync_current_state_to_history_persists_group_view_gsps_removal() {
+        let ctx = egui::Context::default();
+        let stale_overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 2.0,
+            y: 2.0,
+            units: GspsUnits::Pixel,
+        }]);
+        let texture_image = ColorImage {
+            size: [1, 1],
+            pixels: vec![egui::Color32::BLACK],
+        };
+        let texture_a = ctx.load_texture(
+            "group-history-gsps-removal-a",
+            texture_image.clone(),
+            TextureOptions::LINEAR,
+        );
+        let texture_b = ctx.load_texture(
+            "group-history-gsps-removal-b",
+            texture_image,
+            TextureOptions::LINEAR,
+        );
+        let path_a = test_meta("group-a.dcm");
+        let path_b = test_meta("group-b.dcm");
+
+        let mut app = DicomViewerApp {
+            mammo_group: vec![
+                Some(MammoViewport {
+                    path: path_a.clone(),
+                    image: DicomImage::test_stub(None),
+                    texture: texture_a.clone(),
+                    label: "A".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+                Some(MammoViewport {
+                    path: path_b.clone(),
+                    image: DicomImage::test_stub(None),
+                    texture: texture_b.clone(),
+                    label: "B".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+            ],
+            history_entries: vec![HistoryEntry {
+                id: history_id_from_paths(&[path_a.clone(), path_b.clone()]),
+                kind: HistoryKind::Group(HistoryGroupData {
+                    viewports: vec![
+                        HistoryGroupViewportData {
+                            path: path_a,
+                            image: DicomImage::test_stub(None),
+                            texture: texture_a,
+                            label: "A".to_string(),
+                            window_center: 0.0,
+                            window_width: 1.0,
+                            current_frame: 0,
+                        },
+                        HistoryGroupViewportData {
+                            path: path_b.clone(),
+                            image: DicomImage::test_stub(Some(stale_overlay)),
+                            texture: texture_b,
+                            label: "B".to_string(),
+                            window_center: 0.0,
+                            window_width: 1.0,
+                            current_frame: 0,
+                        },
+                    ],
+                    selected_index: 0,
+                }),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        app.sync_current_state_to_history();
+
+        let HistoryKind::Group(group) = &app.history_entries[0].kind else {
+            panic!("expected group history entry");
+        };
+        let cached_viewport = group
+            .viewports
+            .iter()
+            .find(|viewport| viewport.path == path_b)
+            .expect("group history should keep the second viewport");
+        assert!(
+            cached_viewport.image.gsps_overlay.is_none(),
+            "group history entry should persist GSPS removals from the live viewport"
         );
     }
 
