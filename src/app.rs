@@ -404,6 +404,10 @@ impl DicomViewerApp {
     }
 
     fn set_authoritative_pending_gsps_overlays(&mut self, overlays: HashMap<String, GspsOverlay>) {
+        let overlays = overlays
+            .into_iter()
+            .filter(|(_, overlay)| !overlay.is_empty())
+            .collect::<HashMap<_, _>>();
         self.authoritative_gsps_overlay_keys = overlays.keys().cloned().collect();
         self.pending_gsps_overlays = overlays;
         self.attach_pending_gsps_overlays_to_current_study();
@@ -5541,6 +5545,35 @@ mod tests {
             overlay.graphics[0].graphic,
             GspsGraphic::Polyline { .. }
         ));
+    }
+
+    #[test]
+    fn authoritative_pending_gsps_snapshot_drops_empty_entries_before_locking() {
+        let mut app = DicomViewerApp::default();
+
+        app.set_authoritative_pending_gsps_overlays(HashMap::from([(
+            "1.2.3".to_string(),
+            GspsOverlay::default(),
+        )]));
+
+        assert!(app.pending_gsps_overlays.is_empty());
+        assert!(app.authoritative_gsps_overlay_keys.is_empty());
+
+        app.merge_pending_gsps_overlays(HashMap::from([(
+            "1.2.3".to_string(),
+            GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+                x: 5.0,
+                y: 6.0,
+                units: GspsUnits::Pixel,
+            }]),
+        )]));
+
+        assert_eq!(
+            app.pending_gsps_overlays
+                .get("1.2.3")
+                .map(|overlay| overlay.graphics.len()),
+            Some(1)
+        );
     }
 
     #[test]
