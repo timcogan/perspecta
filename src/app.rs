@@ -36,6 +36,25 @@ const CONTROL_ACTION_BUTTON_WIDTH: f32 = 100.0;
 const FILE_DROP_OVERLAY_WIDTH: f32 = 420.0;
 const DICOMWEB_ACTIVE_PENDING_BATCH_SIZE: usize = 8;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WlOverlayLayout {
+    slider_row_width: f32,
+    slider_widget_width: f32,
+    action_row_width: f32,
+    area_width: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WlOverlayRow {
+    Center,
+    Width,
+    Frame,
+    CineFps,
+    ToggleCine,
+    ToggleGsps,
+    NextGsps,
+}
+
 #[derive(Clone)]
 struct MammoViewport {
     path: DicomSourceMeta,
@@ -3458,6 +3477,58 @@ impl DicomViewerApp {
         visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
     }
 
+    fn wl_overlay_layout(
+        screen_width: f32,
+        refresh_button_size: f32,
+        item_spacing_x: f32,
+        has_slider_rows: bool,
+        has_action_rows: bool,
+    ) -> WlOverlayLayout {
+        let base_overlay_width = (screen_width * 0.5).clamp(340.0, 760.0);
+        let slider_widget_width = (base_overlay_width * 0.18).clamp(80.0, 132.0);
+        let slider_row_width =
+            slider_widget_width + refresh_button_size + CONTROL_VALUE_WIDTH + 2.0 * item_spacing_x;
+        let action_row_width = CONTROL_ACTION_BUTTON_WIDTH;
+
+        let mut area_width = 0.0;
+        if has_slider_rows {
+            area_width = slider_row_width;
+        }
+        if has_action_rows {
+            area_width = area_width.max(action_row_width);
+        }
+
+        WlOverlayLayout {
+            slider_row_width,
+            slider_widget_width,
+            action_row_width,
+            area_width,
+        }
+    }
+
+    fn show_wl_overlay_row(
+        ctx: &egui::Context,
+        id: &'static str,
+        width: f32,
+        row_height: f32,
+        bottom_offset_y: f32,
+        enabled: bool,
+        add_contents: impl FnOnce(&mut egui::Ui),
+    ) {
+        egui::Area::new(egui::Id::new(id))
+            .movable(false)
+            .default_width(width)
+            .default_height(row_height)
+            .order(egui::Order::Foreground)
+            .anchor(
+                egui::Align2::RIGHT_BOTTOM,
+                egui::vec2(-10.0, -bottom_offset_y),
+            )
+            .show(ctx, |ui| {
+                ui.add_enabled_ui(enabled, |ui| add_contents(ui));
+            });
+    }
+
     fn frame_step_from_scroll(scroll_accum: &mut f32, scroll: f32) -> i32 {
         const DEAD_ZONE: f32 = 0.5;
         const PIXELS_PER_FRAME_STEP: f32 = 30.0;
@@ -4078,40 +4149,70 @@ impl eframe::App for DicomViewerApp {
         let has_gsps_navigation_target = self.next_gsps_navigation_target().is_some();
 
         if let Some(state) = active_state.as_mut() {
-            let overlay_width = (ctx.screen_rect().width() * 0.5).clamp(340.0, 760.0);
-            egui::Area::new(egui::Id::new("wl-overlay-right-bottom"))
-                .order(egui::Order::Foreground)
-                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-10.0, -10.0))
-                .show(ctx, |ui| {
-                    ui.set_min_width(overlay_width);
-                    ui.set_max_width(overlay_width);
-                    let available_width = ui.available_width();
-                    let controls_width = (available_width * 0.92).clamp(260.0, available_width);
-                    let slider_width = (controls_width * 0.84).clamp(220.0, controls_width);
+            let spacing = ctx.style().spacing.clone();
+            let has_slider_rows = state.is_monochrome || state.frame_count > 1;
+            let has_action_rows = state.frame_count > 1 || has_active_gsps_overlay;
+            let wl_layout = Self::wl_overlay_layout(
+                ctx.screen_rect().width(),
+                spacing.interact_size.y,
+                spacing.item_spacing.x,
+                has_slider_rows,
+                has_action_rows,
+            );
 
-                    ui.add_enabled_ui(!history_transition_pending, |ui| {
-                        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                            let item_spacing = ui.spacing().item_spacing;
-                            ui.spacing_mut().item_spacing =
-                                egui::vec2(item_spacing.x, item_spacing.y + 4.0);
+            if wl_layout.area_width > 0.0 {
+                let row_height = spacing.interact_size.y;
+                let row_spacing_y = spacing.item_spacing.y + 4.0;
+                let mut overlay_rows = Vec::new();
+                if state.is_monochrome {
+                    overlay_rows.push(WlOverlayRow::Center);
+                    overlay_rows.push(WlOverlayRow::Width);
+                }
+                if state.frame_count > 1 {
+                    overlay_rows.push(WlOverlayRow::Frame);
+                    overlay_rows.push(WlOverlayRow::CineFps);
+                    overlay_rows.push(WlOverlayRow::ToggleCine);
+                }
+                if has_active_gsps_overlay {
+                    overlay_rows.push(WlOverlayRow::ToggleGsps);
+                    if has_gsps_navigation_target {
+                        overlay_rows.push(WlOverlayRow::NextGsps);
+                    }
+                }
 
-                            if state.is_monochrome {
+                let mut bottom_offset_y = 10.0;
+                for row in overlay_rows.into_iter().rev() {
+                    let (row_id, row_width) = match row {
+                        WlOverlayRow::Center => ("wl-overlay-center", wl_layout.slider_row_width),
+                        WlOverlayRow::Width => ("wl-overlay-width", wl_layout.slider_row_width),
+                        WlOverlayRow::Frame => ("wl-overlay-frame", wl_layout.slider_row_width),
+                        WlOverlayRow::CineFps => {
+                            ("wl-overlay-cine-fps", wl_layout.slider_row_width)
+                        }
+                        WlOverlayRow::ToggleCine => {
+                            ("wl-overlay-toggle-cine", wl_layout.action_row_width)
+                        }
+                        WlOverlayRow::ToggleGsps => {
+                            ("wl-overlay-toggle-gsps", wl_layout.action_row_width)
+                        }
+                        WlOverlayRow::NextGsps => {
+                            ("wl-overlay-next-gsps", wl_layout.action_row_width)
+                        }
+                    };
+
+                    Self::show_wl_overlay_row(
+                        ctx,
+                        row_id,
+                        row_width,
+                        row_height,
+                        bottom_offset_y,
+                        !history_transition_pending,
+                        |ui| match row {
+                            WlOverlayRow::Center => {
                                 let center_range = (state.min_value as f32 - 2000.0)
                                     ..=(state.max_value as f32 + 2000.0);
-                                let max_width = ((state.max_value - state.min_value).abs() as f32
-                                    * 2.0)
-                                    .max(1.0);
-                                let width_range = 1.0..=max_width;
                                 let refresh_button_size = ui.spacing().interact_size.y;
-                                let row_height = ui.spacing().interact_size.y;
-                                let slider_with_refresh_width = (slider_width
-                                    - refresh_button_size
-                                    - CONTROL_VALUE_WIDTH
-                                    - 2.0 * ui.spacing().item_spacing.x)
-                                    .max(120.0);
-
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(controls_width, row_height),
+                                ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui
@@ -4141,20 +4242,30 @@ impl eframe::App for DicomViewerApp {
                                         .changed();
 
                                         request_rebuild |= ui
-                                            .add_sized(
-                                                [slider_with_refresh_width, row_height],
-                                                egui::Slider::new(
-                                                    &mut state.window_center,
-                                                    center_range.clone(),
+                                            .scope(|ui| {
+                                                ui.spacing_mut().slider_width =
+                                                    wl_layout.slider_widget_width;
+                                                ui.add(
+                                                    egui::Slider::new(
+                                                        &mut state.window_center,
+                                                        center_range.clone(),
+                                                    )
+                                                    .show_value(false)
+                                                    .text("Center"),
                                                 )
-                                                .show_value(false)
-                                                .text("Center"),
-                                            )
+                                            })
+                                            .inner
                                             .changed();
                                     },
                                 );
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(controls_width, row_height),
+                            }
+                            WlOverlayRow::Width => {
+                                let max_width = ((state.max_value - state.min_value).abs() as f32
+                                    * 2.0)
+                                    .max(1.0);
+                                let width_range = 1.0..=max_width;
+                                let refresh_button_size = ui.spacing().interact_size.y;
+                                ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui
@@ -4184,33 +4295,28 @@ impl eframe::App for DicomViewerApp {
                                         .changed();
 
                                         request_rebuild |= ui
-                                            .add_sized(
-                                                [slider_with_refresh_width, row_height],
-                                                egui::Slider::new(
-                                                    &mut state.window_width,
-                                                    width_range.clone(),
+                                            .scope(|ui| {
+                                                ui.spacing_mut().slider_width =
+                                                    wl_layout.slider_widget_width;
+                                                ui.add(
+                                                    egui::Slider::new(
+                                                        &mut state.window_width,
+                                                        width_range.clone(),
+                                                    )
+                                                    .show_value(false)
+                                                    .text("Width"),
                                                 )
-                                                .show_value(false)
-                                                .text("Width"),
-                                            )
+                                            })
+                                            .inner
                                             .changed();
                                     },
                                 );
                             }
-
-                            if state.frame_count > 1 {
+                            WlOverlayRow::Frame => {
                                 let mut frame_index = state.current_frame as u32;
                                 let max_frame = state.frame_count.saturating_sub(1) as u32;
                                 let refresh_button_size = ui.spacing().interact_size.y;
-                                let row_height = ui.spacing().interact_size.y;
-                                let slider_with_refresh_width = (slider_width
-                                    - refresh_button_size
-                                    - CONTROL_VALUE_WIDTH
-                                    - 2.0 * ui.spacing().item_spacing.x)
-                                    .max(120.0);
-
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(controls_width, row_height),
+                                ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui
@@ -4246,12 +4352,19 @@ impl eframe::App for DicomViewerApp {
                                         }
 
                                         if ui
-                                            .add_sized(
-                                                [slider_with_refresh_width, row_height],
-                                                egui::Slider::new(&mut frame_index, 0..=max_frame)
+                                            .scope(|ui| {
+                                                ui.spacing_mut().slider_width =
+                                                    wl_layout.slider_widget_width;
+                                                ui.add(
+                                                    egui::Slider::new(
+                                                        &mut frame_index,
+                                                        0..=max_frame,
+                                                    )
                                                     .show_value(false)
                                                     .text("Frame"),
-                                            )
+                                                )
+                                            })
+                                            .inner
                                             .changed()
                                         {
                                             state.current_frame = frame_index as usize;
@@ -4260,12 +4373,10 @@ impl eframe::App for DicomViewerApp {
                                         }
                                     },
                                 );
-
+                            }
+                            WlOverlayRow::CineFps => {
                                 let refresh_button_size = ui.spacing().interact_size.y;
-                                let row_height = ui.spacing().interact_size.y;
-
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(controls_width, row_height),
+                                ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui
@@ -4303,12 +4414,19 @@ impl eframe::App for DicomViewerApp {
                                         }
 
                                         if ui
-                                            .add_sized(
-                                                [slider_with_refresh_width, row_height],
-                                                egui::Slider::new(&mut self.cine_fps, 1.0..=120.0)
+                                            .scope(|ui| {
+                                                ui.spacing_mut().slider_width =
+                                                    wl_layout.slider_widget_width;
+                                                ui.add(
+                                                    egui::Slider::new(
+                                                        &mut self.cine_fps,
+                                                        1.0..=120.0,
+                                                    )
                                                     .show_value(false)
                                                     .text("Cine FPS"),
-                                            )
+                                                )
+                                            })
+                                            .inner
                                             .changed()
                                         {
                                             self.cine_fps = self.cine_fps.clamp(1.0, 120.0);
@@ -4316,9 +4434,9 @@ impl eframe::App for DicomViewerApp {
                                         }
                                     },
                                 );
-
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(controls_width, 0.0),
+                            }
+                            WlOverlayRow::ToggleCine => {
+                                ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if Self::add_action_control_button_no_border(
@@ -4340,10 +4458,8 @@ impl eframe::App for DicomViewerApp {
                                     },
                                 );
                             }
-
-                            if has_active_gsps_overlay {
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(controls_width, 0.0),
+                            WlOverlayRow::ToggleGsps => {
+                                ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if Self::add_action_control_button_no_border(
@@ -4364,34 +4480,34 @@ impl eframe::App for DicomViewerApp {
                                         }
                                     },
                                 );
-
-                                if has_gsps_navigation_target {
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(controls_width, 0.0),
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if Self::add_action_control_button_no_border(
-                                                ui,
-                                                [
-                                                    CONTROL_ACTION_BUTTON_WIDTH,
-                                                    ui.spacing().interact_size.y,
-                                                ],
-                                                "Next GSPS (N)",
-                                            )
-                                            .on_hover_text(
-                                                "Jump to the next GSPS overlay and corresponding frame.",
-                                            )
-                                            .clicked()
-                                            {
-                                                next_gsps_clicked = true;
-                                            }
-                                        },
-                                    );
-                                }
                             }
-                        });
-                    });
-                });
+                            WlOverlayRow::NextGsps => {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if Self::add_action_control_button_no_border(
+                                            ui,
+                                            [
+                                                CONTROL_ACTION_BUTTON_WIDTH,
+                                                ui.spacing().interact_size.y,
+                                            ],
+                                            "Next GSPS (N)",
+                                        )
+                                        .on_hover_text(
+                                            "Jump to the next GSPS overlay and corresponding frame.",
+                                        )
+                                        .clicked()
+                                        {
+                                            next_gsps_clicked = true;
+                                        }
+                                    },
+                                );
+                            }
+                        },
+                    );
+                    bottom_offset_y += row_height + row_spacing_y;
+                }
+            }
         }
 
         if toggle_cine_clicked {
@@ -4910,6 +5026,13 @@ mod tests {
         )
     }
 
+    fn assert_approx_eq(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     fn unique_test_file_path(prefix: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -5195,6 +5318,48 @@ mod tests {
         assert!(!loaded.contains("UnknownField"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn wl_overlay_layout_uses_minimum_width_clamp_for_small_screens() {
+        let layout = DicomViewerApp::wl_overlay_layout(320.0, 20.0, 8.0, true, false);
+
+        assert_approx_eq(layout.slider_row_width, 180.0);
+        assert_approx_eq(layout.slider_widget_width, 80.0);
+        assert_approx_eq(layout.area_width, layout.slider_row_width);
+    }
+
+    #[test]
+    fn wl_overlay_layout_uses_maximum_width_clamp_for_large_screens() {
+        let layout = DicomViewerApp::wl_overlay_layout(2000.0, 20.0, 8.0, true, false);
+
+        assert_approx_eq(layout.slider_row_width, 232.0);
+        assert_approx_eq(layout.slider_widget_width, 132.0);
+        assert_approx_eq(layout.area_width, layout.slider_row_width);
+    }
+
+    #[test]
+    fn wl_overlay_layout_keeps_slider_widget_floor() {
+        let layout = DicomViewerApp::wl_overlay_layout(320.0, 80.0, 40.0, true, false);
+
+        assert_approx_eq(layout.slider_widget_width, 80.0);
+        assert_approx_eq(layout.slider_row_width, 304.0);
+        assert_approx_eq(layout.area_width, layout.slider_row_width);
+    }
+
+    #[test]
+    fn wl_overlay_layout_shrinks_to_action_width_when_no_slider_rows_exist() {
+        let layout = DicomViewerApp::wl_overlay_layout(1400.0, 20.0, 8.0, false, true);
+
+        assert_approx_eq(layout.action_row_width, CONTROL_ACTION_BUTTON_WIDTH);
+        assert_approx_eq(layout.area_width, CONTROL_ACTION_BUTTON_WIDTH);
+    }
+
+    #[test]
+    fn wl_overlay_layout_disables_overlay_when_no_rows_are_visible() {
+        let layout = DicomViewerApp::wl_overlay_layout(1400.0, 20.0, 8.0, false, false);
+
+        assert_approx_eq(layout.area_width, 0.0);
     }
 
     #[test]
