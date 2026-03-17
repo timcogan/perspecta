@@ -3517,6 +3517,7 @@ impl DicomViewerApp {
     ) {
         egui::Area::new(egui::Id::new(id))
             .movable(false)
+            .interactable(enabled)
             .default_width(width)
             .default_height(row_height)
             .order(egui::Order::Foreground)
