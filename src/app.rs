@@ -681,35 +681,20 @@ impl DicomViewerApp {
         overlays
     }
 
+    fn image_has_renderable_overlay(image: &DicomImage, frame_limit: usize) -> bool {
+        !Self::overlay_target_frames(image, frame_limit).is_empty()
+    }
+
     fn has_available_overlay(&self) -> bool {
         if let Some(image) = self.image.as_ref() {
-            let has_gsps = image
-                .gsps_overlay
-                .as_ref()
-                .is_some_and(|overlay| !overlay.is_empty());
-            let has_sr = image.sr_overlay.as_ref().is_some_and(|overlay| {
-                overlay
-                    .graphics
-                    .iter()
-                    .any(|graphic| graphic.rendering_intent.is_visible_in_v1())
-            });
-            return has_gsps || has_sr;
+            return Self::image_has_renderable_overlay(image, image.frame_count());
         }
 
-        self.loaded_mammo_viewports().any(|viewport| {
-            let has_gsps = viewport
-                .image
-                .gsps_overlay
-                .as_ref()
-                .is_some_and(|overlay| !overlay.is_empty());
-            let has_sr = viewport.image.sr_overlay.as_ref().is_some_and(|overlay| {
-                overlay
-                    .graphics
-                    .iter()
-                    .any(|graphic| graphic.rendering_intent.is_visible_in_v1())
-            });
-            has_gsps || has_sr
-        })
+        let common_frame_count = self.mammo_group_common_frame_count();
+        common_frame_count > 0
+            && self.loaded_mammo_viewports().any(|viewport| {
+                Self::image_has_renderable_overlay(&viewport.image, common_frame_count)
+            })
     }
 
     fn toggle_overlay(&mut self) {
@@ -6384,7 +6369,7 @@ mod tests {
 
     #[test]
     fn has_available_overlay_counts_required_sr_overlay() {
-        let mut image = DicomImage::test_stub(None);
+        let mut image = DicomImage::test_stub_with_mono_frames(None, 1);
         image.sr_overlay = Some(SrOverlay {
             graphics: vec![SrOverlayGraphic {
                 graphic: GspsGraphic::Point {
@@ -6429,6 +6414,86 @@ mod tests {
     }
 
     #[test]
+    fn has_available_overlay_ignores_non_renderable_single_frame_overlay() {
+        let overlay = GspsOverlay {
+            graphics: vec![crate::dicom::GspsOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 2.0,
+                    y: 3.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: Some(vec![9]),
+            }],
+        };
+        let app = DicomViewerApp {
+            image: Some(DicomImage::test_stub_with_mono_frames(Some(overlay), 4)),
+            ..Default::default()
+        };
+
+        assert!(!app.has_available_overlay());
+    }
+
+    #[test]
+    fn has_available_overlay_ignores_group_overlay_outside_common_frame_count() {
+        let ctx = egui::Context::default();
+        let texture_image = ColorImage {
+            size: [1, 1],
+            pixels: vec![egui::Color32::BLACK],
+        };
+        let overlay = GspsOverlay {
+            graphics: vec![crate::dicom::GspsOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 4.0,
+                    y: 5.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: Some(vec![4]),
+            }],
+        };
+        let texture_a = ctx.load_texture(
+            "test-non-renderable-group-a",
+            texture_image.clone(),
+            TextureOptions::LINEAR,
+        );
+        let texture_b = ctx.load_texture(
+            "test-non-renderable-group-b",
+            texture_image,
+            TextureOptions::LINEAR,
+        );
+        let app = DicomViewerApp {
+            mammo_group: vec![
+                Some(MammoViewport {
+                    path: test_meta("non-renderable-a.dcm"),
+                    image: DicomImage::test_stub_with_mono_frames(Some(overlay), 4),
+                    texture: texture_a,
+                    label: "A".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+                Some(MammoViewport {
+                    path: test_meta("non-renderable-b.dcm"),
+                    image: DicomImage::test_stub_with_mono_frames(None, 3),
+                    texture: texture_b,
+                    label: "B".to_string(),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    zoom: 1.0,
+                    pan: egui::Vec2::ZERO,
+                    frame_scroll_accum: 0.0,
+                }),
+            ],
+            ..Default::default()
+        };
+
+        assert!(!app.has_available_overlay());
+    }
+
+    #[test]
     fn toggle_overlay_allows_group_overlay_when_other_viewport_is_selected() {
         let overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
             x: 1.0,
@@ -6452,7 +6517,7 @@ mod tests {
             mammo_group: vec![
                 Some(MammoViewport {
                     path: test_meta("a.dcm"),
-                    image: DicomImage::test_stub(None),
+                    image: DicomImage::test_stub_with_mono_frames(None, 1),
                     texture: texture_a,
                     label: "A".to_string(),
                     window_center: 0.0,
@@ -6464,7 +6529,7 @@ mod tests {
                 }),
                 Some(MammoViewport {
                     path: test_meta("b.dcm"),
-                    image: DicomImage::test_stub(Some(overlay)),
+                    image: DicomImage::test_stub_with_mono_frames(Some(overlay), 1),
                     texture: texture_b,
                     label: "B".to_string(),
                     window_center: 0.0,
