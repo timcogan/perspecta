@@ -359,6 +359,42 @@ impl DicomViewerApp {
         }
     }
 
+    fn insert_missing_gsps_overlays(
+        destination: &mut HashMap<String, GspsOverlay>,
+        source: HashMap<String, GspsOverlay>,
+    ) -> bool {
+        let mut inserted_any = false;
+
+        for (sop_uid, overlay) in source {
+            if overlay.is_empty() || destination.contains_key(&sop_uid) {
+                continue;
+            }
+
+            destination.insert(sop_uid, overlay);
+            inserted_any = true;
+        }
+
+        inserted_any
+    }
+
+    fn insert_missing_sr_overlays(
+        destination: &mut HashMap<String, SrOverlay>,
+        source: HashMap<String, SrOverlay>,
+    ) -> bool {
+        let mut inserted_any = false;
+
+        for (sop_uid, overlay) in source {
+            if overlay.is_empty() || destination.contains_key(&sop_uid) {
+                continue;
+            }
+
+            destination.insert(sop_uid, overlay);
+            inserted_any = true;
+        }
+
+        inserted_any
+    }
+
     fn prepare_load_paths<T>(paths: Vec<T>) -> PreparedLoadPaths
     where
         T: Into<DicomSource>,
@@ -2836,10 +2872,15 @@ impl DicomViewerApp {
         prepared: PreparedLoadPaths,
         ctx: &egui::Context,
     ) -> Result<(), ()> {
-        let paths = prepared.image_paths;
-        let structured_report_paths = prepared.structured_report_paths;
-        if !paths.is_empty() || !structured_report_paths.is_empty() || prepared.gsps_files_found > 0
-        {
+        let PreparedLoadPaths {
+            image_paths: paths,
+            structured_report_paths,
+            gsps_overlays,
+            sr_overlays,
+            gsps_files_found,
+            other_files_found,
+        } = prepared;
+        if !paths.is_empty() || !structured_report_paths.is_empty() || gsps_files_found > 0 {
             self.sync_current_state_to_history();
         }
         let preserve_history_preload = paths.len() == 1
@@ -2847,12 +2888,21 @@ impl DicomViewerApp {
             && !self.dicomweb_active_group_paths.is_empty();
         if !preserve_history_preload {
             self.clear_history_preload();
+            self.pending_gsps_overlays = gsps_overlays;
+            self.authoritative_gsps_overlay_keys.clear();
+            self.pending_sr_overlays = sr_overlays;
+            self.authoritative_sr_overlay_keys.clear();
+            self.overlay_visible = false;
+        } else {
+            let inserted_gsps =
+                Self::insert_missing_gsps_overlays(&mut self.pending_gsps_overlays, gsps_overlays);
+            let inserted_sr =
+                Self::insert_missing_sr_overlays(&mut self.pending_sr_overlays, sr_overlays);
+            if inserted_gsps || inserted_sr {
+                self.attach_pending_gsps_overlays_to_current_study();
+                self.sync_current_state_to_history();
+            }
         }
-        self.pending_gsps_overlays = prepared.gsps_overlays;
-        self.authoritative_gsps_overlay_keys.clear();
-        self.pending_sr_overlays = prepared.sr_overlays;
-        self.authoritative_sr_overlay_keys.clear();
-        self.overlay_visible = false;
 
         if paths.is_empty() {
             if let Some((report_path, remaining_reports)) = structured_report_paths
@@ -2863,13 +2913,13 @@ impl DicomViewerApp {
                 self.load_structured_report_path(report_path, ctx);
                 return Ok(());
             }
-            if prepared.gsps_files_found > 0 {
+            if gsps_files_found > 0 {
                 self.set_load_error("GSPS detected, but no displayable DICOM image was selected.");
                 log::warn!("GSPS detected, but no displayable DICOM image was selected.");
                 ctx.request_repaint();
                 return Err(());
             }
-            if prepared.other_files_found > 0 {
+            if other_files_found > 0 {
                 self.set_load_error(
                     "Selected DICOM objects are not displayable images or structured reports.",
                 );
@@ -7720,6 +7770,40 @@ mod tests {
     fn apply_prepared_load_paths_preserves_history_preload_for_streamed_single_image() {
         let (_tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
         let ctx = egui::Context::default();
+        let existing_gsps = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 1.0,
+            y: 2.0,
+            units: GspsUnits::Pixel,
+        }]);
+        let existing_sr = SrOverlay {
+            graphics: vec![SrOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 3.0,
+                    y: 4.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: None,
+                rendering_intent: SrRenderingIntent::PresentationRequired,
+                cad_operating_point: Some(1.0),
+            }],
+        };
+        let prepared_gsps = GspsOverlay::from_graphics(vec![GspsGraphic::Polyline {
+            points: vec![(0.0, 0.0), (1.0, 1.0)],
+            units: GspsUnits::Display,
+            closed: false,
+        }]);
+        let prepared_sr = SrOverlay {
+            graphics: vec![SrOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 5.0,
+                    y: 6.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: Some(vec![1]),
+                rendering_intent: SrRenderingIntent::PresentationRequired,
+                cad_operating_point: Some(2.0),
+            }],
+        };
         let mut app = DicomViewerApp {
             dicomweb_active_group_expected: Some(1),
             dicomweb_active_group_paths: vec![test_meta("active-image.dcm")],
@@ -7727,12 +7811,19 @@ mod tests {
             history_preload_queue: VecDeque::from([HistoryPreloadJob::StructuredReport(
                 test_source("queued-report.dcm"),
             )]),
+            pending_gsps_overlays: HashMap::from([("1.2.3".to_string(), existing_gsps)]),
+            authoritative_gsps_overlay_keys: HashSet::from(["1.2.3".to_string()]),
+            pending_sr_overlays: HashMap::from([("4.5.6".to_string(), existing_sr)]),
+            authoritative_sr_overlay_keys: HashSet::from(["4.5.6".to_string()]),
+            overlay_visible: true,
             ..Default::default()
         };
 
         let result = app.apply_prepared_load_paths(
             PreparedLoadPaths {
                 image_paths: vec![test_source("active-image.dcm")],
+                gsps_overlays: HashMap::from([("9.9.9".to_string(), prepared_gsps)]),
+                sr_overlays: HashMap::from([("8.8.8".to_string(), prepared_sr)]),
                 ..Default::default()
             },
             &ctx,
@@ -7741,6 +7832,21 @@ mod tests {
         assert!(result.is_ok());
         assert!(app.history_preload_receiver.is_some());
         assert_eq!(app.history_preload_queue.len(), 1);
+        assert!(app.overlay_visible);
+        assert_eq!(app.pending_gsps_overlays.len(), 2);
+        assert!(app.pending_gsps_overlays.contains_key("1.2.3"));
+        assert!(app.pending_gsps_overlays.contains_key("9.9.9"));
+        assert_eq!(app.pending_sr_overlays.len(), 2);
+        assert!(app.pending_sr_overlays.contains_key("4.5.6"));
+        assert!(app.pending_sr_overlays.contains_key("8.8.8"));
+        assert_eq!(
+            app.authoritative_gsps_overlay_keys,
+            HashSet::from(["1.2.3".to_string()])
+        );
+        assert_eq!(
+            app.authoritative_sr_overlay_keys,
+            HashSet::from(["4.5.6".to_string()])
+        );
     }
 
     #[test]

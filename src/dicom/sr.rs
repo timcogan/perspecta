@@ -23,38 +23,28 @@ impl SrRenderingIntent {
     }
 
     fn from_code(code: &SrCode) -> Option<Self> {
-        let meaning = code.meaning.as_deref().map(normalize_code_token);
-        let value = code.value.as_deref().map(normalize_code_token);
-
-        if meaning
-            .as_deref()
-            .is_some_and(|token| token == "PRESENTATIONREQUIRED")
-            || value
-                .as_deref()
-                .is_some_and(|token| token == "PRESENTATIONREQUIRED")
-        {
+        if code_token_matches(code, "PRESENTATIONREQUIRED") {
             return Some(Self::PresentationRequired);
         }
-        if meaning
-            .as_deref()
-            .is_some_and(|token| token == "PRESENTATIONOPTIONAL")
-            || value
-                .as_deref()
-                .is_some_and(|token| token == "PRESENTATIONOPTIONAL")
-        {
+        if code_token_matches(code, "PRESENTATIONOPTIONAL") {
             return Some(Self::PresentationOptional);
         }
-        if meaning
-            .as_deref()
-            .is_some_and(|token| token == "NOTFORPRESENTATION")
-            || value
-                .as_deref()
-                .is_some_and(|token| token == "NOTFORPRESENTATION")
-        {
+        if code_token_matches(code, "NOTFORPRESENTATION") {
             return Some(Self::NotForPresentation);
         }
         None
     }
+}
+
+fn code_token_matches(code: &SrCode, expected: &str) -> bool {
+    let expected = normalize_code_token(expected);
+    code.meaning
+        .as_deref()
+        .is_some_and(|meaning| normalize_code_token(meaning) == expected)
+        || code
+            .value
+            .as_deref()
+            .is_some_and(|value| normalize_code_token(value) == expected)
 }
 
 #[derive(Debug, Clone)]
@@ -134,7 +124,7 @@ impl SrCode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReferencedImageTarget {
     sop_instance_uid: String,
     referenced_frames: Option<Vec<usize>>,
@@ -509,16 +499,7 @@ fn graphics_from_spatial_coordinates(
     let units = GspsUnits::Pixel;
 
     match spatial_coordinates.graphic_type.as_str() {
-        "POINT" => spatial_coordinates
-            .points
-            .iter()
-            .map(|(x, y)| GspsGraphic::Point {
-                x: *x,
-                y: *y,
-                units,
-            })
-            .collect(),
-        "MULTIPOINT" => spatial_coordinates
+        "POINT" | "MULTIPOINT" => spatial_coordinates
             .points
             .iter()
             .map(|(x, y)| GspsGraphic::Point {

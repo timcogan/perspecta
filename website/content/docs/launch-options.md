@@ -22,14 +22,13 @@ Supported local file counts:
 
 - If a GSPS DICOM or Mammography CAD SR references the active image, an overlay is available.
 - Overlay visibility is `off` by default.
-- Use `G` to toggle overlays on/off.
-- Use `N` to jump to the next visible overlay target.
+- Overlay navigation advances between images/frames that contain overlays.
 
 ## Keyboard Shortcuts
 
 - `C`: toggle cine mode
 - `G`: toggle image overlay (GSPS or Mammography CAD SR, when available)
-- `N`: jump to the next visible overlay target/frame
+- `N`: jump to the next image/frame with an overlay
 - `Tab`: next history item
 - `Shift+Tab`: previous history item
 - `Cmd/Ctrl+W`: close the active study/group; if the window is already empty, close the window

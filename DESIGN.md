@@ -68,12 +68,13 @@ Its primary purpose is consistency during development, not full architecture cov
    - Run all UI-only checks above.
    - Run `cargo test --workspace --all-targets --all-features --locked`.
    - Run module-specific validations for decode and renderer output tests.
-5. Streaming/GSPS/history/concurrency changes (`app.rs` load pipeline, GSPS attach, worker channels):
+5. Streaming/overlay/history/concurrency changes (`app.rs` load pipeline, GSPS/SR attach, worker channels):
    - Run all launch/parsing checks above.
-   - Verify SR-only open uses the dedicated SR parser/UI path and that `load_dicom` rejects SR objects.
-   - Verify mixed image+SR selections keep images in viewports, stage SR documents as separate history entries, and preserve GSPS/SR/history/streaming invariants.
-   - Verify overlay toggle behavior (default off, `G` works when GSPS or Mammography CAD SR overlay exists).
+   - Confirm SR-only open uses the dedicated SR parser/UI path and that `load_dicom` rejects SR objects.
+   - Ensure mixed image+SR selections keep images in active viewports while staging SR documents as separate history entries, without regressing GSPS/SR/history/streaming invariants.
+   - Confirm overlay toggle behavior (default off; `G` only toggles when a GSPS or Mammography CAD SR overlay is available).
 6. Tooling/benchmark changes (`tools/benchmark`, workspace manifests, Makefile/CI command wiring):
+   - Update manifests, Makefile targets, and CI command wiring as required.
    - Run `cargo fmt --all -- --check`.
    - Run `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
    - Run `cargo test --workspace --all-targets --all-features --locked`.
