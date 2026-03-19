@@ -13,8 +13,8 @@ default-run = "perspecta"
 
 [features]
 default = ["jpeg2000"]
-jpeg_ls = ["dicom-pixeldata/charls", "dicom-transfer-syntax-registry/charls"]
-jpeg2000 = ["dicom-pixeldata/openjp2", "dicom-transfer-syntax-registry/openjp2"]
+jpeg_ls = ["dicom-pixeldata/charls"]
+jpeg2000 = ["dicom-pixeldata/openjp2"]
 
 [dependencies]
 anyhow = "1.0"
