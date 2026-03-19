@@ -30,6 +30,7 @@ Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`efram
 - Real-time window/level controls for grayscale workflows.
 - Multi-frame cine playback (`C` key or UI control).
 - GSPS (Grayscale Softcopy Presentation State) overlay support with manual toggle (`G` key, off by default).
+- Mammography CAD SR overlay support on matching images, with the same manual overlay workflow as GSPS.
 - Structured Report (SR) DICOM support with a dedicated text/document view.
 - Mouse-wheel zoom + drag pan in single-image and multi-view (`1x2` / `1x3` / `2x2` / `2x4`) mammo views.
 - Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation and `Shift + drag` for window/level in multi-view layouts.
@@ -150,7 +151,8 @@ This writes a desktop entry under `~/.local/share/applications`.
 ## Keyboard Shortcuts
 
 - `C`: toggle cine mode
-- `G`: toggle GSPS overlay (when available)
+- `G`: toggle image overlay (GSPS or Mammography CAD SR, when available)
+- `N`: jump to the next visible overlay target/frame
 - `Tab`: next history item
 - `Shift+Tab`: previous history item
 - `Cmd/Ctrl+W`: close the active study/group; if the window is already empty, close the window

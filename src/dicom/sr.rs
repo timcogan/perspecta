@@ -1,10 +1,106 @@
+use std::collections::HashMap;
+
 use anyhow::{bail, Result};
 use dicom_object::{DefaultDicomObject, InMemDicomObject, Tag};
 
 use super::{
-    classify_dicom_object, collect_metadata, open_dicom_object, read_item_string, read_string,
-    sequence_items_from_item, sequence_items_from_object, DicomPathKind, DicomSource,
+    classify_dicom_object, collect_metadata, open_dicom_object, read_item_multi_float,
+    read_item_multi_int, read_item_string, read_string, sequence_items_from_item,
+    sequence_items_from_object, DicomPathKind, DicomSource, GspsGraphic, GspsUnits,
+    MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SrRenderingIntent {
+    PresentationRequired,
+    PresentationOptional,
+    NotForPresentation,
+}
+
+impl SrRenderingIntent {
+    pub fn is_visible_in_v1(self) -> bool {
+        matches!(self, Self::PresentationRequired)
+    }
+
+    fn from_code(code: &SrCode) -> Option<Self> {
+        let meaning = code.meaning.as_deref().map(normalize_code_token);
+        let value = code.value.as_deref().map(normalize_code_token);
+
+        if meaning
+            .as_deref()
+            .is_some_and(|token| token == "PRESENTATIONREQUIRED")
+            || value
+                .as_deref()
+                .is_some_and(|token| token == "PRESENTATIONREQUIRED")
+        {
+            return Some(Self::PresentationRequired);
+        }
+        if meaning
+            .as_deref()
+            .is_some_and(|token| token == "PRESENTATIONOPTIONAL")
+            || value
+                .as_deref()
+                .is_some_and(|token| token == "PRESENTATIONOPTIONAL")
+        {
+            return Some(Self::PresentationOptional);
+        }
+        if meaning
+            .as_deref()
+            .is_some_and(|token| token == "NOTFORPRESENTATION")
+            || value
+                .as_deref()
+                .is_some_and(|token| token == "NOTFORPRESENTATION")
+        {
+            return Some(Self::NotForPresentation);
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SrOverlayGraphic {
+    pub graphic: GspsGraphic,
+    pub referenced_frames: Option<Vec<usize>>,
+    pub rendering_intent: SrRenderingIntent,
+    #[allow(dead_code)]
+    pub cad_operating_point: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SrOverlay {
+    pub graphics: Vec<SrOverlayGraphic>,
+}
+
+impl SrOverlay {
+    pub fn is_empty(&self) -> bool {
+        self.graphics.is_empty()
+    }
+
+    pub fn graphics_for_frame(
+        &self,
+        frame_index: usize,
+    ) -> impl Iterator<Item = &SrOverlayGraphic> + '_ {
+        let dicom_frame_number = frame_index.saturating_add(1);
+        self.graphics
+            .iter()
+            .filter(move |graphic| match graphic.referenced_frames.as_ref() {
+                Some(frames) => frames.contains(&dicom_frame_number),
+                None => true,
+            })
+    }
+
+    pub fn visible_graphics_for_frame(
+        &self,
+        frame_index: usize,
+    ) -> impl Iterator<Item = &GspsGraphic> + '_ {
+        self.graphics_for_frame(frame_index).filter_map(|graphic| {
+            graphic
+                .rendering_intent
+                .is_visible_in_v1()
+                .then_some(&graphic.graphic)
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredReportNode {
@@ -22,6 +118,109 @@ pub struct StructuredReportDocument {
     pub verification_flag: Option<String>,
     pub content: Vec<StructuredReportNode>,
     pub metadata: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SrCode {
+    value: Option<String>,
+    meaning: Option<String>,
+}
+
+impl SrCode {
+    fn matches_meaning(&self, expected: &str) -> bool {
+        self.meaning
+            .as_deref()
+            .is_some_and(|meaning| normalize_code_token(meaning) == normalize_code_token(expected))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ReferencedImageTarget {
+    sop_instance_uid: String,
+    referenced_frames: Option<Vec<usize>>,
+}
+
+#[derive(Debug, Clone)]
+struct SrSpatialCoordinates {
+    graphic_type: String,
+    points: Vec<(f32, f32)>,
+}
+
+#[derive(Debug, Clone)]
+struct SrIndexedNode {
+    path: Vec<usize>,
+    relationship_type: Option<String>,
+    referenced_content_item_identifier: Option<Vec<usize>>,
+    concept_name: SrCode,
+    coded_value: SrCode,
+    numeric_value: Option<f32>,
+    image_reference: Option<ReferencedImageTarget>,
+    spatial_coordinates: Option<SrSpatialCoordinates>,
+    children: Vec<SrIndexedNode>,
+}
+
+impl SrIndexedNode {
+    fn is_feature_or_finding(&self) -> bool {
+        self.concept_name.matches_meaning("Composite Feature")
+            || self.concept_name.matches_meaning("Single Image Finding")
+    }
+
+    fn rendering_intent(&self) -> Option<SrRenderingIntent> {
+        self.children
+            .iter()
+            .filter(|child| {
+                child
+                    .relationship_type
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("HAS CONCEPT MOD"))
+                    && child.concept_name.matches_meaning("Rendering Intent")
+            })
+            .find_map(|child| SrRenderingIntent::from_code(&child.coded_value))
+    }
+
+    fn cad_operating_point(&self) -> Option<f32> {
+        self.children
+            .iter()
+            .filter(|child| {
+                child
+                    .relationship_type
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("HAS CONCEPT MOD"))
+                    && child.concept_name.matches_meaning("CAD Operating Point")
+            })
+            .find_map(|child| child.numeric_value)
+    }
+
+    fn property_geometry_nodes<'a>(&'a self, nodes: &mut Vec<&'a SrIndexedNode>) {
+        for child in self.children.iter().filter(|child| {
+            child
+                .relationship_type
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("HAS PROPERTIES"))
+        }) {
+            if child.spatial_coordinates.is_some() {
+                nodes.push(child);
+            }
+            child.property_geometry_nodes(nodes);
+        }
+    }
+
+    fn selected_image_target<'a>(
+        &'a self,
+        image_index: &'a HashMap<Vec<usize>, ReferencedImageTarget>,
+    ) -> Option<&'a ReferencedImageTarget> {
+        for child in &self.children {
+            if let Some(reference) = child.image_reference.as_ref() {
+                return Some(reference);
+            }
+            if let Some(reference_path) = child.referenced_content_item_identifier.as_ref() {
+                if let Some(reference) = image_index.get(reference_path) {
+                    return Some(reference);
+                }
+            }
+        }
+        None
+    }
 }
 
 impl StructuredReportDocument {
@@ -63,6 +262,45 @@ pub fn load_structured_report(source: impl Into<DicomSource>) -> Result<Structur
     Ok(parse_structured_report_document(&obj))
 }
 
+pub fn load_mammography_cad_sr_overlays(
+    source: impl Into<DicomSource>,
+) -> Result<HashMap<String, SrOverlay>> {
+    let source = source.into();
+    let obj = open_dicom_object(&source)?;
+    if classify_dicom_object(&obj) != DicomPathKind::StructuredReport {
+        let sop_class = read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
+        bail!(
+            "{} is not a Structured Report object (SOPClassUID={})",
+            source,
+            sop_class
+        );
+    }
+    Ok(parse_mammography_cad_sr_overlays(&obj))
+}
+
+pub(crate) fn parse_mammography_cad_sr_overlays(
+    obj: &DefaultDicomObject,
+) -> HashMap<String, SrOverlay> {
+    const CONTENT_SEQUENCE: Tag = Tag(0x0040, 0xA730);
+
+    if read_string(obj, "SOPClassUID").as_deref() != Some(MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID) {
+        return HashMap::new();
+    }
+
+    let Some(items) = sequence_items_from_object(obj, CONTENT_SEQUENCE) else {
+        return HashMap::new();
+    };
+
+    let nodes = build_indexed_nodes(items, &[]);
+    let mut image_index = HashMap::new();
+    collect_image_references(&nodes, &mut image_index);
+
+    let mut overlays = HashMap::<String, SrOverlay>::new();
+    collect_mammography_cad_overlays(&nodes, &image_index, &mut overlays);
+    overlays.retain(|_, overlay| !overlay.is_empty());
+    overlays
+}
+
 pub(crate) fn parse_structured_report_document(
     obj: &DefaultDicomObject,
 ) -> StructuredReportDocument {
@@ -102,6 +340,310 @@ pub(crate) fn parse_structured_report_document(
         content,
         metadata: collect_metadata(obj),
     }
+}
+
+fn build_indexed_nodes(items: &[InMemDicomObject], parent_path: &[usize]) -> Vec<SrIndexedNode> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let mut path = parent_path.to_vec();
+            path.push(index.saturating_add(1));
+            parse_indexed_node(item, path)
+        })
+        .collect()
+}
+
+fn parse_indexed_node(item: &InMemDicomObject, path: Vec<usize>) -> SrIndexedNode {
+    const CONTENT_SEQUENCE: Tag = Tag(0x0040, 0xA730);
+    const RELATIONSHIP_TYPE: Tag = Tag(0x0040, 0xA010);
+    const VALUE_TYPE: Tag = Tag(0x0040, 0xA040);
+    const REFERENCED_CONTENT_ITEM_IDENTIFIER: Tag = Tag(0x0040, 0xDB73);
+    const CONCEPT_NAME_CODE_SEQUENCE: Tag = Tag(0x0040, 0xA043);
+    const CONCEPT_CODE_SEQUENCE: Tag = Tag(0x0040, 0xA168);
+
+    let value_type = read_item_string(item, VALUE_TYPE).map(|value| value.to_ascii_uppercase());
+
+    SrIndexedNode {
+        path: path.clone(),
+        relationship_type: read_item_string(item, RELATIONSHIP_TYPE),
+        referenced_content_item_identifier: read_item_multi_int(
+            item,
+            REFERENCED_CONTENT_ITEM_IDENTIFIER,
+        )
+        .map(|parts| {
+            parts
+                .into_iter()
+                .filter_map(|part| usize::try_from(part).ok())
+                .filter(|part| *part > 0)
+                .collect::<Vec<_>>()
+        })
+        .filter(|parts| !parts.is_empty()),
+        concept_name: read_code_from_item(item, CONCEPT_NAME_CODE_SEQUENCE),
+        coded_value: read_code_from_item(item, CONCEPT_CODE_SEQUENCE),
+        numeric_value: parse_numeric_value(item),
+        image_reference: value_type
+            .as_deref()
+            .filter(|value| *value == "IMAGE")
+            .and_then(|_| referenced_image_target_from_sr_item(item)),
+        spatial_coordinates: value_type
+            .as_deref()
+            .filter(|value| *value == "SCOORD")
+            .and_then(|_| parse_spatial_coordinates(item)),
+        children: sequence_items_from_item(item, CONTENT_SEQUENCE)
+            .map(|children| build_indexed_nodes(children, &path))
+            .unwrap_or_default(),
+    }
+}
+
+fn collect_image_references(
+    nodes: &[SrIndexedNode],
+    image_index: &mut HashMap<Vec<usize>, ReferencedImageTarget>,
+) {
+    for node in nodes {
+        if let Some(reference) = node.image_reference.clone() {
+            image_index.insert(node.path.clone(), reference);
+        }
+        collect_image_references(&node.children, image_index);
+    }
+}
+
+fn collect_mammography_cad_overlays(
+    nodes: &[SrIndexedNode],
+    image_index: &HashMap<Vec<usize>, ReferencedImageTarget>,
+    overlays: &mut HashMap<String, SrOverlay>,
+) {
+    for node in nodes {
+        if node.is_feature_or_finding() {
+            let Some(rendering_intent) = node.rendering_intent() else {
+                collect_mammography_cad_overlays(&node.children, image_index, overlays);
+                continue;
+            };
+            if rendering_intent == SrRenderingIntent::NotForPresentation {
+                collect_mammography_cad_overlays(&node.children, image_index, overlays);
+                continue;
+            }
+
+            let cad_operating_point = node.cad_operating_point();
+            let mut geometry_nodes = Vec::new();
+            node.property_geometry_nodes(&mut geometry_nodes);
+
+            for geometry_node in geometry_nodes {
+                let Some(reference) = geometry_node.selected_image_target(image_index) else {
+                    continue;
+                };
+                let Some(spatial_coordinates) = geometry_node.spatial_coordinates.as_ref() else {
+                    continue;
+                };
+                let graphics = graphics_from_spatial_coordinates(spatial_coordinates);
+                if graphics.is_empty() {
+                    continue;
+                }
+
+                let overlay = overlays
+                    .entry(reference.sop_instance_uid.clone())
+                    .or_default();
+                overlay
+                    .graphics
+                    .extend(graphics.into_iter().map(|graphic| SrOverlayGraphic {
+                        graphic,
+                        referenced_frames: reference.referenced_frames.clone(),
+                        rendering_intent,
+                        cad_operating_point,
+                    }));
+            }
+        }
+
+        collect_mammography_cad_overlays(&node.children, image_index, overlays);
+    }
+}
+
+fn referenced_image_target_from_sr_item(item: &InMemDicomObject) -> Option<ReferencedImageTarget> {
+    const REFERENCED_SOP_SEQUENCE: Tag = Tag(0x0008, 0x1199);
+    const REFERENCED_SOP_INSTANCE_UID: Tag = Tag(0x0008, 0x1155);
+    const REFERENCED_FRAME_NUMBER: Tag = Tag(0x0008, 0x1160);
+
+    let reference_item =
+        sequence_items_from_item(item, REFERENCED_SOP_SEQUENCE).and_then(|items| items.first())?;
+    let sop_instance_uid = read_item_string(reference_item, REFERENCED_SOP_INSTANCE_UID)?;
+    let referenced_frames =
+        read_item_multi_int(reference_item, REFERENCED_FRAME_NUMBER).map(|frames| {
+            let mut frames = frames
+                .into_iter()
+                .filter_map(|frame| usize::try_from(frame).ok())
+                .filter(|frame| *frame > 0)
+                .collect::<Vec<_>>();
+            frames.sort_unstable();
+            frames.dedup();
+            frames
+        });
+
+    Some(ReferencedImageTarget {
+        sop_instance_uid,
+        referenced_frames,
+    })
+}
+
+fn parse_spatial_coordinates(item: &InMemDicomObject) -> Option<SrSpatialCoordinates> {
+    const GRAPHIC_DATA: Tag = Tag(0x0070, 0x0022);
+    const GRAPHIC_TYPE: Tag = Tag(0x0070, 0x0023);
+
+    let points = read_item_multi_float(item, GRAPHIC_DATA)
+        .map(parse_graphic_points)
+        .unwrap_or_default();
+    if points.is_empty() {
+        return None;
+    }
+
+    Some(SrSpatialCoordinates {
+        graphic_type: read_item_string(item, GRAPHIC_TYPE)
+            .unwrap_or_else(|| "POLYLINE".to_string())
+            .to_ascii_uppercase(),
+        points,
+    })
+}
+
+fn graphics_from_spatial_coordinates(
+    spatial_coordinates: &SrSpatialCoordinates,
+) -> Vec<GspsGraphic> {
+    let units = GspsUnits::Pixel;
+
+    match spatial_coordinates.graphic_type.as_str() {
+        "POINT" => spatial_coordinates
+            .points
+            .iter()
+            .map(|(x, y)| GspsGraphic::Point {
+                x: *x,
+                y: *y,
+                units,
+            })
+            .collect(),
+        "MULTIPOINT" => spatial_coordinates
+            .points
+            .iter()
+            .map(|(x, y)| GspsGraphic::Point {
+                x: *x,
+                y: *y,
+                units,
+            })
+            .collect(),
+        "CIRCLE" if spatial_coordinates.points.len() >= 2 => {
+            let polyline =
+                approximate_circle(spatial_coordinates.points[0], spatial_coordinates.points[1]);
+            vec![GspsGraphic::Polyline {
+                points: polyline,
+                units,
+                closed: true,
+            }]
+        }
+        "ELLIPSE" if spatial_coordinates.points.len() >= 4 => {
+            let polyline = approximate_ellipse(
+                spatial_coordinates.points[0],
+                spatial_coordinates.points[1],
+                spatial_coordinates.points[2],
+                spatial_coordinates.points[3],
+            );
+            vec![GspsGraphic::Polyline {
+                points: polyline,
+                units,
+                closed: true,
+            }]
+        }
+        "POLYLINE" => vec![GspsGraphic::Polyline {
+            points: spatial_coordinates.points.clone(),
+            units,
+            closed: false,
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn parse_graphic_points(values: Vec<f32>) -> Vec<(f32, f32)> {
+    let mut points = Vec::with_capacity(values.len() / 2);
+    for pair in values.chunks_exact(2) {
+        points.push((pair[0], pair[1]));
+    }
+    points
+}
+
+fn approximate_circle(center: (f32, f32), perimeter: (f32, f32)) -> Vec<(f32, f32)> {
+    const STEPS: usize = 64;
+    let radius = ((perimeter.0 - center.0).powi(2) + (perimeter.1 - center.1).powi(2)).sqrt();
+    if radius <= f32::EPSILON {
+        return vec![center];
+    }
+
+    (0..STEPS)
+        .map(|index| {
+            let t = 2.0_f32 * std::f32::consts::PI * (index as f32 / STEPS as f32);
+            (center.0 + radius * t.cos(), center.1 + radius * t.sin())
+        })
+        .collect()
+}
+
+fn approximate_ellipse(
+    major_start: (f32, f32),
+    major_end: (f32, f32),
+    minor_start: (f32, f32),
+    minor_end: (f32, f32),
+) -> Vec<(f32, f32)> {
+    const STEPS: usize = 64;
+    let center_x = (major_start.0 + major_end.0 + minor_start.0 + minor_end.0) * 0.25;
+    let center_y = (major_start.1 + major_end.1 + minor_start.1 + minor_end.1) * 0.25;
+    let major_vector = (
+        (major_end.0 - major_start.0) * 0.5,
+        (major_end.1 - major_start.1) * 0.5,
+    );
+    let minor_vector = (
+        (minor_end.0 - minor_start.0) * 0.5,
+        (minor_end.1 - minor_start.1) * 0.5,
+    );
+
+    let major_len = (major_vector.0.powi(2) + major_vector.1.powi(2)).sqrt();
+    let minor_len = (minor_vector.0.powi(2) + minor_vector.1.powi(2)).sqrt();
+    if major_len <= f32::EPSILON || minor_len <= f32::EPSILON {
+        return vec![(center_x, center_y)];
+    }
+
+    (0..STEPS)
+        .map(|index| {
+            let t = 2.0_f32 * std::f32::consts::PI * (index as f32 / STEPS as f32);
+            (
+                center_x + major_vector.0 * t.cos() + minor_vector.0 * t.sin(),
+                center_y + major_vector.1 * t.cos() + minor_vector.1 * t.sin(),
+            )
+        })
+        .collect()
+}
+
+fn parse_numeric_value(item: &InMemDicomObject) -> Option<f32> {
+    const MEASURED_VALUE_SEQUENCE: Tag = Tag(0x0040, 0xA300);
+    const NUMERIC_VALUE: Tag = Tag(0x0040, 0xA30A);
+
+    let measured_item =
+        sequence_items_from_item(item, MEASURED_VALUE_SEQUENCE).and_then(|items| items.first())?;
+    read_item_string(measured_item, NUMERIC_VALUE)?
+        .parse::<f32>()
+        .ok()
+}
+
+fn read_code_from_item(item: &InMemDicomObject, tag: Tag) -> SrCode {
+    let Some(code_item) = sequence_items_from_item(item, tag).and_then(|items| items.first())
+    else {
+        return SrCode::default();
+    };
+
+    SrCode {
+        value: read_item_string(code_item, Tag(0x0008, 0x0100)),
+        meaning: read_item_string(code_item, Tag(0x0008, 0x0104)),
+    }
+}
+
+fn normalize_code_token(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_uppercase()
+        .replace([' ', '-', '_'], "")
 }
 
 fn parse_structured_report_nodes(items: &[InMemDicomObject]) -> Vec<StructuredReportNode> {
@@ -213,5 +755,287 @@ fn default_sr_label(value_type: &str) -> &'static str {
         "UIDREF" => "UID Reference",
         "WAVEFORM" => "Referenced Waveform",
         _ => "Structured Report Item",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dicom::{
+        DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID, EXPLICIT_VR_LITTLE_ENDIAN_UID,
+        MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID, STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX,
+    };
+    use dicom_core::value::DataSetSequence;
+    use dicom_core::{DataElement, PrimitiveValue, VR};
+    use dicom_object::FileMetaTableBuilder;
+
+    fn code_item(meaning: &str) -> InMemDicomObject {
+        InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0100), VR::SH, meaning.replace(' ', "_")),
+            DataElement::new(Tag(0x0008, 0x0102), VR::SH, "99TEST"),
+            DataElement::new(Tag(0x0008, 0x0104), VR::LO, meaning),
+        ])
+    }
+
+    fn image_reference_item(
+        sop_instance_uid: &str,
+        referenced_frames: Option<&[i32]>,
+    ) -> InMemDicomObject {
+        let mut referenced = InMemDicomObject::new_empty();
+        referenced.put(DataElement::new(
+            Tag(0x0008, 0x1150),
+            VR::UI,
+            DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID,
+        ));
+        referenced.put(DataElement::new(
+            Tag(0x0008, 0x1155),
+            VR::UI,
+            sop_instance_uid,
+        ));
+        if let Some(referenced_frames) = referenced_frames {
+            referenced.put(DataElement::new(
+                Tag(0x0008, 0x1160),
+                VR::IS,
+                referenced_frames
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\\"),
+            ));
+        }
+
+        InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0040, 0xA040), VR::CS, "IMAGE"),
+            DataElement::new(
+                Tag(0x0008, 0x1199),
+                VR::SQ,
+                DataSetSequence::from(vec![referenced]),
+            ),
+        ])
+    }
+
+    fn referenced_item_identifier_item(path: &[usize]) -> InMemDicomObject {
+        InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0040, 0xDB73),
+            VR::UL,
+            PrimitiveValue::U32(path.iter().map(|part| *part as u32).collect()),
+        )])
+    }
+
+    fn content_item(
+        value_type: &str,
+        relationship_type: Option<&str>,
+        concept_name: Option<&str>,
+        value_elements: Vec<DataElement<InMemDicomObject>>,
+        children: Vec<InMemDicomObject>,
+    ) -> InMemDicomObject {
+        let mut item = InMemDicomObject::new_empty();
+        item.put(DataElement::new(Tag(0x0040, 0xA040), VR::CS, value_type));
+        if let Some(relationship_type) = relationship_type {
+            item.put(DataElement::new(
+                Tag(0x0040, 0xA010),
+                VR::CS,
+                relationship_type,
+            ));
+        }
+        if let Some(concept_name) = concept_name {
+            item.put(DataElement::new(
+                Tag(0x0040, 0xA043),
+                VR::SQ,
+                DataSetSequence::from(vec![code_item(concept_name)]),
+            ));
+        }
+        for value_element in value_elements {
+            item.put(value_element);
+        }
+        if !children.is_empty() {
+            item.put(DataElement::new(
+                Tag(0x0040, 0xA730),
+                VR::SQ,
+                DataSetSequence::from(children),
+            ));
+        }
+        item
+    }
+
+    fn code_content_item(
+        relationship_type: Option<&str>,
+        concept_name: &str,
+        coded_value: &str,
+    ) -> InMemDicomObject {
+        content_item(
+            "CODE",
+            relationship_type,
+            Some(concept_name),
+            vec![DataElement::new(
+                Tag(0x0040, 0xA168),
+                VR::SQ,
+                DataSetSequence::from(vec![code_item(coded_value)]),
+            )],
+            Vec::new(),
+        )
+    }
+
+    fn numeric_content_item(
+        relationship_type: Option<&str>,
+        concept_name: &str,
+        numeric_value: &str,
+    ) -> InMemDicomObject {
+        let measured_value = InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0040, 0xA30A),
+            VR::DS,
+            numeric_value,
+        )]);
+        content_item(
+            "NUM",
+            relationship_type,
+            Some(concept_name),
+            vec![DataElement::new(
+                Tag(0x0040, 0xA300),
+                VR::SQ,
+                DataSetSequence::from(vec![measured_value]),
+            )],
+            Vec::new(),
+        )
+    }
+
+    fn scoord_content_item(
+        relationship_type: Option<&str>,
+        concept_name: &str,
+        graphic_type: &str,
+        graphic_data: &[f32],
+        referenced_item_path: &[usize],
+    ) -> InMemDicomObject {
+        content_item(
+            "SCOORD",
+            relationship_type,
+            Some(concept_name),
+            vec![
+                DataElement::new(Tag(0x0070, 0x0023), VR::CS, graphic_type),
+                DataElement::new(
+                    Tag(0x0070, 0x0022),
+                    VR::FL,
+                    PrimitiveValue::F32(graphic_data.iter().copied().collect()),
+                ),
+            ],
+            vec![referenced_item_identifier_item(referenced_item_path)],
+        )
+    }
+
+    fn mammography_cad_sr_object(
+        rendering_intent: &str,
+        referenced_frames: Option<&[i32]>,
+        sop_class_uid: &str,
+    ) -> DefaultDicomObject {
+        let image_library = content_item(
+            "CONTAINER",
+            None,
+            Some("Image Library"),
+            Vec::new(),
+            vec![image_reference_item("1.2.3.4", referenced_frames)],
+        );
+        let finding = content_item(
+            "CODE",
+            Some("CONTAINS"),
+            Some("Single Image Finding"),
+            vec![DataElement::new(
+                Tag(0x0040, 0xA168),
+                VR::SQ,
+                DataSetSequence::from(vec![code_item("Mass")]),
+            )],
+            vec![
+                code_content_item(
+                    Some("HAS CONCEPT MOD"),
+                    "Rendering Intent",
+                    rendering_intent,
+                ),
+                numeric_content_item(Some("HAS CONCEPT MOD"), "CAD Operating Point", "2"),
+                scoord_content_item(
+                    Some("HAS PROPERTIES"),
+                    "Center",
+                    "POINT",
+                    &[16.0, 24.0],
+                    &[1, 1],
+                ),
+                scoord_content_item(
+                    Some("HAS PROPERTIES"),
+                    "Outline",
+                    "POLYLINE",
+                    &[10.0, 20.0, 20.0, 30.0, 30.0, 20.0],
+                    &[1, 1],
+                ),
+            ],
+        );
+
+        InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, sop_class_uid),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+            DataElement::new(
+                Tag(0x0040, 0xA730),
+                VR::SQ,
+                DataSetSequence::from(vec![image_library, finding]),
+            ),
+        ])
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                .media_storage_sop_class_uid(sop_class_uid)
+                .media_storage_sop_instance_uid("9.8.7.6"),
+        )
+        .expect("mammography CAD SR test object should build file meta")
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_extracts_required_geometry() {
+        let sr_obj = mammography_cad_sr_object(
+            "Presentation Required",
+            Some(&[2]),
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve image library reference");
+
+        assert_eq!(overlay.graphics.len(), 2);
+        assert_eq!(overlay.graphics[0].referenced_frames, Some(vec![2]));
+        assert_eq!(overlay.visible_graphics_for_frame(1).count(), 2);
+        assert_eq!(
+            overlay.graphics[0].rendering_intent,
+            SrRenderingIntent::PresentationRequired
+        );
+        assert_eq!(overlay.graphics[0].cad_operating_point, Some(2.0));
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_keeps_optional_marks_hidden_in_v1() {
+        let sr_obj = mammography_cad_sr_object(
+            "Presentation Optional",
+            None,
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("optional overlay should still be preserved");
+
+        assert_eq!(overlay.graphics.len(), 2);
+        assert_eq!(overlay.visible_graphics_for_frame(0).count(), 0);
+        assert!(overlay
+            .graphics
+            .iter()
+            .all(|graphic| graphic.rendering_intent == SrRenderingIntent::PresentationOptional));
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_ignores_non_mammo_cad_sr() {
+        let non_mammo_uid = format!("{STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX}11");
+        let sr_obj = mammography_cad_sr_object("Presentation Required", None, &non_mammo_uid);
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+
+        assert!(overlays.is_empty());
     }
 }

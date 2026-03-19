@@ -18,16 +18,18 @@ Supported local file counts:
 - `8` files: opens `2x4`
 - GSPS DICOM files can be included alongside image DICOM files in the same selection; GSPS files are used as overlays and do not count as display slots.
 
-## GSPS Overlay
+## Image Overlay
 
-- If a GSPS DICOM references the active image, an overlay is available.
+- If a GSPS DICOM or Mammography CAD SR references the active image, an overlay is available.
 - Overlay visibility is `off` by default.
-- Use `G` to toggle GSPS overlay on/off.
+- Use `G` to toggle overlays on/off.
+- Use `N` to jump to the next visible overlay target.
 
 ## Keyboard Shortcuts
 
 - `C`: toggle cine mode
-- `G`: toggle GSPS overlay (when available)
+- `G`: toggle image overlay (GSPS or Mammography CAD SR, when available)
+- `N`: jump to the next visible overlay target/frame
 - `Tab`: next history item
 - `Shift+Tab`: previous history item
 - `Cmd/Ctrl+W`: close the active study/group; if the window is already empty, close the window
