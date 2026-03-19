@@ -3115,10 +3115,6 @@ impl DicomViewerApp {
         self.push_report_history_entry(path_meta.clone(), report.clone(), ctx);
         self.report = Some(report);
         self.current_single_path = Some(path_meta);
-        self.pending_gsps_overlays.clear();
-        self.authoritative_gsps_overlay_keys.clear();
-        self.pending_sr_overlays.clear();
-        self.authoritative_sr_overlay_keys.clear();
         ctx.request_repaint();
         log::info!("Loaded selected Structured Report.");
     }
@@ -7938,6 +7934,63 @@ mod tests {
         assert_eq!(
             app.report.as_ref().map(|report| report.title.as_str()),
             Some("Structured Report")
+        );
+    }
+
+    #[test]
+    fn apply_loaded_structured_report_preserves_pending_sr_overlays_for_history_reopen() {
+        let ctx = egui::Context::default();
+        let mut cached_image = DicomImage::test_stub_with_mono_frames(None, 1);
+        cached_image.sop_instance_uid = Some("1.2.3".to_string());
+        let sr_overlay = SrOverlay {
+            graphics: vec![SrOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 6.0,
+                    y: 7.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: None,
+                rendering_intent: SrRenderingIntent::PresentationRequired,
+                cad_operating_point: Some(1.0),
+            }],
+        };
+        let image_path = test_meta("cached-image.dcm");
+        let mut app = DicomViewerApp {
+            pending_sr_overlays: HashMap::from([("1.2.3".to_string(), sr_overlay)]),
+            history_entries: vec![HistoryEntry {
+                id: history_id_from_paths(std::slice::from_ref(&image_path)),
+                kind: HistoryKind::Single(Box::new(HistorySingleData {
+                    path: image_path.clone(),
+                    image: cached_image,
+                    texture: test_texture(&ctx, "report-preserves-pending-sr-image"),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    cine_fps: DEFAULT_CINE_FPS,
+                })),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        app.apply_loaded_structured_report(
+            test_source("report.dcm"),
+            StructuredReportDocument::test_stub(),
+            &ctx,
+        );
+
+        assert!(app.pending_sr_overlays.contains_key("1.2.3"));
+        assert_eq!(app.history_entries.len(), 2);
+
+        app.open_history_entry(1, &ctx);
+
+        assert_eq!(app.current_single_path, Some(image_path));
+        assert!(
+            app.image
+                .as_ref()
+                .and_then(|image| image.sr_overlay.as_ref())
+                .is_some(),
+            "reopening a cached image after report-only open should reattach preserved SR overlays"
         );
     }
 
