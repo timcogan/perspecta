@@ -67,6 +67,8 @@ const IMPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2";
 const EXPLICIT_VR_BIG_ENDIAN_UID: &str = "1.2.840.10008.1.2.2";
 #[cfg(test)]
 pub const BASIC_TEXT_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.11";
+#[cfg(all(test, feature = "jpeg_ls"))]
+const SECONDARY_CAPTURE_IMAGE_STORAGE_UID: &str = "1.2.840.10008.5.1.4.1.1.7";
 // Treat cumulative_delta from read_per_frame_image_positions as meaningful only above 0.001 mm so float noise does not flip reverse-order detection.
 const IMAGE_POSITION_PATIENT_DOMINANT_DELTA_TOLERANCE_MM: f32 = 0.001;
 
@@ -1982,7 +1984,15 @@ mod tests {
     use super::*;
     use dicom_core::value::DataSetSequence;
     use dicom_core::{DataElement, PrimitiveValue, VR};
+    #[cfg(feature = "jpeg_ls")]
+    use dicom_encoding::adapters::EncodeOptions;
     use dicom_object::FileMetaTableBuilder;
+    #[cfg(feature = "jpeg_ls")]
+    use dicom_pixeldata::Transcode;
+    #[cfg(feature = "jpeg_ls")]
+    use dicom_transfer_syntax_registry::entries::{
+        JPEG_LS_LOSSLESS_IMAGE_COMPRESSION, JPEG_LS_LOSSY_IMAGE_COMPRESSION,
+    };
 
     fn multiframe_position_item(image_position_patient: &str) -> InMemDicomObject {
         let plane_position = InMemDicomObject::from_element_iter([DataElement::new(
@@ -2088,6 +2098,54 @@ mod tests {
         object
             .write_all(&mut bytes)
             .expect("multi-frame pixel test object should serialize");
+        bytes
+    }
+
+    #[cfg(feature = "jpeg_ls")]
+    fn monochrome_test_object(rows: u16, cols: u16, pixel_values: &[u8]) -> DefaultDicomObject {
+        assert_eq!(
+            pixel_values.len(),
+            rows as usize * cols as usize,
+            "pixel payload should match image dimensions"
+        );
+
+        InMemDicomObject::from_element_iter([
+            DataElement::new(
+                Tag(0x0008, 0x0016),
+                VR::UI,
+                SECONDARY_CAPTURE_IMAGE_STORAGE_UID,
+            ),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "9.99.123456.2"),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "OT"),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0004), VR::CS, "MONOCHROME2"),
+            DataElement::new(Tag(0x0028, 0x0010), VR::US, PrimitiveValue::from(rows)),
+            DataElement::new(Tag(0x0028, 0x0011), VR::US, PrimitiveValue::from(cols)),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(7u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(0u16)),
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OB,
+                PrimitiveValue::from(pixel_values.to_vec()),
+            ),
+        ])
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                .media_storage_sop_class_uid(SECONDARY_CAPTURE_IMAGE_STORAGE_UID)
+                .media_storage_sop_instance_uid("9.99.123456.2"),
+        )
+        .expect("monochrome test object should build file meta")
+    }
+
+    #[cfg(feature = "jpeg_ls")]
+    fn object_bytes(object: &DefaultDicomObject) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        object
+            .write_all(&mut bytes)
+            .expect("test object should serialize");
         bytes
     }
 
@@ -2631,5 +2689,72 @@ mod tests {
         assert_eq!(image.frame_mono_pixels(1).as_deref(), None);
         assert_eq!(image.frame_mono_pixels(0).as_deref(), Some([33].as_slice()));
         assert_eq!(image.frame_mono_pixels(2).as_deref(), Some([11].as_slice()));
+    }
+
+    #[cfg(feature = "jpeg_ls")]
+    #[test]
+    fn load_dicom_decodes_generated_jpeg_ls_lossless() {
+        let original_pixels = vec![3u8, 17, 99, 120, 200, 250];
+        let mut obj = monochrome_test_object(2, 3, &original_pixels);
+
+        obj.transcode(&JPEG_LS_LOSSLESS_IMAGE_COMPRESSION.erased())
+            .expect("JPEG-LS lossless transcode should succeed");
+
+        let source = DicomSource::from_memory("jpeg-ls-lossless.dcm", object_bytes(&obj));
+        assert_eq!(
+            classify_dicom_path(&source).expect("generated JPEG-LS lossless should classify"),
+            DicomPathKind::Image
+        );
+
+        let image = load_dicom(source).expect("generated JPEG-LS lossless should decode");
+
+        assert_eq!(image.width, 3);
+        assert_eq!(image.height, 2);
+        assert_eq!(image.frame_count(), 1);
+        assert_eq!(image.samples_per_pixel, 1);
+        assert_eq!(image.color_mode, ImageColorMode::Monochrome);
+        assert_eq!(
+            image.frame_mono_pixels(0).as_deref(),
+            Some([3, 17, 99, 120, 200, 250].as_slice())
+        );
+    }
+
+    #[cfg(feature = "jpeg_ls")]
+    #[test]
+    fn load_dicom_decodes_generated_jpeg_ls_near_lossless_with_bounded_error() {
+        let original_pixels = vec![
+            0u8, 15, 31, 47, 63, 79, 95, 111, 127, 143, 159, 175, 191, 207, 223, 239,
+        ];
+        let mut obj = monochrome_test_object(4, 4, &original_pixels);
+        let mut options = EncodeOptions::default();
+        options.quality = Some(75);
+
+        obj.transcode_with_options(&JPEG_LS_LOSSY_IMAGE_COMPRESSION.erased(), options)
+            .expect("JPEG-LS near-lossless transcode should succeed");
+
+        let source = DicomSource::from_memory("jpeg-ls-near-lossless.dcm", object_bytes(&obj));
+        let image = load_dicom(source).expect("generated JPEG-LS near-lossless should decode");
+        let decoded_pixels = image
+            .frame_mono_pixels(0)
+            .expect("decoded near-lossless frame should be available");
+
+        assert_eq!(image.width, 4);
+        assert_eq!(image.height, 4);
+        assert_eq!(image.frame_count(), 1);
+        assert_eq!(image.samples_per_pixel, 1);
+        assert_eq!(image.color_mode, ImageColorMode::Monochrome);
+        assert_eq!(decoded_pixels.len(), original_pixels.len());
+
+        for (expected, actual) in original_pixels
+            .iter()
+            .copied()
+            .map(i32::from)
+            .zip(decoded_pixels.iter().copied())
+        {
+            assert!(
+                (expected - actual).abs() <= 4,
+                "near-lossless pixel delta exceeded margin: expected {expected}, got {actual}"
+            );
+        }
     }
 }
