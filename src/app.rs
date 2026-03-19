@@ -590,6 +590,40 @@ impl DicomViewerApp {
         }
     }
 
+    fn detach_removed_sr_overlays_from_history(&mut self, removed_sop_uids: &HashSet<String>) {
+        if removed_sop_uids.is_empty() {
+            return;
+        }
+
+        for entry in &mut self.history_entries {
+            match &mut entry.kind {
+                HistoryKind::Single(single) => {
+                    if single
+                        .image
+                        .sop_instance_uid
+                        .as_ref()
+                        .is_some_and(|uid| removed_sop_uids.contains(uid))
+                    {
+                        single.image.sr_overlay = None;
+                    }
+                }
+                HistoryKind::Group(group) => {
+                    for viewport in &mut group.viewports {
+                        if viewport
+                            .image
+                            .sop_instance_uid
+                            .as_ref()
+                            .is_some_and(|uid| removed_sop_uids.contains(uid))
+                        {
+                            viewport.image.sr_overlay = None;
+                        }
+                    }
+                }
+                HistoryKind::Report(_) => {}
+            }
+        }
+    }
+
     fn set_authoritative_pending_gsps_overlays(&mut self, overlays: HashMap<String, GspsOverlay>) {
         let overlays = overlays
             .into_iter()
@@ -620,6 +654,7 @@ impl DicomViewerApp {
             .cloned()
             .collect::<HashSet<_>>();
         self.detach_removed_sr_overlays_from_current_study(&removed_sop_uids);
+        self.detach_removed_sr_overlays_from_history(&removed_sop_uids);
         self.authoritative_sr_overlay_keys = overlays.keys().cloned().collect();
         self.pending_sr_overlays = overlays;
         self.attach_pending_gsps_overlays_to_current_study();
@@ -6214,6 +6249,126 @@ mod tests {
         assert!(
             single.image.sr_overlay.is_some(),
             "history cache should persist authoritative SR overlays"
+        );
+    }
+
+    #[test]
+    fn authoritative_pending_sr_snapshot_detaches_removed_cached_history_overlays() {
+        let ctx = egui::Context::default();
+        let stale_overlay = SrOverlay {
+            graphics: vec![SrOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 7.0,
+                    y: 8.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: None,
+                rendering_intent: SrRenderingIntent::PresentationRequired,
+                cad_operating_point: Some(1.0),
+            }],
+        };
+        let unaffected_overlay = SrOverlay {
+            graphics: vec![SrOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 9.0,
+                    y: 10.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: None,
+                rendering_intent: SrRenderingIntent::PresentationRequired,
+                cad_operating_point: Some(2.0),
+            }],
+        };
+
+        let mut single_image = DicomImage::test_stub(None);
+        single_image.sop_instance_uid = Some("1.2.3".to_string());
+        single_image.sr_overlay = Some(stale_overlay.clone());
+
+        let mut grouped_stale_image = DicomImage::test_stub(None);
+        grouped_stale_image.sop_instance_uid = Some("1.2.3".to_string());
+        grouped_stale_image.sr_overlay = Some(stale_overlay.clone());
+
+        let mut grouped_unaffected_image = DicomImage::test_stub(None);
+        grouped_unaffected_image.sop_instance_uid = Some("9.9.9".to_string());
+        grouped_unaffected_image.sr_overlay = Some(unaffected_overlay.clone());
+
+        let mut app = DicomViewerApp {
+            pending_sr_overlays: HashMap::from([("1.2.3".to_string(), stale_overlay)]),
+            authoritative_sr_overlay_keys: HashSet::from(["1.2.3".to_string()]),
+            history_entries: vec![
+                HistoryEntry {
+                    id: history_id_from_paths(&[test_meta("cached-single-sr.dcm")]),
+                    kind: HistoryKind::Single(Box::new(HistorySingleData {
+                        path: test_meta("cached-single-sr.dcm"),
+                        image: single_image,
+                        texture: test_texture(&ctx, "authoritative-sr-detach-history-single"),
+                        window_center: 0.0,
+                        window_width: 1.0,
+                        current_frame: 0,
+                        cine_fps: DEFAULT_CINE_FPS,
+                    })),
+                    thumbs: Vec::new(),
+                },
+                HistoryEntry {
+                    id: history_id_from_paths(&[
+                        test_meta("cached-group-a.dcm"),
+                        test_meta("cached-group-b.dcm"),
+                    ]),
+                    kind: HistoryKind::Group(HistoryGroupData {
+                        viewports: vec![
+                            HistoryGroupViewportData {
+                                path: test_meta("cached-group-a.dcm"),
+                                image: grouped_stale_image,
+                                texture: test_texture(
+                                    &ctx,
+                                    "authoritative-sr-detach-history-group-a",
+                                ),
+                                label: "A".to_string(),
+                                window_center: 0.0,
+                                window_width: 1.0,
+                                current_frame: 0,
+                            },
+                            HistoryGroupViewportData {
+                                path: test_meta("cached-group-b.dcm"),
+                                image: grouped_unaffected_image,
+                                texture: test_texture(
+                                    &ctx,
+                                    "authoritative-sr-detach-history-group-b",
+                                ),
+                                label: "B".to_string(),
+                                window_center: 0.0,
+                                window_width: 1.0,
+                                current_frame: 0,
+                            },
+                        ],
+                        selected_index: 0,
+                    }),
+                    thumbs: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        app.set_authoritative_pending_sr_overlays(HashMap::new());
+
+        let HistoryKind::Single(single) = &app.history_entries[0].kind else {
+            panic!("expected single history entry");
+        };
+        assert!(
+            single.image.sr_overlay.is_none(),
+            "single history cache should clear removed authoritative SR overlays"
+        );
+
+        let HistoryKind::Group(group) = &app.history_entries[1].kind else {
+            panic!("expected group history entry");
+        };
+        assert!(
+            group.viewports[0].image.sr_overlay.is_none(),
+            "group history cache should clear removed authoritative SR overlays"
+        );
+        assert!(
+            group.viewports[1].image.sr_overlay.is_some(),
+            "group history cache should keep unrelated SR overlays"
         );
     }
 
