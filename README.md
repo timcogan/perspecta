@@ -26,7 +26,7 @@ Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`efram
 - Open local DICOM files (`.dcm`) in single-image mode.
 - Open grouped mammography layouts from 2 up to 8 images (`1x2`, `1x3`, `2x2`, `2x4`) with consistent viewport ordering.
 - Decode DICOM `PixelData` through `dicom-pixeldata` (including encapsulated data).
-- JPEG 2000 support via `openjp2`.
+- JPEG 2000 support by default via `openjp2`; optional JPEG-LS support via the `jpeg_ls` feature and `charls`.
 - Real-time window/level controls for grayscale workflows.
 - Multi-frame cine playback (`C` key or UI control).
 - GSPS (Grayscale Softcopy Presentation State) overlay support with manual toggle (`G` key, off by default).
@@ -53,6 +53,12 @@ This project is currently an MVP and actively evolving.
 
 ```bash
 cargo run --release
+```
+
+Enable JPEG-LS decoding explicitly when you need it:
+
+```bash
+cargo run --release --features jpeg_ls
 ```
 
 You can also use Make targets:
@@ -189,7 +195,7 @@ make dev
 
 ## Current Limitations
 
-- Some compressed transfer syntaxes may still depend on codec availability at runtime.
+- Some compressed transfer syntaxes still depend on codec availability at build time.
 - No full study/series stack browser yet.
 - No MPR, measurement tools, or advanced annotation workflow yet.
 

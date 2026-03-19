@@ -11,10 +11,15 @@ repository = "https://github.com/timcogan/perspecta"
 autobins = false
 default-run = "perspecta"
 
+[features]
+default = ["jpeg2000"]
+jpeg_ls = ["dicom-pixeldata/charls"]
+jpeg2000 = ["dicom-pixeldata/openjp2"]
+
 [dependencies]
 anyhow = "1.0"
-dicom-object = "0.7"
-dicom-pixeldata = { version = "0.7", features = ["openjp2"] }
+dicom-object = "0.8.2"
+dicom-pixeldata = "0.8.2"
 eframe = "0.30"
 egui = "0.30"
 log = "0.4"
@@ -22,7 +27,9 @@ rfd = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [dev-dependencies]
-dicom-core = "0.7"
+dicom-core = "0.8.2"
+dicom-encoding = "0.8.2"
+dicom-transfer-syntax-registry = "0.8.2"
 
 [[bin]]
 name = "perspecta"
