@@ -467,7 +467,7 @@ impl DicomViewerApp {
         }
     }
 
-    fn attach_pending_gsps_overlays_to_current_study(&mut self) {
+    fn attach_pending_overlays_to_current_study(&mut self) {
         if self.pending_gsps_overlays.is_empty() && self.pending_sr_overlays.is_empty() {
             return;
         }
@@ -503,7 +503,7 @@ impl DicomViewerApp {
             return;
         }
 
-        self.attach_pending_gsps_overlays_to_current_study();
+        self.attach_pending_overlays_to_current_study();
         self.sync_current_state_to_history();
     }
 
@@ -528,7 +528,7 @@ impl DicomViewerApp {
             return;
         }
 
-        self.attach_pending_gsps_overlays_to_current_study();
+        self.attach_pending_overlays_to_current_study();
         self.sync_current_state_to_history();
     }
 
@@ -638,7 +638,7 @@ impl DicomViewerApp {
         self.detach_removed_gsps_overlays_from_current_study(&removed_sop_uids);
         self.authoritative_gsps_overlay_keys = overlays.keys().cloned().collect();
         self.pending_gsps_overlays = overlays;
-        self.attach_pending_gsps_overlays_to_current_study();
+        self.attach_pending_overlays_to_current_study();
         self.sync_current_state_to_history();
     }
 
@@ -657,7 +657,7 @@ impl DicomViewerApp {
         self.detach_removed_sr_overlays_from_history(&removed_sop_uids);
         self.authoritative_sr_overlay_keys = overlays.keys().cloned().collect();
         self.pending_sr_overlays = overlays;
-        self.attach_pending_gsps_overlays_to_current_study();
+        self.attach_pending_overlays_to_current_study();
         self.sync_current_state_to_history();
     }
 
@@ -1952,7 +1952,7 @@ impl DicomViewerApp {
                         self.current_frame = self.current_frame.min(frame_count.saturating_sub(1));
                     }
                 }
-                self.attach_pending_gsps_overlays_to_current_study();
+                self.attach_pending_overlays_to_current_study();
                 self.sync_current_state_to_history();
                 self.clear_load_error();
                 self.rebuild_texture(ctx);
@@ -1994,7 +1994,7 @@ impl DicomViewerApp {
                 self.mammo_selected_index = selected_index
                     .unwrap_or(group.selected_index)
                     .min(self.mammo_group.len().saturating_sub(1));
-                self.attach_pending_gsps_overlays_to_current_study();
+                self.attach_pending_overlays_to_current_study();
                 self.sync_current_state_to_history();
                 self.clear_load_error();
                 log::info!("Loaded grouped study from memory cache.");
@@ -2919,7 +2919,7 @@ impl DicomViewerApp {
             let inserted_sr =
                 Self::insert_missing_sr_overlays(&mut self.pending_sr_overlays, sr_overlays);
             if inserted_gsps || inserted_sr {
-                self.attach_pending_gsps_overlays_to_current_study();
+                self.attach_pending_overlays_to_current_study();
                 self.sync_current_state_to_history();
             }
         }
