@@ -1,16 +1,16 @@
 +++
 title = "Open Source DICOM Viewer"
-description = "Perspecta is an open source desktop DICOM viewer in Rust for local files, DICOMweb launch, mammography layouts, GSPS overlays, and Structured Reports."
+description = "Perspecta is an open-source desktop DICOM viewer in Rust for local files, DICOMweb launch, mammography layouts, GSPS overlays, and Structured Reports."
 last_updated = "2026-03-20"
 +++
 
-Perspecta is an open source desktop DICOM viewer written in Rust for developers and individual users. It opens local DICOM files, accepts `perspecta://` and DICOMweb launch handoff, supports grouped mammography layouts, shows GSPS and Mammography CAD SR overlays, and opens Structured Reports in a dedicated document view.
+Perspecta is an open-source desktop DICOM viewer written in Rust for developers and individual users. It opens local DICOM files, accepts `perspecta://` and DICOMweb launch handoff, supports grouped mammography layouts, shows GSPS and Mammography CAD SR overlays, and opens Structured Reports in a dedicated document view.
 
 ## Who Perspecta is for
 
 Perspecta fits developers and individual users who need a lightweight desktop viewer and, in some cases, a way to connect that viewer to an existing web application or imaging workflow.
 
-It is especially useful when you need an open source DICOM viewer that can be inspected and built locally, launched from another system, and used for practical review workflows such as mammography comparison and overlay-aware image review.
+It is especially useful when you need an open-source DICOM viewer that can be inspected and built locally, launched from another system, and used for practical review workflows such as mammography comparison and overlay-aware image review.
 
 ## What Perspecta supports
 

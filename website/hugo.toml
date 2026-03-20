@@ -11,6 +11,7 @@ brandName = "Perspecta"
 github = "https://github.com/timcogan/perspecta"
 releases = "https://github.com/timcogan/perspecta/releases"
 docs = "/docs/"
+why_perspecta = "/open-source-dicom-viewer/"
 ga4 = "G-EF5MLHGXBX"
 platforms = ["macOS", "Windows", "Linux"]
 featureList = [
