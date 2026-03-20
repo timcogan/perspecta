@@ -12,7 +12,7 @@ BENCH_COLS ?= 1024
 BENCH_TIMEOUT_SECS ?= 15
 
 help:
-	@echo "Perspecta Viewer - Make targets"
+	@echo "Perspecta DICOM Viewer - Make targets"
 	@echo ""
 	@echo "  make run            Run app (debug)"
 	@echo "  make run-release    Run app (release)"

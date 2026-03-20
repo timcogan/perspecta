@@ -1,9 +1,13 @@
 +++
 title = "Launch Options"
-description = "Open studies via files, groups, and custom URLs."
+description = "Open local files, grouped studies, reports, and custom launch URLs in Perspecta."
 weight = 20
-last_updated = "2026-03-05"
+last_updated = "2026-03-20"
 +++
+
+This page covers how Perspecta opens local files, grouped review sets, reports, and `perspecta://` URLs from external systems.
+
+For keyboard, mouse, layout, and overlay behavior after content opens, see [Viewer Basics](/docs/viewer-basics/).
 
 ## Local Files
 
@@ -18,29 +22,13 @@ Supported local file counts:
 - `8` files: opens `2x4`
 - GSPS DICOM files can be included alongside image DICOM files in the same selection; GSPS files are used as overlays and do not count as display slots.
 
-## Image Overlay
-
-- If a GSPS DICOM or Mammography CAD SR references the active image, an overlay is available.
-- Overlay visibility is `off` by default.
-- Overlay navigation advances between images/frames that contain overlays.
-
-## Keyboard Shortcuts
-
-- `C`: toggle cine mode
-- `G`: toggle image overlay (GSPS or Mammography CAD SR, when available)
-- `N`: jump to the next image/frame with an overlay
-- `Tab`: next history item
-- `Shift+Tab`: previous history item
-- `Cmd/Ctrl+W`: close the active study/group; if the window is already empty, close the window
-- `Cmd/Ctrl+Shift+W`: close the window
-
 ## Grouped Local Launch
 
-Use grouped launch arguments when you need multi-view layouts.
+Use grouped launch arguments when you need to preload multiple review sets and choose which group opens first. This is useful for current/prior mammography comparisons and image-plus-report launch bundles.
 
 ## Custom URL Scheme
 
-Perspecta supports `perspecta://` URLs for local and DICOMweb launch modes.
+Perspecta supports `perspecta://` URLs for both local launch and DICOMweb handoff.
 
 ```text
 perspecta://open?path=example-data%2Fimage.dcm
@@ -73,3 +61,9 @@ perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042%2Fdicom-web&study=<Study
 - Do not embed credentials or tokens in URLs outside local testing; URLs are commonly logged and persisted.
 - If `dicomweb` is provided as a server root (for example `http://localhost:8042`), Perspecta normalizes it to `/dicom-web`.
 - You cannot mix local grouped launch (`group=...`) with DICOMweb launch in the same URI.
+
+## Related Guides
+
+- [Viewer Basics](/docs/viewer-basics/)
+- [DICOMweb](/docs/dicomweb/)
+- [Install Perspecta DICOM Viewer](/docs/install/)

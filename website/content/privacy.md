@@ -1,6 +1,6 @@
 +++
 title = "Privacy Policy"
-description = "Privacy policy for Perspecta."
+description = "Privacy policy for Perspecta DICOM Viewer."
 last_updated = "2026-02-24"
 +++
 

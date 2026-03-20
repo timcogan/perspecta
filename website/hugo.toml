@@ -1,12 +1,23 @@
 baseURL = "https://perspecta.cogan.dev/"
 languageCode = "en-us"
-title = "Perspecta"
+title = "Perspecta DICOM Viewer"
 disableKinds = ["taxonomy", "term", "RSS"]
 enableRobotsTXT = true
 
 [params]
-description = "A fast DICOM viewer built in Rust."
+description = "Open source desktop DICOM viewer built in Rust with DICOMweb launch, mammography layouts, GSPS overlays, and Structured Reports."
+productName = "Perspecta DICOM Viewer"
+brandName = "Perspecta"
 github = "https://github.com/timcogan/perspecta"
 releases = "https://github.com/timcogan/perspecta/releases"
 docs = "/docs/"
+why_perspecta = "/open-source-dicom-viewer/"
 ga4 = "G-EF5MLHGXBX"
+platforms = ["macOS", "Windows", "Linux"]
+featureList = [
+  "Open local DICOM files in single-image mode",
+  "Launch desktop review flows from DICOMweb metadata",
+  "Review mammography layouts from 2 up to 8 images",
+  "Toggle GSPS and Mammography CAD SR overlays on matching images",
+  "Open Structured Reports in a dedicated document view",
+]

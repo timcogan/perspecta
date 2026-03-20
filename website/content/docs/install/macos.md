@@ -1,6 +1,6 @@
 +++
 title = "macOS"
-description = "Build and run Perspecta on macOS."
+description = "Build and run Perspecta DICOM Viewer on macOS."
 weight = 12
 last_updated = "2026-03-04"
 +++

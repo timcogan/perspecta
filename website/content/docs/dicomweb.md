@@ -1,15 +1,19 @@
 +++
 title = "DICOMweb"
-description = "Connect to DICOMweb studies and series."
+description = "Launch Perspecta from DICOMweb study, series, and grouped review context."
 weight = 30
-last_updated = "2026-03-04"
+last_updated = "2026-03-20"
 +++
+
+This page covers DICOMweb launch into Perspecta from a web app, worklist, or imaging system. Use it when you want to open the desktop viewer with study, series, or grouped review context already selected.
 
 ## Supported Flow
 
-- Single-image open from study and series metadata
-- Grouped open for supported multi-view counts
+- Study-level open from DICOMweb metadata
+- Series-level open when you want to target a specific series
+- Grouped open for supported multi-view review counts
 - Streaming active-group updates when available
+- Optional HTTP basic auth for local setups or controlled environments
 
 ## URL Examples
 
@@ -37,3 +41,8 @@ window.location.href = uri;
 
 - Provide both `user` and `password` together when using basic auth.
 - Grouped DICOMweb preload uses `group_series`; each group must resolve to `1`, `2`, `3`, `4`, or `8` displayable items, while supplementary GSPS/SR objects do not count toward that total.
+
+## Related Guides
+
+- [Launch Options](/docs/launch-options/)
+- [Install Perspecta DICOM Viewer](/docs/install/)
