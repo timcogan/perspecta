@@ -17,7 +17,12 @@ mod sr;
 #[allow(unused_imports)]
 pub use gsps::GspsOverlayGraphic;
 pub use gsps::{load_gsps_overlays, GspsGraphic, GspsOverlay, GspsUnits};
-pub use sr::{load_structured_report, StructuredReportDocument, StructuredReportNode};
+pub use sr::{
+    load_mammography_cad_sr_overlays, load_structured_report, SrOverlay, StructuredReportDocument,
+    StructuredReportNode,
+};
+#[cfg(test)]
+pub use sr::{SrOverlayGraphic, SrRenderingIntent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageColorMode {
@@ -62,6 +67,10 @@ pub const METADATA_FIELD_NAMES: &[&str] = &[
 
 pub const GSPS_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.11.1";
 pub const STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX: &str = "1.2.840.10008.5.1.4.1.1.88.";
+pub const MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.50";
+#[cfg(test)]
+pub const DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID: &str =
+    "1.2.840.10008.5.1.4.1.1.1.2";
 pub const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
 const IMPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2";
 const EXPLICIT_VR_BIG_ENDIAN_UID: &str = "1.2.840.10008.1.2.2";
@@ -325,6 +334,7 @@ pub struct DicomImage {
     pub sop_instance_uid: Option<String>,
     reverse_frame_order: bool,
     pub gsps_overlay: Option<GspsOverlay>,
+    pub sr_overlay: Option<SrOverlay>,
     pub metadata: Vec<(String, String)>,
 }
 
@@ -725,6 +735,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 sop_instance_uid,
                 reverse_frame_order,
                 gsps_overlay: None,
+                sr_overlay: None,
                 metadata,
             })
         }
@@ -841,6 +852,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 sop_instance_uid,
                 reverse_frame_order,
                 gsps_overlay: None,
+                sr_overlay: None,
                 metadata,
             })
         }
@@ -1974,6 +1986,7 @@ impl DicomImage {
             sop_instance_uid: None,
             reverse_frame_order,
             gsps_overlay,
+            sr_overlay: None,
             metadata: Vec::new(),
         }
     }
