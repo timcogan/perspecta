@@ -76,6 +76,16 @@ struct PendingLoad {
     image: DicomImage,
 }
 
+struct PendingOverlayState {
+    clear_history_preload: bool,
+    pending_gsps_overlays: HashMap<String, GspsOverlay>,
+    authoritative_gsps_overlay_keys: HashSet<String>,
+    pending_sr_overlays: HashMap<String, SrOverlay>,
+    authoritative_sr_overlay_keys: HashSet<String>,
+    overlay_visible: bool,
+    attach_to_current_study: bool,
+}
+
 enum PendingSingleLoad {
     Image(Box<PendingLoad>),
     StructuredReport {
@@ -395,6 +405,24 @@ impl DicomViewerApp {
         inserted_any
     }
 
+    fn commit_pending_overlay_state(&mut self, pending_overlay_state: PendingOverlayState) {
+        if pending_overlay_state.clear_history_preload {
+            self.clear_history_preload();
+        }
+
+        self.pending_gsps_overlays = pending_overlay_state.pending_gsps_overlays;
+        self.authoritative_gsps_overlay_keys =
+            pending_overlay_state.authoritative_gsps_overlay_keys;
+        self.pending_sr_overlays = pending_overlay_state.pending_sr_overlays;
+        self.authoritative_sr_overlay_keys = pending_overlay_state.authoritative_sr_overlay_keys;
+        self.overlay_visible = pending_overlay_state.overlay_visible;
+
+        if pending_overlay_state.attach_to_current_study {
+            self.attach_pending_overlays_to_current_study();
+            self.sync_current_state_to_history();
+        }
+    }
+
     fn prepare_load_paths<T>(paths: Vec<T>) -> PreparedLoadPaths
     where
         T: Into<DicomSource>,
@@ -624,6 +652,40 @@ impl DicomViewerApp {
         }
     }
 
+    fn detach_removed_gsps_overlays_from_history(&mut self, removed_sop_uids: &HashSet<String>) {
+        if removed_sop_uids.is_empty() {
+            return;
+        }
+
+        for entry in &mut self.history_entries {
+            match &mut entry.kind {
+                HistoryKind::Single(single) => {
+                    if single
+                        .image
+                        .sop_instance_uid
+                        .as_ref()
+                        .is_some_and(|uid| removed_sop_uids.contains(uid))
+                    {
+                        single.image.gsps_overlay = None;
+                    }
+                }
+                HistoryKind::Group(group) => {
+                    for viewport in &mut group.viewports {
+                        if viewport
+                            .image
+                            .sop_instance_uid
+                            .as_ref()
+                            .is_some_and(|uid| removed_sop_uids.contains(uid))
+                        {
+                            viewport.image.gsps_overlay = None;
+                        }
+                    }
+                }
+                HistoryKind::Report(_) => {}
+            }
+        }
+    }
+
     fn set_authoritative_pending_gsps_overlays(&mut self, overlays: HashMap<String, GspsOverlay>) {
         let overlays = overlays
             .into_iter()
@@ -636,6 +698,7 @@ impl DicomViewerApp {
             .cloned()
             .collect::<HashSet<_>>();
         self.detach_removed_gsps_overlays_from_current_study(&removed_sop_uids);
+        self.detach_removed_gsps_overlays_from_history(&removed_sop_uids);
         self.authoritative_gsps_overlay_keys = overlays.keys().cloned().collect();
         self.pending_gsps_overlays = overlays;
         self.attach_pending_overlays_to_current_study();
@@ -2906,29 +2969,40 @@ impl DicomViewerApp {
         let preserve_history_preload = paths.len() == 1
             && self.dicomweb_active_group_expected == Some(1)
             && !self.dicomweb_active_group_paths.is_empty();
-        if !preserve_history_preload {
-            self.clear_history_preload();
-            self.pending_gsps_overlays = gsps_overlays;
-            self.authoritative_gsps_overlay_keys.clear();
-            self.pending_sr_overlays = sr_overlays;
-            self.authoritative_sr_overlay_keys.clear();
-            self.overlay_visible = false;
-        } else {
+        let pending_overlay_state = if preserve_history_preload {
+            let mut new_pending_gsps_overlays = self.pending_gsps_overlays.clone();
+            let mut new_pending_sr_overlays = self.pending_sr_overlays.clone();
             let inserted_gsps =
-                Self::insert_missing_gsps_overlays(&mut self.pending_gsps_overlays, gsps_overlays);
+                Self::insert_missing_gsps_overlays(&mut new_pending_gsps_overlays, gsps_overlays);
             let inserted_sr =
-                Self::insert_missing_sr_overlays(&mut self.pending_sr_overlays, sr_overlays);
-            if inserted_gsps || inserted_sr {
-                self.attach_pending_overlays_to_current_study();
-                self.sync_current_state_to_history();
+                Self::insert_missing_sr_overlays(&mut new_pending_sr_overlays, sr_overlays);
+            PendingOverlayState {
+                clear_history_preload: false,
+                pending_gsps_overlays: new_pending_gsps_overlays,
+                authoritative_gsps_overlay_keys: self.authoritative_gsps_overlay_keys.clone(),
+                pending_sr_overlays: new_pending_sr_overlays,
+                authoritative_sr_overlay_keys: self.authoritative_sr_overlay_keys.clone(),
+                overlay_visible: self.overlay_visible,
+                attach_to_current_study: inserted_gsps || inserted_sr,
             }
-        }
+        } else {
+            PendingOverlayState {
+                clear_history_preload: true,
+                pending_gsps_overlays: gsps_overlays,
+                authoritative_gsps_overlay_keys: HashSet::new(),
+                pending_sr_overlays: sr_overlays,
+                authoritative_sr_overlay_keys: HashSet::new(),
+                overlay_visible: false,
+                attach_to_current_study: false,
+            }
+        };
 
         if paths.is_empty() {
             if let Some((report_path, remaining_reports)) = structured_report_paths
                 .split_first()
                 .map(|(first, rest)| (first.clone(), rest))
             {
+                self.commit_pending_overlay_state(pending_overlay_state);
                 self.stage_structured_report_history_entries(remaining_reports, ctx);
                 self.load_structured_report_path(report_path, ctx);
                 return Ok(());
@@ -2952,18 +3026,18 @@ impl DicomViewerApp {
             return Err(());
         }
 
-        if !structured_report_paths.is_empty() {
-            self.stage_structured_report_history_entries(&structured_report_paths, ctx);
-            log::info!(
-                "Opening {} image DICOM(s) and staging {} structured report object(s) as separate history entries.",
-                paths.len(),
-                structured_report_paths.len()
-            );
-        }
-
         match paths.len() {
             0 => Err(()),
             1 => {
+                if !structured_report_paths.is_empty() {
+                    self.stage_structured_report_history_entries(&structured_report_paths, ctx);
+                    log::info!(
+                        "Opening {} image DICOM(s) and staging {} structured report object(s) as separate history entries.",
+                        paths.len(),
+                        structured_report_paths.len()
+                    );
+                }
+                self.commit_pending_overlay_state(pending_overlay_state);
                 self.single_load_receiver = None;
                 self.mammo_load_receiver = None;
                 self.mammo_load_sender = None;
@@ -2974,6 +3048,15 @@ impl DicomViewerApp {
                 Ok(())
             }
             count if Self::is_supported_multi_view_group_size(count) => {
+                if !structured_report_paths.is_empty() {
+                    self.stage_structured_report_history_entries(&structured_report_paths, ctx);
+                    log::info!(
+                        "Opening {} image DICOM(s) and staging {} structured report object(s) as separate history entries.",
+                        paths.len(),
+                        structured_report_paths.len()
+                    );
+                }
+                self.commit_pending_overlay_state(pending_overlay_state);
                 self.load_mammo_group_paths(paths, ctx);
                 Ok(())
             }
@@ -6174,6 +6257,112 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_pending_gsps_snapshot_detaches_removed_cached_history_overlays() {
+        let ctx = egui::Context::default();
+        let stale_overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 3.0,
+            y: 4.0,
+            units: GspsUnits::Pixel,
+        }]);
+        let unaffected_overlay = GspsOverlay::from_graphics(vec![GspsGraphic::Polyline {
+            points: vec![(0.0, 0.0), (1.0, 1.0)],
+            units: GspsUnits::Display,
+            closed: false,
+        }]);
+
+        let mut single_image = DicomImage::test_stub(None);
+        single_image.sop_instance_uid = Some("1.2.3".to_string());
+        single_image.gsps_overlay = Some(stale_overlay.clone());
+
+        let mut grouped_stale_image = DicomImage::test_stub(None);
+        grouped_stale_image.sop_instance_uid = Some("1.2.3".to_string());
+        grouped_stale_image.gsps_overlay = Some(stale_overlay.clone());
+
+        let mut grouped_unaffected_image = DicomImage::test_stub(None);
+        grouped_unaffected_image.sop_instance_uid = Some("9.9.9".to_string());
+        grouped_unaffected_image.gsps_overlay = Some(unaffected_overlay.clone());
+
+        let mut app = DicomViewerApp {
+            pending_gsps_overlays: HashMap::from([("1.2.3".to_string(), stale_overlay)]),
+            authoritative_gsps_overlay_keys: HashSet::from(["1.2.3".to_string()]),
+            history_entries: vec![
+                HistoryEntry {
+                    id: history_id_from_paths(&[test_meta("cached-single-gsps.dcm")]),
+                    kind: HistoryKind::Single(Box::new(HistorySingleData {
+                        path: test_meta("cached-single-gsps.dcm"),
+                        image: single_image,
+                        texture: test_texture(&ctx, "authoritative-gsps-detach-history-single"),
+                        window_center: 0.0,
+                        window_width: 1.0,
+                        current_frame: 0,
+                        cine_fps: DEFAULT_CINE_FPS,
+                    })),
+                    thumbs: Vec::new(),
+                },
+                HistoryEntry {
+                    id: history_id_from_paths(&[
+                        test_meta("cached-group-gsps-a.dcm"),
+                        test_meta("cached-group-gsps-b.dcm"),
+                    ]),
+                    kind: HistoryKind::Group(HistoryGroupData {
+                        viewports: vec![
+                            HistoryGroupViewportData {
+                                path: test_meta("cached-group-gsps-a.dcm"),
+                                image: grouped_stale_image,
+                                texture: test_texture(
+                                    &ctx,
+                                    "authoritative-gsps-detach-history-group-a",
+                                ),
+                                label: "A".to_string(),
+                                window_center: 0.0,
+                                window_width: 1.0,
+                                current_frame: 0,
+                            },
+                            HistoryGroupViewportData {
+                                path: test_meta("cached-group-gsps-b.dcm"),
+                                image: grouped_unaffected_image,
+                                texture: test_texture(
+                                    &ctx,
+                                    "authoritative-gsps-detach-history-group-b",
+                                ),
+                                label: "B".to_string(),
+                                window_center: 0.0,
+                                window_width: 1.0,
+                                current_frame: 0,
+                            },
+                        ],
+                        selected_index: 0,
+                    }),
+                    thumbs: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        app.set_authoritative_pending_gsps_overlays(HashMap::new());
+
+        let HistoryKind::Single(single) = &app.history_entries[0].kind else {
+            panic!("expected single history entry");
+        };
+        assert!(
+            single.image.gsps_overlay.is_none(),
+            "single history cache should clear removed authoritative GSPS overlays"
+        );
+
+        let HistoryKind::Group(group) = &app.history_entries[1].kind else {
+            panic!("expected group history entry");
+        };
+        assert!(
+            group.viewports[0].image.gsps_overlay.is_none(),
+            "group history cache should clear removed authoritative GSPS overlays"
+        );
+        assert!(
+            group.viewports[1].image.gsps_overlay.is_some(),
+            "group history cache should keep unrelated GSPS overlays"
+        );
+    }
+
+    #[test]
     fn authoritative_pending_sr_snapshot_attaches_to_live_image_and_history() {
         let ctx = egui::Context::default();
         let path = test_meta("current-single-sr.dcm");
@@ -8037,6 +8226,58 @@ mod tests {
             app.load_error_message.as_deref(),
             Some("Selected DICOM objects are not displayable images or structured reports.")
         );
+    }
+
+    #[test]
+    fn apply_prepared_load_paths_rejection_preserves_overlay_state() {
+        let (_tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        let ctx = egui::Context::default();
+        let existing_gsps = GspsOverlay::from_graphics(vec![GspsGraphic::Point {
+            x: 1.0,
+            y: 2.0,
+            units: GspsUnits::Pixel,
+        }]);
+        let existing_sr = SrOverlay {
+            graphics: vec![SrOverlayGraphic {
+                graphic: GspsGraphic::Point {
+                    x: 3.0,
+                    y: 4.0,
+                    units: GspsUnits::Pixel,
+                },
+                referenced_frames: None,
+                rendering_intent: SrRenderingIntent::PresentationRequired,
+                cad_operating_point: Some(1.0),
+            }],
+        };
+        let mut app = DicomViewerApp {
+            history_preload_receiver: Some(rx),
+            history_preload_queue: VecDeque::from([HistoryPreloadJob::StructuredReport(
+                test_source("queued-report.dcm"),
+            )]),
+            pending_gsps_overlays: HashMap::from([("1.2.3".to_string(), existing_gsps)]),
+            authoritative_gsps_overlay_keys: HashSet::from(["1.2.3".to_string()]),
+            pending_sr_overlays: HashMap::from([("4.5.6".to_string(), existing_sr)]),
+            authoritative_sr_overlay_keys: HashSet::from(["4.5.6".to_string()]),
+            overlay_visible: true,
+            ..Default::default()
+        };
+
+        let result = app.apply_prepared_load_paths(
+            PreparedLoadPaths {
+                other_files_found: 1,
+                ..Default::default()
+            },
+            &ctx,
+        );
+
+        assert!(result.is_err());
+        assert!(app.history_preload_receiver.is_some());
+        assert_eq!(app.history_preload_queue.len(), 1);
+        assert!(app.overlay_visible);
+        assert!(app.pending_gsps_overlays.contains_key("1.2.3"));
+        assert!(app.authoritative_gsps_overlay_keys.contains("1.2.3"));
+        assert!(app.pending_sr_overlays.contains_key("4.5.6"));
+        assert!(app.authoritative_sr_overlay_keys.contains("4.5.6"));
     }
 
     #[test]
