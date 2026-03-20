@@ -1,6 +1,6 @@
 +++
 title = "Windows"
-description = "Build and run Perspecta on Windows."
+description = "Build and run Perspecta DICOM Viewer on Windows."
 weight = 13
 last_updated = "2026-03-04"
 +++

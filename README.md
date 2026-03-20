@@ -3,7 +3,7 @@
     <source media="(prefers-color-scheme: light)" srcset="assets/perspecta-light.svg" />
     <img src="assets/perspecta.svg" alt="Perspecta logo" width="20" valign="middle" />
   </picture>
-  Perspecta — Medical Image Viewer
+  Perspecta DICOM Viewer
 </h1>
 <p align="center">
   <picture>
@@ -19,7 +19,7 @@
   <a href="https://perspecta.cogan.dev/"><img alt="Website" src="https://img.shields.io/badge/Website-perspecta.cogan.dev-0ea5e9?style=for-the-badge" /></a>
 </p>
 
-Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`eframe`), focused on fast loading, responsive interaction, and simple launch integration from external systems.
+Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`eframe`) focused on fast loading, responsive interaction, DICOMweb launch, mammography layouts, SR/GSPS overlays, and simple integration from external systems.
 
 ## Highlights
 
@@ -37,10 +37,6 @@ Perspecta Viewer is a native desktop DICOM viewer written in Rust (`egui`/`efram
 - Metadata side panel for quick inspection.
 - Launch through a custom URL scheme (`perspecta://...`).
 - Launch directly from DICOMweb (study/series/instance aware).
-
-## Project Status
-
-This project is currently an MVP and actively evolving.
 
 ## Getting Started
 
@@ -152,7 +148,7 @@ This writes a desktop entry under `~/.local/share/applications`.
 
 - `C`: toggle cine mode
 - `G`: toggle image overlay (GSPS or Mammography CAD SR, when available)
-- `N`: jump to the next visible overlay target/frame
+- `N`: jump to the next image/frame with an overlay
 - `Tab`: next history item
 - `Shift+Tab`: previous history item
 - `Cmd/Ctrl+W`: close the active study/group; if the window is already empty, close the window

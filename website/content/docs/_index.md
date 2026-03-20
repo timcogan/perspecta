@@ -1,8 +1,10 @@
 +++
 title = "Documentation"
-description = "Get started with Perspecta and core workflows."
+description = "Install Perspecta, learn the viewer controls, open local and DICOMweb studies, and integrate launch URLs."
 +++
 
-Perspecta is a native Rust DICOM viewer focused on fast loading and practical integrations.
+Use these docs to install Perspecta, learn the viewer controls, open local files or grouped studies, and connect `perspecta://` or DICOMweb launch flows from another system.
 
-Use the guides below to install, launch, and connect DICOMweb sources.
+If you are comparing options first, start [here](/open-source-dicom-viewer/).
+
+Use the guides below to install the app, learn the core viewer controls, launch it from local files or custom URLs, and connect DICOMweb sources.
