@@ -6,7 +6,8 @@ use reqwest::header::ACCEPT;
 
 use crate::dicom::{
     dicom_identity_key_from_parts, dicom_source_from_bytes_with_identity, is_gsps_sop_class_uid,
-    is_structured_report_sop_class_uid, DicomPathKind, DicomSource,
+    is_parametric_map_sop_class_uid, is_structured_report_sop_class_uid, DicomPathKind,
+    DicomSource,
 };
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest};
 use crate::mammo::{classify_laterality, classify_view};
@@ -325,6 +326,13 @@ fn metadata_instance_kind(instance: &MetadataInstance) -> DicomPathKind {
             .is_some_and(|value| value.eq_ignore_ascii_case("SR"))
     {
         return DicomPathKind::StructuredReport;
+    }
+    if instance
+        .sop_class_uid
+        .as_deref()
+        .is_some_and(is_parametric_map_sop_class_uid)
+    {
+        return DicomPathKind::ParametricMap;
     }
     if instance
         .modality
@@ -1136,7 +1144,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use crate::dicom::{BASIC_TEXT_SR_SOP_CLASS_UID, GSPS_SOP_CLASS_UID};
+    use crate::dicom::{
+        BASIC_TEXT_SR_SOP_CLASS_UID, GSPS_SOP_CLASS_UID, PARAMETRIC_MAP_SOP_CLASS_UID,
+    };
 
     fn metadata_instance(
         instance_uid: &str,
@@ -1404,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn displayable_group_image_count_excludes_structured_reports_and_gsps() {
+    fn displayable_group_image_count_excludes_structured_reports_gsps_and_parametric_maps() {
         let image = metadata_instance("inst_image", Some("CC"), Some("R"), Some(1));
         let structured_report = MetadataInstance {
             instance_uid: "inst_sr".to_string(),
@@ -1417,8 +1427,13 @@ mod tests {
             sop_class_uid: Some(GSPS_SOP_CLASS_UID.to_string()),
             ..metadata_instance("inst_gsps", None, None, Some(3))
         };
+        let parametric_map = MetadataInstance {
+            instance_uid: "inst_pm".to_string(),
+            sop_class_uid: Some(PARAMETRIC_MAP_SOP_CLASS_UID.to_string()),
+            ..metadata_instance("inst_pm", None, None, Some(4))
+        };
 
-        let instances = vec![image, structured_report, gsps];
+        let instances = vec![image, structured_report, gsps, parametric_map];
 
         assert_eq!(displayable_group_image_count(&instances), 1);
         assert!(has_displayable_group_content(&instances));
@@ -1435,6 +1450,18 @@ mod tests {
 
         assert_eq!(displayable_group_image_count(&instances), 0);
         assert!(has_displayable_group_content(&instances));
+    }
+
+    #[test]
+    fn has_displayable_group_content_rejects_parametric_map_only_groups() {
+        let instances = vec![MetadataInstance {
+            instance_uid: "inst_pm".to_string(),
+            sop_class_uid: Some(PARAMETRIC_MAP_SOP_CLASS_UID.to_string()),
+            ..metadata_instance("inst_pm", None, None, Some(1))
+        }];
+
+        assert_eq!(displayable_group_image_count(&instances), 0);
+        assert!(!has_displayable_group_content(&instances));
     }
 
     #[test]
