@@ -1318,6 +1318,7 @@ impl DicomViewerApp {
             return false;
         }
 
+        let overlay_visible = self.overlay_visible;
         let (mut rendered_frames, safe_frames, slots) = {
             let mut slots = Vec::new();
             let inputs = self
@@ -1354,7 +1355,13 @@ impl DicomViewerApp {
                     jobs.push((
                         index,
                         scope.spawn(move || {
-                            Self::render_image_frame(image, *safe_frame, *center, *width, false)
+                            Self::render_image_frame(
+                                image,
+                                *safe_frame,
+                                *center,
+                                *width,
+                                overlay_visible,
+                            )
                         }),
                     ));
                 }
@@ -2282,6 +2289,7 @@ impl DicomViewerApp {
                     .unwrap_or(group.selected_index)
                     .min(self.mammo_group.len().saturating_sub(1));
                 self.attach_pending_overlays_to_current_study();
+                self.refresh_active_textures(ctx);
                 self.sync_current_state_to_history();
                 self.clear_load_error();
                 log::info!("Loaded grouped study from memory cache.");

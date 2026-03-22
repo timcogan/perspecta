@@ -23,12 +23,14 @@ const SHARED_FUNCTIONAL_GROUPS_SEQUENCE: Tag = Tag(0x5200, 0x9229);
 const PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE: Tag = Tag(0x5200, 0x9230);
 const DEFAULT_OVERLAY_ALPHA: f32 = 0.45;
 
+type SourceFrameRgbaIndices = HashMap<usize, Vec<usize>>;
+
 #[derive(Debug, Clone)]
 pub struct ParametricMapOverlayLayer {
     pub width: usize,
     pub height: usize,
-    rgba_frames: Vec<Arc<[u8]>>,
-    referenced_source_frames: Option<Vec<usize>>,
+    rgba_frames: Arc<[Arc<[u8]>]>,
+    source_frame_rgba_indices: Option<SourceFrameRgbaIndices>,
 }
 
 impl ParametricMapOverlayLayer {
@@ -37,17 +39,18 @@ impl ParametricMapOverlayLayer {
             return Vec::new();
         }
 
-        let mut indices = if let Some(referenced_frames) = self.referenced_source_frames.as_ref() {
-            referenced_frames
-                .iter()
-                .filter_map(|frame_number| frame_number.checked_sub(1))
-                .filter(|frame_index| *frame_index < frame_count)
-                .collect::<Vec<_>>()
-        } else if self.rgba_frames.len() == 1 || self.rgba_frames.len() == frame_count {
-            (0..frame_count).collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let mut indices =
+            if let Some(source_frame_rgba_indices) = self.source_frame_rgba_indices.as_ref() {
+                source_frame_rgba_indices
+                    .keys()
+                    .copied()
+                    .filter(|frame_index| *frame_index < frame_count)
+                    .collect::<Vec<_>>()
+            } else if self.rgba_frames.len() == 1 || self.rgba_frames.len() == frame_count {
+                (0..frame_count).collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
 
         indices.sort_unstable();
         indices.dedup();
@@ -65,41 +68,28 @@ impl ParametricMapOverlayLayer {
         &self,
         stored_frame_index: usize,
         target_frame_count: usize,
-    ) -> Option<&Arc<[u8]>> {
+    ) -> Vec<&Arc<[u8]>> {
         if !self.is_compatible_with_target(self.width, self.height, target_frame_count) {
-            return None;
+            return Vec::new();
         }
 
-        if let Some(referenced_frames) = self.referenced_source_frames.as_ref() {
-            if self.rgba_frames.len() == referenced_frames.len() {
-                return referenced_frames
-                    .iter()
-                    .position(|frame_number| {
-                        frame_number
-                            .checked_sub(1)
-                            .is_some_and(|frame_index| frame_index == stored_frame_index)
-                    })
-                    .and_then(|index| self.rgba_frames.get(index));
-            }
-
-            if self.rgba_frames.len() == 1
-                && referenced_frames.iter().any(|frame_number| {
-                    frame_number
-                        .checked_sub(1)
-                        .is_some_and(|frame_index| frame_index == stored_frame_index)
-                })
-            {
-                return self.rgba_frames.first();
-            }
-
-            return None;
+        if let Some(source_frame_rgba_indices) = self.source_frame_rgba_indices.as_ref() {
+            return source_frame_rgba_indices
+                .get(&stored_frame_index)
+                .into_iter()
+                .flat_map(|rgba_indices| rgba_indices.iter())
+                .filter_map(|rgba_index| self.rgba_frames.get(*rgba_index))
+                .collect::<Vec<_>>();
         }
 
         if self.rgba_frames.len() == 1 {
-            return self.rgba_frames.first();
+            return self.rgba_frames.first().into_iter().collect::<Vec<_>>();
         }
 
-        self.rgba_frames.get(stored_frame_index)
+        self.rgba_frames
+            .get(stored_frame_index)
+            .into_iter()
+            .collect::<Vec<_>>()
     }
 }
 
@@ -128,10 +118,12 @@ impl ParametricMapOverlay {
         &self,
         stored_frame_index: usize,
         target_frame_count: usize,
-    ) -> impl Iterator<Item = &Arc<[u8]>> + '_ {
-        self.layers.iter().filter_map(move |layer| {
-            layer.rgba_for_source_frame(stored_frame_index, target_frame_count)
-        })
+    ) -> Vec<&Arc<[u8]>> {
+        let mut rgba_frames = Vec::new();
+        for layer in &self.layers {
+            rgba_frames.extend(layer.rgba_for_source_frame(stored_frame_index, target_frame_count));
+        }
+        rgba_frames
     }
 
     pub fn source_frame_indices(&self, frame_count: usize) -> Vec<usize> {
@@ -150,7 +142,7 @@ impl ParametricMapOverlay {
 struct ParsedParametricMap {
     display_image: DicomImage,
     overlay_layer: ParametricMapOverlayLayer,
-    references: HashMap<String, Option<Vec<usize>>>,
+    references: HashMap<String, Option<SourceFrameRgbaIndices>>,
 }
 
 pub fn load_parametric_map(source: impl Into<DicomSource>) -> Result<DicomImage> {
@@ -168,9 +160,9 @@ pub fn load_parametric_map_overlays(
     let parsed = parse_parametric_map(&obj, &source)?;
 
     let mut overlays = HashMap::<String, ParametricMapOverlay>::new();
-    for (sop_instance_uid, referenced_frames) in parsed.references {
+    for (sop_instance_uid, source_frame_rgba_indices) in parsed.references {
         let mut overlay_layer = parsed.overlay_layer.clone();
-        overlay_layer.referenced_source_frames = referenced_frames;
+        overlay_layer.source_frame_rgba_indices = source_frame_rgba_indices;
         overlays
             .entry(sop_instance_uid)
             .or_default()
@@ -288,10 +280,10 @@ fn parse_parametric_map(
         overlay_layer: ParametricMapOverlayLayer {
             width,
             height,
-            rgba_frames,
-            referenced_source_frames: None,
+            rgba_frames: Arc::<[Arc<[u8]>]>::from(rgba_frames.into_boxed_slice()),
+            source_frame_rgba_indices: None,
         },
-        references: collect_parametric_map_references(obj),
+        references: build_reference_maps(collect_parametric_map_references(obj), frame_count),
     })
 }
 
@@ -414,8 +406,8 @@ fn render_heatmap_rgb(samples: &[f32], min_value: f32, max_value: f32) -> Arc<[u
 fn render_heatmap_rgba(samples: &[f32], min_value: f32, max_value: f32, alpha: f32) -> Arc<[u8]> {
     let mut pixels = Vec::with_capacity(samples.len().saturating_mul(4));
     for &sample in samples {
-        let (r, g, b) = heatmap_rgb(sample, min_value, max_value);
-        let normalized = normalize_sample(sample, min_value, max_value);
+        let normalized = heatmap_normalized(sample, min_value, max_value);
+        let (r, g, b) = heatmap_rgb_from_normalized(normalized);
         let alpha_value = if normalized == 0.0 {
             0
         } else {
@@ -427,7 +419,11 @@ fn render_heatmap_rgba(samples: &[f32], min_value: f32, max_value: f32, alpha: f
 }
 
 fn heatmap_rgb(sample: f32, min_value: f32, max_value: f32) -> (u8, u8, u8) {
-    let normalized = normalize_sample(sample, min_value, max_value);
+    let normalized = heatmap_normalized(sample, min_value, max_value);
+    heatmap_rgb_from_normalized(normalized)
+}
+
+fn heatmap_rgb_from_normalized(normalized: f32) -> (u8, u8, u8) {
     if normalized == 0.0 {
         return (0, 0, 0);
     }
@@ -446,6 +442,18 @@ fn heatmap_rgb(sample: f32, min_value: f32, max_value: f32) -> (u8, u8, u8) {
     (r.round() as u8, g.round() as u8, b.round() as u8)
 }
 
+fn heatmap_normalized(sample: f32, min_value: f32, max_value: f32) -> f32 {
+    if !sample.is_finite() {
+        return 0.0;
+    }
+
+    if (max_value - min_value).abs() <= f32::EPSILON {
+        return 1.0;
+    }
+
+    normalize_sample(sample, min_value, max_value)
+}
+
 fn normalize_sample(sample: f32, min_value: f32, max_value: f32) -> f32 {
     if !sample.is_finite() {
         return 0.0;
@@ -455,10 +463,14 @@ fn normalize_sample(sample: f32, min_value: f32, max_value: f32) -> f32 {
     ((sample - min_value) / range).clamp(0.0, 1.0)
 }
 
-fn collect_parametric_map_references(
-    obj: &DefaultDicomObject,
-) -> HashMap<String, Option<Vec<usize>>> {
-    let mut references = HashMap::new();
+#[derive(Debug)]
+struct RawReferenceTarget {
+    sop_instance_uid: String,
+    referenced_frames: Option<Vec<usize>>,
+}
+
+fn collect_parametric_map_references(obj: &DefaultDicomObject) -> Vec<RawReferenceTarget> {
+    let mut references = Vec::new();
 
     for seq_tag in [
         SOURCE_IMAGE_SEQUENCE,
@@ -480,20 +492,19 @@ fn collect_parametric_map_references(
 
 fn collect_references_from_item(
     item: &dicom_object::InMemDicomObject,
-    references: &mut HashMap<String, Option<Vec<usize>>>,
+    references: &mut Vec<RawReferenceTarget>,
 ) {
     if let Some(sop_instance_uid) = read_item_string(item, REFERENCED_SOP_INSTANCE_UID) {
-        merge_reference(
-            references,
+        references.push(RawReferenceTarget {
             sop_instance_uid,
-            read_item_multi_int(item, REFERENCED_FRAME_NUMBER).map(|frames| {
+            referenced_frames: read_item_multi_int(item, REFERENCED_FRAME_NUMBER).map(|frames| {
                 frames
                     .into_iter()
                     .filter_map(|frame| usize::try_from(frame).ok())
                     .filter(|frame| *frame > 0)
                     .collect::<Vec<_>>()
             }),
-        );
+        });
     }
 
     for seq_tag in [
@@ -510,38 +521,49 @@ fn collect_references_from_item(
     }
 }
 
-fn merge_reference(
-    references: &mut HashMap<String, Option<Vec<usize>>>,
-    sop_instance_uid: String,
-    referenced_frames: Option<Vec<usize>>,
-) {
-    let referenced_frames = referenced_frames
-        .map(|mut frames| {
-            frames.sort_unstable();
-            frames.dedup();
-            frames
-        })
-        .filter(|frames| !frames.is_empty());
+fn build_reference_maps(
+    references: Vec<RawReferenceTarget>,
+    rgba_frame_count: usize,
+) -> HashMap<String, Option<SourceFrameRgbaIndices>> {
+    let mut explicit_mappings = HashMap::<String, Option<SourceFrameRgbaIndices>>::new();
+    let mut next_rgba_index = 0usize;
 
-    match references.get_mut(&sop_instance_uid) {
-        Some(existing) => {
-            if existing.is_none() || referenced_frames.is_none() {
-                *existing = None;
-                return;
+    for reference in references {
+        let referenced_frames = reference
+            .referenced_frames
+            .filter(|frames| !frames.is_empty());
+        match referenced_frames {
+            Some(frames) => {
+                for frame_number in frames {
+                    if !matches!(
+                        explicit_mappings.get(&reference.sop_instance_uid),
+                        Some(None)
+                    ) {
+                        let mapping = explicit_mappings
+                            .entry(reference.sop_instance_uid.clone())
+                            .or_insert_with(|| Some(HashMap::new()));
+                        if next_rgba_index < rgba_frame_count {
+                            if let Some(source_frame_rgba_indices) = mapping.as_mut() {
+                                source_frame_rgba_indices
+                                    .entry(frame_number - 1)
+                                    .or_default()
+                                    .push(next_rgba_index);
+                            }
+                        }
+                    }
+                    next_rgba_index = next_rgba_index.saturating_add(1);
+                }
             }
-
-            if let (Some(existing_frames), Some(new_frames)) =
-                (existing.as_mut(), referenced_frames.as_ref())
-            {
-                existing_frames.extend(new_frames.iter().copied());
-                existing_frames.sort_unstable();
-                existing_frames.dedup();
+            None => {
+                explicit_mappings.insert(reference.sop_instance_uid, None);
             }
-        }
-        None => {
-            references.insert(sop_instance_uid, referenced_frames);
         }
     }
+
+    explicit_mappings.retain(|_, mapping| {
+        mapping.is_none() || mapping.as_ref().is_some_and(|indices| !indices.is_empty())
+    });
+    explicit_mappings
 }
 
 #[cfg(test)]
@@ -555,11 +577,34 @@ mod tests {
         PARAMETRIC_MAP_SOP_CLASS_UID,
     };
 
+    #[derive(Clone, Copy)]
+    struct TestReference<'a> {
+        uid: &'a str,
+        frames: Option<&'a [usize]>,
+    }
+
     fn build_parametric_map_test_object(
         pixel_data: InMemElement,
         number_of_frames: usize,
         referenced_uid: Option<&str>,
         referenced_frames: Option<&[usize]>,
+    ) -> DefaultDicomObject {
+        let references = referenced_uid
+            .map(|uid| {
+                vec![TestReference {
+                    uid,
+                    frames: referenced_frames,
+                }]
+            })
+            .unwrap_or_default();
+
+        build_parametric_map_test_object_with_references(pixel_data, number_of_frames, &references)
+    }
+
+    fn build_parametric_map_test_object_with_references(
+        pixel_data: InMemElement,
+        number_of_frames: usize,
+        references: &[TestReference<'_>],
     ) -> DefaultDicomObject {
         let mut elements = vec![
             DataElement::new(Tag(0x0008, 0x0016), VR::UI, PARAMETRIC_MAP_SOP_CLASS_UID),
@@ -572,27 +617,33 @@ mod tests {
             DataElement::new(Tag(0x0028, 0x0008), VR::IS, number_of_frames.to_string()),
         ];
 
-        if let Some(uid) = referenced_uid {
-            let mut reference = dicom_object::InMemDicomObject::from_element_iter([
-                DataElement::new(
-                    Tag(0x0008, 0x1150),
-                    VR::UI,
-                    DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID,
-                ),
-                DataElement::new(Tag(0x0008, 0x1155), VR::UI, uid),
-            ]);
-            if let Some(frames) = referenced_frames {
-                let frame_text = frames
-                    .iter()
-                    .map(|frame| frame.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\\");
-                reference.put(DataElement::new(Tag(0x0008, 0x1160), VR::IS, frame_text));
-            }
+        if !references.is_empty() {
+            let sequence_items = references
+                .iter()
+                .map(|reference_spec| {
+                    let mut reference = dicom_object::InMemDicomObject::from_element_iter([
+                        DataElement::new(
+                            Tag(0x0008, 0x1150),
+                            VR::UI,
+                            DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID,
+                        ),
+                        DataElement::new(Tag(0x0008, 0x1155), VR::UI, reference_spec.uid),
+                    ]);
+                    if let Some(frames) = reference_spec.frames {
+                        let frame_text = frames
+                            .iter()
+                            .map(|frame| frame.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\\");
+                        reference.put(DataElement::new(Tag(0x0008, 0x1160), VR::IS, frame_text));
+                    }
+                    reference
+                })
+                .collect::<Vec<_>>();
             elements.push(DataElement::new(
                 SOURCE_IMAGE_SEQUENCE,
                 VR::SQ,
-                dicom_core::value::DataSetSequence::from(vec![reference]),
+                dicom_core::value::DataSetSequence::from(sequence_items),
             ));
         }
 
@@ -613,6 +664,14 @@ mod tests {
             .expect("Parametric Map test object should serialize");
         super::super::open_dicom_object_from_bytes(&bytes, "parametric-map-test")
             .expect("serialized Parametric Map test object should parse")
+    }
+
+    fn overlay_for_uid(parsed: &ParsedParametricMap, uid: &str) -> ParametricMapOverlay {
+        let mut overlay = ParametricMapOverlay::default();
+        let mut layer = parsed.overlay_layer.clone();
+        layer.source_frame_rgba_indices = parsed.references.get(uid).cloned().flatten();
+        overlay.layers.push(layer);
+        overlay
     }
 
     #[test]
@@ -657,10 +716,10 @@ mod tests {
         let overlays = parsed
             .references
             .into_iter()
-            .map(|(uid, frames)| {
+            .map(|(uid, source_frame_rgba_indices)| {
                 let mut overlay = ParametricMapOverlay::default();
                 let mut layer = parsed.overlay_layer.clone();
-                layer.referenced_source_frames = frames;
+                layer.source_frame_rgba_indices = source_frame_rgba_indices;
                 overlay.layers.push(layer);
                 (uid, overlay)
             })
@@ -678,12 +737,106 @@ mod tests {
             layers: vec![ParametricMapOverlayLayer {
                 width: 1,
                 height: 1,
-                rgba_frames: vec![Arc::<[u8]>::from([255, 0, 0, 255])],
-                referenced_source_frames: Some(vec![1]),
+                rgba_frames: Arc::<[Arc<[u8]>]>::from(
+                    vec![Arc::<[u8]>::from([255, 0, 0, 255])].into_boxed_slice(),
+                ),
+                source_frame_rgba_indices: Some(HashMap::from([(0usize, vec![0usize])])),
             }],
         };
 
         assert!(overlay.filtered_for_target(1, 1, 1).layers.len() == 1);
         assert!(overlay.filtered_for_target(2, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn constant_parametric_map_renders_consistent_non_black_frames() {
+        let obj = build_parametric_map_test_object(
+            DataElement::new(
+                FLOAT_PIXEL_DATA,
+                VR::OF,
+                PrimitiveValue::F32(vec![0.0f32, 0.0f32].into()),
+            ),
+            2,
+            Some("1.2.3"),
+            Some(&[1, 2]),
+        );
+
+        let parsed = parse_parametric_map(&obj, &DicomSource::from_memory("pm", Vec::new()))
+            .expect("constant Parametric Map should parse");
+        let frame_0 = parsed
+            .display_image
+            .frame_rgb_pixels(0)
+            .expect("first constant frame should render");
+        let frame_1 = parsed
+            .display_image
+            .frame_rgb_pixels(1)
+            .expect("second constant frame should render");
+
+        assert_eq!(frame_0.as_ref(), frame_1.as_ref());
+        assert_ne!(frame_0.as_ref(), [0, 0, 0].as_slice());
+
+        let overlay = overlay_for_uid(&parsed, "1.2.3");
+        assert_eq!(overlay.source_frame_indices(2), vec![0, 1]);
+        assert_eq!(overlay.rgba_frames_for_source_frame(0, 2).len(), 1);
+        assert_eq!(overlay.rgba_frames_for_source_frame(1, 2).len(), 1);
+    }
+
+    #[test]
+    fn load_parametric_map_overlays_preserves_multi_sop_out_of_order_frame_mapping() {
+        let obj = build_parametric_map_test_object_with_references(
+            DataElement::new(
+                FLOAT_PIXEL_DATA,
+                VR::OF,
+                PrimitiveValue::F32(vec![0.1f32, 0.5f32, 0.9f32].into()),
+            ),
+            3,
+            &[
+                TestReference {
+                    uid: "1.2.3",
+                    frames: Some(&[3, 1]),
+                },
+                TestReference {
+                    uid: "4.5.6",
+                    frames: Some(&[2]),
+                },
+            ],
+        );
+
+        let parsed = parse_parametric_map(&obj, &DicomSource::from_memory("pm", Vec::new()))
+            .expect("multi-SOP Parametric Map should parse");
+        assert!(parsed.references.contains_key("1.2.3"));
+        assert!(parsed.references.contains_key("4.5.6"));
+
+        let overlay_a = overlay_for_uid(&parsed, "1.2.3");
+        let overlay_b = overlay_for_uid(&parsed, "4.5.6");
+
+        assert_eq!(overlay_a.source_frame_indices(3), vec![0, 2]);
+        assert_eq!(overlay_b.source_frame_indices(3), vec![1]);
+        assert_eq!(
+            overlay_a
+                .filtered_for_target(1, 1, 3)
+                .source_frame_indices(3),
+            vec![0, 2]
+        );
+
+        let rgba_for_frame_3 = overlay_a.rgba_frames_for_source_frame(2, 3);
+        let rgba_for_frame_1 = overlay_a.rgba_frames_for_source_frame(0, 3);
+        let rgba_for_frame_2 = overlay_b.rgba_frames_for_source_frame(1, 3);
+
+        assert_eq!(rgba_for_frame_3.len(), 1);
+        assert_eq!(rgba_for_frame_1.len(), 1);
+        assert_eq!(rgba_for_frame_2.len(), 1);
+        assert_eq!(
+            rgba_for_frame_3[0].as_ref(),
+            parsed.overlay_layer.rgba_frames[0].as_ref()
+        );
+        assert_eq!(
+            rgba_for_frame_1[0].as_ref(),
+            parsed.overlay_layer.rgba_frames[1].as_ref()
+        );
+        assert_eq!(
+            rgba_for_frame_2[0].as_ref(),
+            parsed.overlay_layer.rgba_frames[2].as_ref()
+        );
     }
 }
