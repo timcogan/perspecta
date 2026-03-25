@@ -19,7 +19,7 @@
   <a href="https://perspecta.cogan.dev/"><img alt="Website" src="https://img.shields.io/badge/Website-perspecta.cogan.dev-0ea5e9?style=for-the-badge" /></a>
 </p>
 
-Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`eframe`) focused on fast loading, responsive interaction, DICOMweb launch, mammography layouts, SR/GSPS overlays, and simple integration from external systems.
+Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`eframe`) focused on fast loading, responsive interaction, DICOMweb launch, mammography layouts, GSPS/SR/Parametric Map overlays, and simple integration from external systems.
 
 ## Highlights
 
@@ -31,6 +31,7 @@ Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`efra
 - Multi-frame cine playback (`C` key or UI control).
 - GSPS (Grayscale Softcopy Presentation State) overlay support with manual toggle (`G` key, off by default).
 - Mammography CAD SR overlay support on matching images, with the same manual overlay workflow as GSPS.
+- DICOM Parametric Map support for local files, including heatmap overlay on matching source images and standalone opening when no explicit source match is present.
 - Structured Report (SR) DICOM support with a dedicated text/document view.
 - Mouse-wheel zoom + drag pan in single-image and multi-view (`1x2` / `1x3` / `2x2` / `2x4`) mammo views.
 - Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation and `Shift + drag` for window/level in multi-view layouts.
@@ -82,9 +83,10 @@ cargo run -- "example-data/current-RCC.dcm" "example-data/current-LCC.dcm" "exam
 - `3` files: opens the mammography `1x3` layout.
 - `4` files: opens the mammography `2x2` layout.
 - `8` files: opens the mammography comparison `2x4` layout (current row + prior row).
-- GSPS DICOM files can be included in the same selection, including grouped launch inputs; they act as overlays and do not count as display slots.
+- GSPS and matching Parametric Map DICOM files can be included in the same selection, including grouped launch inputs; they act as supplementary overlays and do not count as display slots.
 - Structured Report (SR) DICOM files can be opened directly in a single-document view.
 - If images and SR objects are selected together, Perspecta opens the images first and adds each SR as a separate history entry.
+- Parametric Maps attach as overlays only when they contain explicit source-image references to the selected image. Otherwise they open as standalone history entries.
 
 ### 2. Custom URL Scheme (`perspecta://`)
 
@@ -103,7 +105,7 @@ perspecta://open?dicomweb=http%3A%2F%2Flocalhost%3A8042&study=<StudyInstanceUID>
 | --- | --- |
 | `path`, `file` | Add one local file path |
 | `paths`, `files` | Add multiple local file paths (comma- or pipe-separated) |
-| `group` | Add one local preload group; after filtering supplementary GSPS/SR objects, each group must resolve to `1`, `2`, `3`, `4`, or `8` displayable items |
+| `group` | Add one local preload group; after filtering supplementary GSPS/SR/Parametric Map objects, each group must resolve to `1`, `2`, `3`, `4`, or `8` displayable items |
 | `groups` | Add multiple local preload groups separated by `;` |
 | `open_group` | Select which preloaded group opens first (default `0`) |
 | `dicomweb` | DICOMweb base URL (or full URL containing study/series/instance path segments) |
@@ -147,7 +149,7 @@ This writes a desktop entry under `~/.local/share/applications`.
 ## Keyboard Shortcuts
 
 - `C`: toggle cine mode
-- `G`: toggle image overlay (GSPS or Mammography CAD SR, when available)
+- `G`: toggle image overlay (GSPS, Mammography CAD SR, or a matching Parametric Map, when available)
 - `N`: jump to the next image/frame with an overlay
 - `Tab`: next history item
 - `Shift+Tab`: previous history item
@@ -194,6 +196,7 @@ make dev
 ## Current Limitations
 
 - Some compressed transfer syntaxes still depend on codec availability at build time.
+- DICOMweb launch does not currently attach or open Parametric Map objects; Parametric Map support is for local files.
 - No full study/series stack browser yet.
 - No MPR, measurement tools, or advanced annotation workflow yet.
 

@@ -12,11 +12,13 @@ use dicom_object::{from_reader, open_file, DefaultDicomObject, InMemDicomObject,
 use dicom_pixeldata::PixelDecoder;
 
 mod gsps;
+mod parametric_map;
 mod sr;
 
 #[allow(unused_imports)]
 pub use gsps::GspsOverlayGraphic;
 pub use gsps::{load_gsps_overlays, GspsGraphic, GspsOverlay, GspsUnits};
+pub use parametric_map::{load_parametric_map, load_parametric_map_overlays, ParametricMapOverlay};
 pub use sr::{
     load_mammography_cad_sr_overlays, load_structured_report, SrOverlay, StructuredReportDocument,
     StructuredReportNode,
@@ -66,6 +68,7 @@ pub const METADATA_FIELD_NAMES: &[&str] = &[
 ];
 
 pub const GSPS_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.11.1";
+pub const PARAMETRIC_MAP_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.30";
 pub const STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX: &str = "1.2.840.10008.5.1.4.1.1.88.";
 pub const MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.50";
 #[cfg(test)]
@@ -306,6 +309,7 @@ impl fmt::Display for DicomSource {
 pub enum DicomPathKind {
     Image,
     Gsps,
+    ParametricMap,
     StructuredReport,
     Other,
 }
@@ -335,6 +339,7 @@ pub struct DicomImage {
     reverse_frame_order: bool,
     pub gsps_overlay: Option<GspsOverlay>,
     pub sr_overlay: Option<SrOverlay>,
+    pub pm_overlay: Option<ParametricMapOverlay>,
     pub metadata: Vec<(String, String)>,
 }
 
@@ -488,6 +493,10 @@ pub fn is_gsps_sop_class_uid(uid: &str) -> bool {
     uid.trim() == GSPS_SOP_CLASS_UID
 }
 
+pub fn is_parametric_map_sop_class_uid(uid: &str) -> bool {
+    uid.trim() == PARAMETRIC_MAP_SOP_CLASS_UID
+}
+
 pub fn is_structured_report_sop_class_uid(uid: &str) -> bool {
     uid.trim()
         .starts_with(STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX)
@@ -506,11 +515,22 @@ pub fn classify_dicom_path(source: impl Into<DicomSource>) -> Result<DicomPathKi
     Ok(classify_dicom_object(&obj))
 }
 
+pub fn read_sop_instance_uid(source: impl Into<DicomSource>) -> Result<Option<String>> {
+    let obj = open_dicom_object(source)?;
+    Ok(read_string(&obj, "SOPInstanceUID"))
+}
+
 fn classify_dicom_object(obj: &DefaultDicomObject) -> DicomPathKind {
     let sop_class_uid = read_string(obj, "SOPClassUID");
 
     if sop_class_uid.as_deref().is_some_and(is_gsps_sop_class_uid) {
         return DicomPathKind::Gsps;
+    }
+    if sop_class_uid
+        .as_deref()
+        .is_some_and(is_parametric_map_sop_class_uid)
+    {
+        return DicomPathKind::ParametricMap;
     }
     if sop_class_uid
         .as_deref()
@@ -582,13 +602,26 @@ where
 pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     let source = source.into();
     let obj = open_dicom_object(&source)?;
-    if classify_dicom_object(&obj) == DicomPathKind::StructuredReport {
-        let sop_class = read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
-        bail!(
-            "{} is a Structured Report object (SOPClassUID={}); use load_structured_report() instead",
-            source,
-            sop_class
-        );
+    match classify_dicom_object(&obj) {
+        DicomPathKind::StructuredReport => {
+            let sop_class =
+                read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
+            bail!(
+                "{} is a Structured Report object (SOPClassUID={}); use load_structured_report() instead",
+                source,
+                sop_class
+            );
+        }
+        DicomPathKind::ParametricMap => {
+            let sop_class =
+                read_string(&obj, "SOPClassUID").unwrap_or_else(|| "unknown".to_string());
+            bail!(
+                "{} is a Parametric Map object (SOPClassUID={}); use load_parametric_map() instead",
+                source,
+                sop_class
+            );
+        }
+        _ => {}
     }
 
     let width: usize = obj
@@ -736,6 +769,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 reverse_frame_order,
                 gsps_overlay: None,
                 sr_overlay: None,
+                pm_overlay: None,
                 metadata,
             })
         }
@@ -853,6 +887,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 reverse_frame_order,
                 gsps_overlay: None,
                 sr_overlay: None,
+                pm_overlay: None,
                 metadata,
             })
         }
@@ -1987,6 +2022,7 @@ impl DicomImage {
             reverse_frame_order,
             gsps_overlay,
             sr_overlay: None,
+            pm_overlay: None,
             metadata: Vec::new(),
         }
     }
@@ -2530,6 +2566,26 @@ mod tests {
     }
 
     #[test]
+    fn classify_dicom_object_recognizes_parametric_maps() {
+        let pm_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, PARAMETRIC_MAP_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "4.3.2.8"),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "OT"),
+        ]);
+
+        let pm_obj = pm_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(PARAMETRIC_MAP_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("4.3.2.8"),
+            )
+            .expect("Parametric Map test object should build file meta");
+
+        assert_eq!(classify_dicom_object(&pm_obj), DicomPathKind::ParametricMap);
+    }
+
+    #[test]
     fn load_dicom_rejects_structured_reports_with_clear_guidance() {
         let sr_dataset = InMemDicomObject::from_element_iter([
             DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
@@ -2557,6 +2613,32 @@ mod tests {
         assert!(message.contains("Structured Report object"));
         assert!(message.contains(BASIC_TEXT_SR_SOP_CLASS_UID));
         assert!(message.contains("load_structured_report()"));
+    }
+
+    #[test]
+    fn load_dicom_rejects_parametric_maps_with_clear_guidance() {
+        let pm_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, PARAMETRIC_MAP_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "4.3.2.9"),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "OT"),
+        ]);
+
+        let pm_obj = pm_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(PARAMETRIC_MAP_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid("4.3.2.9"),
+            )
+            .expect("Parametric Map test object should build file meta");
+
+        let source = DicomSource::from_memory("parametric-map.dcm", object_bytes(&pm_obj));
+        let err = load_dicom(source).expect_err("load_dicom should reject parametric maps");
+
+        let message = format!("{err:#}");
+        assert!(message.contains("Parametric Map object"));
+        assert!(message.contains(PARAMETRIC_MAP_SOP_CLASS_UID));
+        assert!(message.contains("load_parametric_map()"));
     }
 
     #[test]

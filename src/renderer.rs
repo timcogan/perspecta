@@ -55,3 +55,40 @@ pub fn render_rgb(
         pixels,
     }
 }
+
+pub fn blend_rgba_overlay(base: &mut ColorImage, overlay_rgba: &[u8]) {
+    let pixel_count = base.pixels.len();
+    for (index, chunk) in overlay_rgba.chunks_exact(4).take(pixel_count).enumerate() {
+        let alpha = f32::from(chunk[3]) / 255.0;
+        if alpha <= f32::EPSILON {
+            continue;
+        }
+
+        let base_pixel = base.pixels[index];
+        let inv_alpha = 1.0 - alpha;
+        let red = (f32::from(base_pixel.r()) * inv_alpha + f32::from(chunk[0]) * alpha).round();
+        let green = (f32::from(base_pixel.g()) * inv_alpha + f32::from(chunk[1]) * alpha).round();
+        let blue = (f32::from(base_pixel.b()) * inv_alpha + f32::from(chunk[2]) * alpha).round();
+        base.pixels[index] = Color32::from_rgb(red as u8, green as u8, blue as u8);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blend_rgba_overlay_blends_on_top_of_base_pixels() {
+        let mut base = ColorImage {
+            size: [1, 1],
+            pixels: vec![Color32::from_rgb(100, 100, 100)],
+        };
+
+        blend_rgba_overlay(&mut base, &[200, 0, 0, 128]);
+
+        let pixel = base.pixels[0];
+        assert!(pixel.r() > pixel.g());
+        assert!(pixel.r() > 100);
+        assert!(pixel.g() < 100);
+    }
+}
