@@ -25,6 +25,7 @@
   </head>
   <body>
     {{ block "main" . }}{{ end }}
+    <script src="{{ "/js/download-platform.js" | relURL }}"></script>
     {{ with .Site.Params.ga4 }}
     <div class="cookie-banner is-hidden" role="dialog" aria-modal="true" aria-label="Cookie consent">
       <div class="cookie-content">
