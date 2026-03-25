@@ -40,10 +40,10 @@ const detectMacArchitecture = async () => {
   }
 
   const userAgent = lowercase(navigator.userAgent);
-  if (/(arm64|aarch64|apple silicon)/.test(userAgent)) {
+  if (/(arm|arm64|aarch64|m1|m2|silicon)/.test(userAgent)) {
     return "arm";
   }
-  if (/(x86_64|intel)/.test(userAgent)) {
+  if (/(x86|x86_64|x86-64|amd64|intel|win64|wow64)/.test(userAgent)) {
     return "x86";
   }
 
