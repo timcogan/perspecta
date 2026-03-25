@@ -11,10 +11,11 @@
       <p class="doc-updated">Last updated: {{ . }}</p>
       {{ end }}
 
-      {{ if .TableOfContents }}
+      {{ $toc := trim .TableOfContents "\n\r\t " }}
+      {{ if and $toc (ne $toc "<nav id=\"TableOfContents\"></nav>") }}
       <div class="doc-toc">
         <p class="doc-toc-title">On this page</p>
-        {{ .TableOfContents }}
+        {{ $toc | safeHTML }}
       </div>
       {{ end }}
 

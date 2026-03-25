@@ -1,34 +1,35 @@
 {{- $platform := .Get "platform" -}}
 {{- $cfg := index site.Data.install_platforms $platform -}}
 {{- if not $cfg -}}
-Unknown install platform: `{{ $platform }}`
+<p>Unknown install platform: <code>{{ $platform }}</code></p>
 {{- else -}}
-## Prebuilt Binary
 
-Download the latest prebuilt binary from
-[GitHub Releases]({{ site.Params.releases }}).
+{{ partial "download-button.html" (dict "context" .Page "class" "button primary" "mode" "platform" "platform" $platform
+"label" "Download") }}
 
-## Build from Source
-
-### Requirements
-
-{{- with $cfg.source_requirements }}
-{{- range . }}
-- {{ . }}
-{{- end }}
-{{- else }}
-- No additional requirements.
+{{- with $cfg.prebuilt_note }}
+<p class="download-button-note">{{ . }}</p>
 {{- end }}
 
-### Build and Run
+<h2 id="build-from-source">Build from Source</h2>
 
-```{{ $cfg.shell }}
-{{ $cfg.run_cmd }}
-```
+<h3 id="requirements">Requirements</h3>
 
-### Release Build
+<ul>
+  {{- with $cfg.source_requirements }}
+  {{- range . }}
+  <li>{{ . }}</li>
+  {{- end }}
+  {{- else }}
+  <li>No additional requirements.</li>
+  {{- end }}
+</ul>
 
-```{{ $cfg.shell }}
-{{ $cfg.release_cmd }}
-```
+<h3 id="build-and-run">Build and Run</h3>
+
+<pre><code class="language-{{ $cfg.shell }}">{{ $cfg.run_cmd }}</code></pre>
+
+<h3 id="release-build">Release Build</h3>
+
+<pre><code class="language-{{ $cfg.shell }}">{{ $cfg.release_cmd }}</code></pre>
 {{- end -}}

@@ -5,4 +5,4 @@ weight = 12
 last_updated = "2026-03-04"
 +++
 
-{{% install-platform platform="macos" %}}
+{{< install-platform platform="macos" >}}

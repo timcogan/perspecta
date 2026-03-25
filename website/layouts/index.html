@@ -9,12 +9,12 @@
       responsive rendering and simple integration.
     </p>
     <div class="cta">
-      <a class="button primary" href="{{ .Site.Params.releases }}">Download</a>
-      <a class="button" href="{{ .Site.Params.docs | relURL }}">Docs</a>
+      {{ partial "download-button.html" (dict "context" . "class" "button primary" "mode" "adaptive" "label" "Download") }}
       <a class="button" href="{{ .Site.Params.why_perspecta | relURL }}">Why Perspecta</a>
     </div>
   </section>
 
   {{ partial "footer.html" . }}
 </main>
+<script defer src="{{ "/js/download-platform.js" | relURL }}"></script>
 {{ end }}

@@ -405,6 +405,11 @@ a {
   margin: 0 0 14px;
 }
 
+.download-button-note {
+  margin: 10px 0 14px;
+  font-size: 14px;
+}
+
 .doc ul {
   margin: 0 0 14px;
   padding-left: 20px;
