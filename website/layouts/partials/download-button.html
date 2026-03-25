@@ -8,7 +8,6 @@
 {{- $macos := index $ctx.Site.Data.install_platforms "macos" -}}
 {{- $windows := index $ctx.Site.Data.install_platforms "windows" -}}
 {{- if eq $mode "adaptive" -}}
-  {{- if and $linux $macos $windows -}}
   <a
     class="{{ $buttonClass }}"
     href="{{ $latestRelease }}"
@@ -19,38 +18,43 @@
     data-download-default-text="{{ $label }}"
     data-download-default-label="Browse the latest release"
     data-download-default-title="Browse the latest release"
-    data-download-windows-url="{{ printf "%s/%s" $downloadBase $windows.asset_name }}"
-    data-download-windows-text="{{ $windows.button_label }}"
-    data-download-windows-label="{{ $windows.aria_label }}"
-    data-download-windows-title="{{ $windows.title }}"
-    data-download-linux-url="{{ printf "%s/%s" $downloadBase $linux.asset_name }}"
-    data-download-linux-text="{{ $linux.button_label }}"
-    data-download-linux-label="{{ $linux.aria_label }}"
-    data-download-linux-title="{{ $linux.title }}"
-    data-download-macos-url="{{ printf "%s/%s" $downloadBase $macos.asset_name }}"
-    data-download-macos-text="{{ $macos.button_label }}"
-    data-download-macos-label="{{ $macos.aria_label }}"
-    data-download-macos-title="{{ $macos.title }}"
-    data-download-macos-fallback-url="{{ $macos.fallback_url | relURL }}"
-    data-download-macos-fallback-text="{{ $macos.fallback_text }}"
-    data-download-macos-fallback-label="{{ $macos.fallback_aria_label }}"
-    data-download-macos-fallback-title="{{ $macos.fallback_title }}"
+    {{- with $windows }}
+    data-download-windows-url="{{ printf "%s/%s" $downloadBase .asset_name }}"
+    data-download-windows-text="{{ .button_label }}"
+    data-download-windows-label="{{ .aria_label }}"
+    data-download-windows-title="{{ .title }}"
+    {{- end }}
+    {{- with $linux }}
+    data-download-linux-url="{{ printf "%s/%s" $downloadBase .asset_name }}"
+    data-download-linux-text="{{ .button_label }}"
+    data-download-linux-label="{{ .aria_label }}"
+    data-download-linux-title="{{ .title }}"
+    {{- end }}
+    {{- with $macos }}
+    data-download-macos-url="{{ printf "%s/%s" $downloadBase .asset_name }}"
+    data-download-macos-text="{{ .button_label }}"
+    data-download-macos-label="{{ .aria_label }}"
+    data-download-macos-title="{{ .title }}"
+    {{- with .fallback_url }}
+    data-download-macos-fallback-url="{{ . | relURL }}"
+    {{- end }}
+    {{- with .fallback_text }}
+    data-download-macos-fallback-text="{{ . }}"
+    {{- end }}
+    {{- with .fallback_aria_label }}
+    data-download-macos-fallback-label="{{ . }}"
+    {{- end }}
+    {{- with .fallback_title }}
+    data-download-macos-fallback-title="{{ . }}"
+    {{- end }}
+    {{- end }}
   >
     <span data-download-label>{{ $label }}</span>
   </a>
-  {{- else -}}
-  <a
-    class="{{ $buttonClass }}"
-    href="{{ $latestRelease }}"
-    aria-label="Browse the latest release"
-    title="Browse the latest release"
-  >
-    <span data-download-label>{{ $label }}</span>
-  </a>
-  {{- end -}}
 {{- else -}}
   {{- $platform := .platform -}}
-  {{- $cfg := index $ctx.Site.Data.install_platforms $platform -}}
+  {{- $platformKey := lower ($platform | default "") -}}
+  {{- $cfg := index $ctx.Site.Data.install_platforms $platformKey -}}
   {{- if and $platform $cfg -}}
   <a
     class="{{ $buttonClass }}"
