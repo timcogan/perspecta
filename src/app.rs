@@ -399,11 +399,16 @@ impl DicomViewerApp {
             .and_then(|uid| overlays.get(uid))
             .map(|overlay| {
                 overlay.filtered_for_target(image.width, image.height, image.frame_count())
-            })
-            .filter(|overlay| !overlay.is_empty());
+            });
 
-        if let Some(overlay) = matched_overlay {
-            image.pm_overlay = Some(overlay);
+        match matched_overlay {
+            Some(overlay) if !overlay.is_empty() => {
+                image.pm_overlay = Some(overlay);
+            }
+            Some(_) => {
+                image.pm_overlay = None;
+            }
+            None => {}
         }
     }
 
@@ -3605,9 +3610,9 @@ mod tests {
     use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 
     use crate::dicom::{
-        SrOverlay, SrOverlayGraphic, SrRenderingIntent, BASIC_TEXT_SR_SOP_CLASS_UID,
-        DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID, EXPLICIT_VR_LITTLE_ENDIAN_UID,
-        GSPS_SOP_CLASS_UID, PARAMETRIC_MAP_SOP_CLASS_UID,
+        load_parametric_map_overlays, SrOverlay, SrOverlayGraphic, SrRenderingIntent,
+        BASIC_TEXT_SR_SOP_CLASS_UID, DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID,
+        EXPLICIT_VR_LITTLE_ENDIAN_UID, GSPS_SOP_CLASS_UID, PARAMETRIC_MAP_SOP_CLASS_UID,
     };
 
     fn test_texture(ctx: &egui::Context, name: &str) -> TextureHandle {
@@ -5789,6 +5794,36 @@ mod tests {
             "streamed Parametric Map overlays should attach to the displayed image"
         );
         assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn attach_matching_pm_overlay_clears_stale_overlay_when_updated_layers_do_not_match() {
+        let image_uid = "9.999.102.30";
+        let pm_source = test_memory_parametric_map_source(
+            "stale-pm",
+            "9.999.102.21",
+            "9.999.102.22",
+            "9.999.102.23",
+            image_uid,
+        );
+        let overlays = load_parametric_map_overlays(&pm_source)
+            .expect("Parametric Map overlay source should parse");
+        let stale_overlay = overlays
+            .get(image_uid)
+            .cloned()
+            .expect("overlay should be keyed by the referenced image UID");
+
+        let mut image = DicomImage::test_stub_with_mono_frames(None, 1);
+        image.width = 2;
+        image.sop_instance_uid = Some(image_uid.to_string());
+        image.pm_overlay = Some(stale_overlay);
+
+        DicomViewerApp::attach_matching_pm_overlay(&mut image, &overlays);
+
+        assert!(
+            image.pm_overlay.is_none(),
+            "filtered-out authoritative Parametric Map overlays should clear stale heatmaps"
+        );
     }
 
     #[test]
