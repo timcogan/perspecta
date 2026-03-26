@@ -477,6 +477,31 @@ impl DicomViewerApp {
         self.sync_current_state_to_history();
     }
 
+    fn merge_pending_pm_overlays(&mut self, overlays: HashMap<String, ParametricMapOverlay>) {
+        if overlays.is_empty() {
+            return;
+        }
+
+        let mut merged_any = false;
+        for (sop_uid, mut overlay) in overlays {
+            if self.authoritative_pm_overlay_keys.contains(&sop_uid) || overlay.is_empty() {
+                continue;
+            }
+            self.pending_pm_overlays
+                .entry(sop_uid)
+                .or_default()
+                .layers
+                .append(&mut overlay.layers);
+            merged_any = true;
+        }
+        if !merged_any {
+            return;
+        }
+
+        self.attach_pending_overlays_to_current_study();
+        self.sync_current_state_to_history();
+    }
+
     fn detach_removed_gsps_overlays_from_current_study(
         &mut self,
         removed_sop_uids: &HashSet<String>,
@@ -569,6 +594,69 @@ impl DicomViewerApp {
         }
     }
 
+    fn detach_removed_pm_overlays_from_current_study(
+        &mut self,
+        removed_sop_uids: &HashSet<String>,
+    ) {
+        if removed_sop_uids.is_empty() {
+            return;
+        }
+
+        if let Some(image) = self.image.as_mut() {
+            if image
+                .sop_instance_uid
+                .as_ref()
+                .is_some_and(|uid| removed_sop_uids.contains(uid))
+            {
+                image.pm_overlay = None;
+            }
+        }
+        for viewport in self.mammo_group.iter_mut().filter_map(Option::as_mut) {
+            if viewport
+                .image
+                .sop_instance_uid
+                .as_ref()
+                .is_some_and(|uid| removed_sop_uids.contains(uid))
+            {
+                viewport.image.pm_overlay = None;
+            }
+        }
+    }
+
+    fn detach_removed_pm_overlays_from_history(&mut self, removed_sop_uids: &HashSet<String>) {
+        if removed_sop_uids.is_empty() {
+            return;
+        }
+
+        for entry in &mut self.history_entries {
+            match &mut entry.kind {
+                HistoryKind::Single(single) => {
+                    if single
+                        .image
+                        .sop_instance_uid
+                        .as_ref()
+                        .is_some_and(|uid| removed_sop_uids.contains(uid))
+                    {
+                        single.image.pm_overlay = None;
+                    }
+                }
+                HistoryKind::Group(group) => {
+                    for viewport in &mut group.viewports {
+                        if viewport
+                            .image
+                            .sop_instance_uid
+                            .as_ref()
+                            .is_some_and(|uid| removed_sop_uids.contains(uid))
+                        {
+                            viewport.image.pm_overlay = None;
+                        }
+                    }
+                }
+                HistoryKind::Report(_) => {}
+            }
+        }
+    }
+
     fn detach_removed_gsps_overlays_from_history(&mut self, removed_sop_uids: &HashSet<String>) {
         if removed_sop_uids.is_empty() {
             return;
@@ -641,6 +729,28 @@ impl DicomViewerApp {
         self.sync_current_state_to_history();
     }
 
+    fn set_authoritative_pending_pm_overlays(
+        &mut self,
+        overlays: HashMap<String, ParametricMapOverlay>,
+    ) {
+        let overlays = overlays
+            .into_iter()
+            .filter(|(_, overlay)| !overlay.is_empty())
+            .collect::<HashMap<_, _>>();
+        let removed_sop_uids = self
+            .pending_pm_overlays
+            .keys()
+            .filter(|uid| !overlays.contains_key(*uid))
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.detach_removed_pm_overlays_from_current_study(&removed_sop_uids);
+        self.detach_removed_pm_overlays_from_history(&removed_sop_uids);
+        self.authoritative_pm_overlay_keys = overlays.keys().cloned().collect();
+        self.pending_pm_overlays = overlays;
+        self.attach_pending_overlays_to_current_study();
+        self.sync_current_state_to_history();
+    }
+
     fn collect_grouped_gsps_overlays(
         prepared_groups: &[PreparedLoadPaths],
     ) -> HashMap<String, GspsOverlay> {
@@ -657,6 +767,16 @@ impl DicomViewerApp {
         let mut overlays = HashMap::new();
         for group in prepared_groups {
             Self::merge_sr_overlays(&mut overlays, &group.sr_overlays);
+        }
+        overlays
+    }
+
+    fn collect_grouped_pm_overlays(
+        prepared_groups: &[PreparedLoadPaths],
+    ) -> HashMap<String, ParametricMapOverlay> {
+        let mut overlays = HashMap::new();
+        for group in prepared_groups {
+            Self::merge_pm_overlays(&mut overlays, &group.pm_overlays);
         }
         overlays
     }
@@ -3487,7 +3607,7 @@ mod tests {
     use crate::dicom::{
         SrOverlay, SrOverlayGraphic, SrRenderingIntent, BASIC_TEXT_SR_SOP_CLASS_UID,
         DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID, EXPLICIT_VR_LITTLE_ENDIAN_UID,
-        GSPS_SOP_CLASS_UID,
+        GSPS_SOP_CLASS_UID, PARAMETRIC_MAP_SOP_CLASS_UID,
     };
 
     fn test_texture(ctx: &egui::Context, name: &str) -> TextureHandle {
@@ -3684,6 +3804,62 @@ mod tests {
             .write_to_file(&path)
             .expect("memory GSPS test object should write to disk");
         let bytes = fs::read(&path).expect("memory GSPS test bytes should read from disk");
+        let _ = fs::remove_file(&path);
+        DicomSource::from_memory(preferred_name, bytes)
+    }
+
+    fn test_memory_parametric_map_source(
+        preferred_name: &str,
+        study_uid: &str,
+        series_uid: &str,
+        instance_uid: &str,
+        referenced_instance_uid: &str,
+    ) -> DicomSource {
+        let referenced_image = InMemDicomObject::from_element_iter([
+            DataElement::new(
+                Tag(0x0008, 0x1150),
+                VR::UI,
+                DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID,
+            ),
+            DataElement::new(Tag(0x0008, 0x1155), VR::UI, referenced_instance_uid),
+        ]);
+        let pm_dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, PARAMETRIC_MAP_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, instance_uid),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "MG"),
+            DataElement::new(Tag(0x0020, 0x000D), VR::UI, study_uid),
+            DataElement::new(Tag(0x0020, 0x000E), VR::UI, series_uid),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0004), VR::CS, "MONOCHROME2"),
+            DataElement::new(Tag(0x0028, 0x0010), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0011), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0008), VR::IS, "1"),
+            DataElement::new(
+                Tag(0x0008, 0x2112),
+                VR::SQ,
+                DataSetSequence::from(vec![referenced_image]),
+            ),
+            DataElement::new(
+                Tag(0x7FE0, 0x0008),
+                VR::OF,
+                PrimitiveValue::F32(vec![1.0f32].into()),
+            ),
+        ]);
+
+        let pm_obj = pm_dataset
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid(PARAMETRIC_MAP_SOP_CLASS_UID)
+                    .media_storage_sop_instance_uid(instance_uid),
+            )
+            .expect("memory Parametric Map test object should build file meta");
+
+        let path = unique_test_file_path("memory-parametric-map-source");
+        pm_obj
+            .write_to_file(&path)
+            .expect("memory Parametric Map test object should write to disk");
+        let bytes = fs::read(&path).expect("memory Parametric Map test bytes should read");
         let _ = fs::remove_file(&path);
         DicomSource::from_memory(preferred_name, bytes)
     }
@@ -5571,6 +5747,83 @@ mod tests {
     }
 
     #[test]
+    fn poll_dicomweb_active_paths_merges_streamed_parametric_map_overlay() {
+        let study_uid = "9.999.102.1";
+        let pm_series_uid = "9.999.102.3";
+        let image_uid = "9.999.102.10";
+        let pm_uid = "9.999.102.20";
+        let pm_source = test_memory_parametric_map_source(
+            "streamed-pm",
+            study_uid,
+            pm_series_uid,
+            pm_uid,
+            image_uid,
+        );
+
+        let (tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        tx.send(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(1))
+            .expect("streamed group count should send");
+        tx.send(DicomWebGroupStreamUpdate::ActivePath(pm_source))
+            .expect("streamed Parametric Map path should send");
+        drop(tx);
+
+        let ctx = egui::Context::default();
+        let mut image = DicomImage::test_stub_with_mono_frames(None, 1);
+        image.sop_instance_uid = Some(image_uid.to_string());
+        let mut app = DicomViewerApp {
+            image: Some(image),
+            current_single_path: Some(test_meta("displayed-image.dcm")),
+            texture: Some(test_texture(&ctx, "streamed-pm-active")),
+            dicomweb_active_path_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.poll_dicomweb_active_paths(&ctx);
+
+        assert!(app.pending_pm_overlays.contains_key(image_uid));
+        assert!(
+            app.image
+                .as_ref()
+                .and_then(|image| image.pm_overlay.as_ref())
+                .is_some(),
+            "streamed Parametric Map overlays should attach to the displayed image"
+        );
+        assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn poll_dicomweb_active_paths_keeps_mammo_sender_until_streamed_paths_are_dispatched() {
+        let image_source = test_memory_image_source(
+            "streamed-active-image",
+            "9.999.103.1",
+            "9.999.103.2",
+            "9.999.103.10",
+        );
+        let (tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        tx.send(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(2))
+            .expect("streamed group count should send");
+        tx.send(DicomWebGroupStreamUpdate::ActivePath(image_source.clone()))
+            .expect("streamed image path should send");
+        drop(tx);
+
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            dicomweb_active_path_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.poll_dicomweb_active_paths(&ctx);
+
+        assert!(app.load_error_message.is_none());
+        assert!(app.mammo_load_sender.is_some());
+        assert!(app.mammo_load_receiver.is_some());
+        assert_eq!(
+            app.dicomweb_active_group_paths,
+            vec![(&image_source).into()]
+        );
+    }
+
+    #[test]
     fn poll_dicomweb_active_paths_preloads_completed_background_group_before_final_result() {
         let path = write_test_structured_report_file("streamed-background-report");
         let (tx, rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
@@ -6028,6 +6281,83 @@ mod tests {
     }
 
     #[test]
+    fn poll_dicomweb_grouped_backfills_parametric_map_for_displayed_open_group() {
+        let study_uid = "9.999.104.1";
+        let series_uid = "9.999.104.2";
+        let pm_series_uid = "9.999.104.3";
+        let image_uid = "9.999.104.10";
+        let pm_uid = "9.999.104.20";
+
+        let image_source =
+            test_memory_image_source("active-image", study_uid, series_uid, image_uid);
+        let pm_source = test_memory_parametric_map_source(
+            "active-image-pm",
+            study_uid,
+            pm_series_uid,
+            pm_uid,
+            image_uid,
+        );
+        let expected_history_id = history_id_from_paths(std::slice::from_ref(&image_source));
+
+        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        tx.send(Ok(DicomWebDownloadResult::Grouped {
+            groups: vec![vec![image_source.clone(), pm_source]],
+            open_group: 0,
+        }))
+        .expect("grouped result should send");
+
+        let ctx = egui::Context::default();
+        let mut image = DicomImage::test_stub_with_mono_frames(None, 1);
+        image.sop_instance_uid = Some(image_uid.to_string());
+        let mut app = DicomViewerApp {
+            dicomweb_receiver: Some(rx),
+            dicomweb_active_group_expected: Some(1),
+            dicomweb_active_group_paths: vec![(&image_source).into()],
+            image: Some(image),
+            current_single_path: Some((&image_source).into()),
+            texture: Some(test_texture(&ctx, "displayed-active-pm")),
+            history_entries: vec![HistoryEntry {
+                id: expected_history_id.clone(),
+                kind: HistoryKind::Single(Box::new(HistorySingleData {
+                    path: (&image_source).into(),
+                    image: DicomImage::test_stub_with_mono_frames(None, 1),
+                    texture: test_texture(&ctx, "displayed-active-pm-history"),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    cine_fps: DEFAULT_CINE_FPS,
+                })),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        app.poll_dicomweb_download(&ctx);
+
+        assert!(
+            app.image
+                .as_ref()
+                .and_then(|image| image.pm_overlay.as_ref())
+                .is_some(),
+            "open group should receive Parametric Map overlays without needing history cycling"
+        );
+        assert!(app.has_available_overlay());
+
+        let history_entry = app
+            .history_entries
+            .iter()
+            .find(|entry| entry.id == expected_history_id)
+            .expect("displayed image should be cached in history");
+        let HistoryKind::Single(single) = &history_entry.kind else {
+            panic!("expected single history entry");
+        };
+        assert!(
+            single.image.pm_overlay.is_some(),
+            "history cache should preserve the backfilled Parametric Map overlay"
+        );
+    }
+
+    #[test]
     fn poll_dicomweb_grouped_preloads_active_single_when_viewing_other_study() {
         let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
         tx.send(Ok(DicomWebDownloadResult::Grouped {
@@ -6155,6 +6485,79 @@ mod tests {
             app.load_error_message.as_deref(),
             Some("Streaming multi-view load channel was not available.")
         );
+    }
+
+    #[test]
+    fn poll_dicomweb_grouped_defers_stream_teardown_until_mammo_worker_finishes() {
+        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        tx.send(Ok(DicomWebDownloadResult::Grouped {
+            groups: vec![vec![test_source("group-a.dcm"), test_source("group-b.dcm")]],
+            open_group: 0,
+        }))
+        .expect("grouped result should send");
+
+        let (mammo_tx, mammo_rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        let mut app = DicomViewerApp {
+            dicomweb_receiver: Some(rx),
+            dicomweb_active_group_expected: Some(2),
+            dicomweb_active_group_paths: vec![test_meta("group-a.dcm"), test_meta("group-b.dcm")],
+            mammo_load_receiver: Some(mammo_rx),
+            mammo_load_sender: Some(mammo_tx),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_dicomweb_download(&ctx);
+
+        assert_eq!(app.dicomweb_active_group_expected, Some(2));
+        assert_eq!(
+            app.dicomweb_active_group_paths,
+            vec![test_meta("group-a.dcm"), test_meta("group-b.dcm")]
+        );
+        assert!(app.mammo_load_receiver.is_some());
+        assert!(app.mammo_load_sender.is_some());
+    }
+
+    #[test]
+    fn start_dicomweb_download_clears_inflight_single_load() {
+        let (_tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        let mut app = DicomViewerApp {
+            single_load_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.start_dicomweb_download(DicomWebLaunchRequest {
+            base_url: String::new(),
+            study_uid: String::new(),
+            series_uid: None,
+            instance_uid: Some("1.2.3".to_string()),
+            username: None,
+            password: None,
+        });
+
+        assert!(app.single_load_receiver.is_none());
+        assert!(app.dicomweb_receiver.is_some());
+    }
+
+    #[test]
+    fn start_dicomweb_group_download_clears_inflight_single_load() {
+        let (_tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        let mut app = DicomViewerApp {
+            single_load_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.start_dicomweb_group_download(DicomWebGroupedLaunchRequest {
+            base_url: String::new(),
+            study_uid: String::new(),
+            groups: Vec::new(),
+            open_group: 0,
+            username: None,
+            password: None,
+        });
+
+        assert!(app.single_load_receiver.is_none());
+        assert!(app.dicomweb_receiver.is_some());
     }
 
     #[test]
@@ -6500,6 +6903,60 @@ mod tests {
             app.authoritative_sr_overlay_keys,
             HashSet::from(["4.5.6".to_string()])
         );
+    }
+
+    #[test]
+    fn apply_prepared_load_paths_single_stages_history_entries_after_overlay_reset() {
+        let (_tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            history_preload_receiver: Some(rx),
+            history_preload_queue: VecDeque::from([HistoryPreloadJob::StructuredReport(
+                test_source("stale-report.dcm"),
+            )]),
+            ..Default::default()
+        };
+
+        let result = app.apply_prepared_load_paths(
+            PreparedLoadPaths {
+                image_paths: vec![test_source("active-image.dcm")],
+                structured_report_paths: vec![test_source("fresh-report.dcm")],
+                parametric_map_paths: vec![test_source("fresh-heatmap.dcm")],
+                ..Default::default()
+            },
+            &ctx,
+        );
+
+        assert!(result.is_ok());
+        assert!(app.history_preload_receiver.is_some());
+        assert_eq!(app.history_preload_queue.len(), 1);
+    }
+
+    #[test]
+    fn apply_prepared_load_paths_group_stages_history_entries_after_overlay_reset() {
+        let (_tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            history_preload_receiver: Some(rx),
+            history_preload_queue: VecDeque::from([HistoryPreloadJob::StructuredReport(
+                test_source("stale-report.dcm"),
+            )]),
+            ..Default::default()
+        };
+
+        let result = app.apply_prepared_load_paths(
+            PreparedLoadPaths {
+                image_paths: vec![test_source("group-a.dcm"), test_source("group-b.dcm")],
+                structured_report_paths: vec![test_source("fresh-report.dcm")],
+                parametric_map_paths: vec![test_source("fresh-heatmap.dcm")],
+                ..Default::default()
+            },
+            &ctx,
+        );
+
+        assert!(result.is_ok());
+        assert!(app.history_preload_receiver.is_some());
+        assert_eq!(app.history_preload_queue.len(), 1);
     }
 
     #[test]

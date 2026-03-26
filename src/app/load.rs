@@ -213,6 +213,7 @@ impl DicomViewerApp {
         self.clear_load_error();
         self.sync_current_state_to_history();
         self.clear_history_preload();
+        self.single_load_receiver = None;
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
         self.history_pushed_for_active_group = false;
@@ -246,6 +247,7 @@ impl DicomViewerApp {
         self.clear_load_error();
         self.sync_current_state_to_history();
         self.clear_history_preload();
+        self.single_load_receiver = None;
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
         self.history_pushed_for_active_group = false;
@@ -441,12 +443,6 @@ impl DicomViewerApp {
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
-                        if self
-                            .dicomweb_active_group_expected
-                            .is_some_and(Self::is_supported_multi_view_group_size)
-                        {
-                            self.mammo_load_sender = None;
-                        }
                         keep_receiver = false;
                         break;
                     }
@@ -487,9 +483,16 @@ impl DicomViewerApp {
                         ctx,
                     );
                 }
-                Ok(DicomPathKind::ParametricMap) => {
-                    log::warn!("Ignoring streamed Parametric Map input.");
-                }
+                Ok(DicomPathKind::ParametricMap) => match load_parametric_map_overlays(&path) {
+                    Ok(overlays) => {
+                        self.merge_pending_pm_overlays(overlays);
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "Could not parse streamed Parametric Map overlay input: {err:#}"
+                        );
+                    }
+                },
                 Ok(DicomPathKind::Image) | Err(_) => match expected {
                     1 => {
                         self.dicomweb_active_group_paths.push((&path).into());
@@ -581,6 +584,8 @@ impl DicomViewerApp {
                             Self::collect_grouped_gsps_overlays(&prepared_groups);
                         let grouped_sr_overlays =
                             Self::collect_grouped_sr_overlays(&prepared_groups);
+                        let grouped_pm_overlays =
+                            Self::collect_grouped_pm_overlays(&prepared_groups);
                         let validated_open_group = if prepared_groups.is_empty() {
                             0
                         } else {
@@ -596,10 +601,12 @@ impl DicomViewerApp {
                             .unwrap_or_default();
                         let streamed_count = self.dicomweb_active_group_paths.len();
                         let streaming_started = streamed_count > 0;
+                        let active_group_is_multi_view =
+                            Self::is_supported_multi_view_group_size(active_group_len);
                         let streamed_active_complete = streamed_count >= active_group_len
-                            && (active_group_len == 1
-                                || Self::is_supported_multi_view_group_size(active_group_len))
-                            && self.dicomweb_active_pending_paths.is_empty();
+                            && (active_group_len == 1 || active_group_is_multi_view)
+                            && self.dicomweb_active_pending_paths.is_empty()
+                            && (!active_group_is_multi_view || self.mammo_load_receiver.is_none());
                         let active_group_is_displayed =
                             self.displayed_study_matches_paths(active_group_paths.as_slice());
                         let grouped_ready;
@@ -647,10 +654,15 @@ impl DicomViewerApp {
                                 self.history_pushed_for_active_group = true;
                             }
                             self.move_current_history_to_front();
-                            grouped_ready = active_group_is_displayed;
+                            grouped_ready = if active_group_is_multi_view {
+                                active_group_is_displayed && self.mammo_group_complete()
+                            } else {
+                                active_group_is_displayed
+                            };
                         }
                         self.set_authoritative_pending_gsps_overlays(grouped_gsps_overlays);
                         self.set_authoritative_pending_sr_overlays(grouped_sr_overlays);
+                        self.set_authoritative_pending_pm_overlays(grouped_pm_overlays);
 
                         if streamed_active_complete || !streaming_started {
                             self.dicomweb_active_group_expected = None;
@@ -953,6 +965,7 @@ impl DicomViewerApp {
         match paths.len() {
             0 => Err(()),
             1 => {
+                self.commit_pending_overlay_state(pending_overlay_state);
                 if !structured_report_paths.is_empty() {
                     self.stage_structured_report_history_entries(&structured_report_paths, ctx);
                     log::info!(
@@ -964,7 +977,6 @@ impl DicomViewerApp {
                 if !parametric_map_paths.is_empty() {
                     self.stage_parametric_map_history_entries(&parametric_map_paths, ctx);
                 }
-                self.commit_pending_overlay_state(pending_overlay_state);
                 self.single_load_receiver = None;
                 self.mammo_load_receiver = None;
                 self.mammo_load_sender = None;
@@ -975,6 +987,7 @@ impl DicomViewerApp {
                 Ok(())
             }
             count if Self::is_supported_multi_view_group_size(count) => {
+                self.commit_pending_overlay_state(pending_overlay_state);
                 if !structured_report_paths.is_empty() {
                     self.stage_structured_report_history_entries(&structured_report_paths, ctx);
                     log::info!(
@@ -986,7 +999,6 @@ impl DicomViewerApp {
                 if !parametric_map_paths.is_empty() {
                     self.stage_parametric_map_history_entries(&parametric_map_paths, ctx);
                 }
-                self.commit_pending_overlay_state(pending_overlay_state);
                 self.load_mammo_group_paths(paths, ctx);
                 Ok(())
             }
