@@ -18,7 +18,8 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/mammo.rs`: mammography ordering/alignment helpers.
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
 - `src/logging.rs`: logging setup and log-level configuration.
-- `src/app.rs`: UI, app state, worker orchestration, interactions, and history.
+- `src/app.rs`: UI, application state, interactions, and worker orchestration.
+- `src/app/history.rs`: history management and preload/orchestration.
 - `tools/benchmark`: development-only end-to-end benchmark tools and synthetic DICOM generation.
 
 ## Core Invariants
@@ -71,7 +72,7 @@ Its primary purpose is consistency during development, not full architecture cov
    - Run all UI-only checks above.
    - Run `cargo test --workspace --all-targets --all-features --locked`.
    - Run module-specific validations for decode and renderer output tests.
-5. Streaming/overlay/history/concurrency changes (`app.rs` load pipeline, GSPS/SR/Parametric Map attach, worker channels):
+5. Streaming/overlay/history/concurrency changes (`app.rs` load pipeline, GSPS/SR/Parametric Map attach, worker channels; `app/history.rs` history/preload orchestration):
    - Run all launch/parsing checks above.
    - Confirm SR-only open uses the dedicated SR parser/UI path and that `load_dicom` rejects SR objects.
    - Confirm Parametric Map-only open uses the dedicated parser/UI path and that `load_dicom` rejects Parametric Map objects.
