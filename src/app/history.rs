@@ -20,6 +20,29 @@ pub(super) enum HistoryPreloadJob {
     StructuredReport(DicomSource),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum HistoryPreloadJobKey {
+    Group(String),
+    ParametricMap(String),
+    StructuredReport(String),
+}
+
+impl HistoryPreloadJob {
+    fn preload_key(&self) -> HistoryPreloadJobKey {
+        match self {
+            Self::Group(prepared) => {
+                HistoryPreloadJobKey::Group(history_preload_group_id(prepared))
+            }
+            Self::ParametricMap(path) => {
+                HistoryPreloadJobKey::ParametricMap(history_preload_source_key(path))
+            }
+            Self::StructuredReport(path) => {
+                HistoryPreloadJobKey::StructuredReport(history_preload_source_key(path))
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct HistorySingleData {
     pub(super) path: DicomSourceMeta,
@@ -453,6 +476,7 @@ impl DicomViewerApp {
     pub(super) fn clear_history_preload(&mut self) {
         self.history_preload_receiver = None;
         self.history_preload_queue.clear();
+        self.history_preload_active_key = None;
     }
 
     fn preload_report_into_history(
@@ -560,6 +584,7 @@ impl DicomViewerApp {
         let Some(job) = self.history_preload_queue.pop_front() else {
             return;
         };
+        let job_key = job.preload_key();
 
         let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
         thread::spawn(move || match job {
@@ -572,6 +597,7 @@ impl DicomViewerApp {
             }
         });
         self.history_preload_receiver = Some(rx);
+        self.history_preload_active_key = Some(job_key);
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 
@@ -580,6 +606,16 @@ impl DicomViewerApp {
         job: HistoryPreloadJob,
         ctx: &egui::Context,
     ) {
+        let job_key = job.preload_key();
+        if self.history_preload_active_key.as_ref() == Some(&job_key)
+            || self
+                .history_preload_queue
+                .iter()
+                .any(|queued| queued.preload_key() == job_key)
+        {
+            return;
+        }
+
         self.history_preload_queue.push_back(job);
         self.start_next_history_preload(ctx);
     }
@@ -859,6 +895,7 @@ impl DicomViewerApp {
                     }
                     Ok(HistoryPreloadResult::Group { viewports }) => {
                         let mut loaded = Vec::with_capacity(viewports.len());
+                        let mut render_failed = false;
                         for (path, image) in viewports {
                             let center = image.window_center;
                             let width = image.window_width;
@@ -869,7 +906,8 @@ impl DicomViewerApp {
                                     "History preload skipped group viewport (instance {:?}).",
                                     image.instance_number
                                 );
-                                continue;
+                                render_failed = true;
+                                break;
                             };
                             let path_meta = DicomSourceMeta::from(&path);
                             let texture_name =
@@ -890,7 +928,8 @@ impl DicomViewerApp {
                                 frame_scroll_accum: 0.0,
                             });
                         }
-                        if Self::is_supported_multi_view_group_size(loaded.len()) {
+                        if !render_failed && Self::is_supported_multi_view_group_size(loaded.len())
+                        {
                             let ordered_indices =
                                 order_mammo_indices(&loaded, |viewport| &viewport.image);
                             let (ordered, _, _) = Self::restore_ordered_items_or_log(
@@ -927,6 +966,7 @@ impl DicomViewerApp {
             return;
         }
 
+        self.history_preload_active_key = None;
         self.start_next_history_preload(ctx);
     }
 
@@ -982,6 +1022,22 @@ impl DicomViewerApp {
 
         clicked_index
     }
+}
+
+fn history_preload_source_key(path: &DicomSource) -> String {
+    DicomSourceMeta::from(path).identity_key().to_string()
+}
+
+fn history_preload_group_id(prepared: &PreparedLoadPaths) -> String {
+    let mut paths = Vec::with_capacity(
+        prepared.image_paths.len()
+            + prepared.structured_report_paths.len()
+            + prepared.parametric_map_paths.len(),
+    );
+    paths.extend(prepared.image_paths.iter().cloned());
+    paths.extend(prepared.structured_report_paths.iter().cloned());
+    paths.extend(prepared.parametric_map_paths.iter().cloned());
+    history_id_from_paths(&paths)
 }
 
 fn downsample_color_image(source: &ColorImage, max_dim: usize) -> ColorImage {

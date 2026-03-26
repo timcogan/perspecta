@@ -33,7 +33,8 @@ use self::history::{
     HistoryThumb,
 };
 use self::history::{
-    HistoryEntry, HistoryKind, HistoryPreloadJob, HistoryPreloadResult, HistorySingleData,
+    HistoryEntry, HistoryKind, HistoryPreloadJob, HistoryPreloadJobKey, HistoryPreloadResult,
+    HistorySingleData,
 };
 
 const APP_TITLE: &str = "Perspecta Viewer";
@@ -177,6 +178,7 @@ pub struct DicomViewerApp {
     history_pushed_for_active_group: bool,
     history_preload_receiver: Option<Receiver<Result<HistoryPreloadResult, String>>>,
     history_preload_queue: VecDeque<HistoryPreloadJob>,
+    history_preload_active_key: Option<HistoryPreloadJobKey>,
     window_center: f32,
     window_width: f32,
     pending_gsps_overlays: HashMap<String, GspsOverlay>,
@@ -239,6 +241,7 @@ impl DicomViewerApp {
             history_pushed_for_active_group: false,
             history_preload_receiver: None,
             history_preload_queue: VecDeque::new(),
+            history_preload_active_key: None,
             window_center: 0.0,
             window_width: 1.0,
             pending_gsps_overlays: HashMap::new(),
@@ -6664,6 +6667,36 @@ mod tests {
     }
 
     #[test]
+    fn preload_non_active_groups_into_history_skips_duplicate_queued_groups() {
+        let (_tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        let ctx = egui::Context::default();
+        let groups = vec![
+            PreparedLoadPaths {
+                image_paths: vec![test_source("group-0.dcm")],
+                ..Default::default()
+            },
+            PreparedLoadPaths {
+                image_paths: vec![test_source("group-1.dcm")],
+                ..Default::default()
+            },
+            PreparedLoadPaths {
+                image_paths: vec![test_source("group-2.dcm")],
+                ..Default::default()
+            },
+        ];
+
+        let mut app = DicomViewerApp {
+            history_preload_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.preload_non_active_groups_into_history(&groups, 0, None, &ctx);
+        app.preload_non_active_groups_into_history(&groups, 0, None, &ctx);
+
+        assert_eq!(app.history_preload_queue.len(), 2);
+    }
+
+    #[test]
     fn stage_structured_report_history_entries_uses_background_preload() {
         let path = write_test_structured_report_file("history-stage-report");
         let ctx = egui::Context::default();
@@ -6782,6 +6815,43 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn poll_history_preload_drops_group_when_any_viewport_render_fails() {
+        let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
+        tx.send(Ok(HistoryPreloadResult::Group {
+            viewports: vec![
+                (
+                    test_source("history-group-a.dcm"),
+                    DicomImage::test_stub_with_mono_frames(None, 1),
+                ),
+                (
+                    test_source("history-group-b.dcm"),
+                    DicomImage::test_stub_with_mono_frames(None, 1),
+                ),
+                (
+                    test_source("history-group-c.dcm"),
+                    DicomImage::test_stub(None),
+                ),
+                (
+                    test_source("history-group-d.dcm"),
+                    DicomImage::test_stub_with_mono_frames(None, 1),
+                ),
+            ],
+        }))
+        .expect("group preload should send");
+        drop(tx);
+
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            history_preload_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.poll_history_preload(&ctx);
+
+        assert!(app.history_entries.is_empty());
     }
 
     #[test]
