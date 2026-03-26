@@ -18,7 +18,7 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/mammo.rs`: mammography ordering/alignment helpers.
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
 - `src/logging.rs`: logging setup and log-level configuration.
-- `src/app.rs`: UI, app state, worker orchestration, interactions, and history.
+- `src/app.rs`, `src/app/history.rs`: UI, app state, worker orchestration, interactions, and history/preload orchestration.
 - `tools/benchmark`: development-only end-to-end benchmark tools and synthetic DICOM generation.
 
 ## Core Invariants

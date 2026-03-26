@@ -25,6 +25,17 @@ use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest, LaunchR
 use crate::mammo::{mammo_image_align, mammo_label, order_mammo_indices, preferred_mammo_slot};
 use crate::renderer::{blend_rgba_overlay, render_rgb, render_window_level};
 
+mod history;
+
+#[cfg(test)]
+use self::history::{
+    history_id_from_paths, HistoryGroupData, HistoryGroupViewportData, HistoryReportData,
+    HistoryThumb,
+};
+use self::history::{
+    HistoryEntry, HistoryKind, HistoryPreloadJob, HistoryPreloadResult, HistorySingleData,
+};
+
 const APP_TITLE: &str = "Perspecta Viewer";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const HISTORY_MAX_ENTRIES: usize = 24;
@@ -117,77 +128,6 @@ struct PreparedLoadPaths {
     pm_overlays: HashMap<String, ParametricMapOverlay>,
     gsps_files_found: usize,
     other_files_found: usize,
-}
-
-enum HistoryPreloadResult {
-    Single {
-        path: DicomSource,
-        image: Box<DicomImage>,
-    },
-    Group {
-        viewports: Vec<(DicomSource, DicomImage)>,
-    },
-    Report {
-        path: DicomSource,
-        report: Box<StructuredReportDocument>,
-    },
-}
-
-enum HistoryPreloadJob {
-    Group(PreparedLoadPaths),
-    ParametricMap(DicomSource),
-    StructuredReport(DicomSource),
-}
-
-#[derive(Clone)]
-struct HistorySingleData {
-    path: DicomSourceMeta,
-    image: DicomImage,
-    texture: TextureHandle,
-    window_center: f32,
-    window_width: f32,
-    current_frame: usize,
-    cine_fps: f32,
-}
-
-#[derive(Clone)]
-struct HistoryGroupViewportData {
-    path: DicomSourceMeta,
-    image: DicomImage,
-    texture: TextureHandle,
-    label: String,
-    window_center: f32,
-    window_width: f32,
-    current_frame: usize,
-}
-
-#[derive(Clone)]
-struct HistoryGroupData {
-    viewports: Vec<HistoryGroupViewportData>,
-    selected_index: usize,
-}
-
-#[derive(Clone)]
-struct HistoryReportData {
-    path: DicomSourceMeta,
-    report: StructuredReportDocument,
-}
-
-#[derive(Clone)]
-enum HistoryKind {
-    Single(Box<HistorySingleData>),
-    Group(HistoryGroupData),
-    Report(Box<HistoryReportData>),
-}
-
-struct HistoryThumb {
-    texture: TextureHandle,
-}
-
-struct HistoryEntry {
-    id: String,
-    kind: HistoryKind,
-    thumbs: Vec<HistoryThumb>,
 }
 
 struct ActiveViewportState {
@@ -460,114 +400,6 @@ impl DicomViewerApp {
         }
 
         inserted_any
-    }
-
-    fn commit_pending_overlay_state(&mut self, pending_overlay_state: PendingOverlayState) {
-        if pending_overlay_state.clear_history_preload {
-            self.clear_history_preload();
-        }
-
-        self.pending_gsps_overlays = pending_overlay_state.pending_gsps_overlays;
-        self.authoritative_gsps_overlay_keys =
-            pending_overlay_state.authoritative_gsps_overlay_keys;
-        self.pending_sr_overlays = pending_overlay_state.pending_sr_overlays;
-        self.authoritative_sr_overlay_keys = pending_overlay_state.authoritative_sr_overlay_keys;
-        self.pending_pm_overlays = pending_overlay_state.pending_pm_overlays;
-        self.authoritative_pm_overlay_keys = pending_overlay_state.authoritative_pm_overlay_keys;
-        self.overlay_visible = pending_overlay_state.overlay_visible;
-
-        if pending_overlay_state.attach_to_current_study {
-            self.attach_pending_overlays_to_current_study();
-            self.sync_current_state_to_history();
-        }
-    }
-
-    fn prepare_load_paths<T>(paths: Vec<T>) -> PreparedLoadPaths
-    where
-        T: Into<DicomSource>,
-    {
-        let mut prepared = PreparedLoadPaths::default();
-        let mut prepared_images = Vec::<PreparedImagePath>::new();
-        let mut prepared_parametric_maps = Vec::<PreparedParametricMapPath>::new();
-
-        for path in paths {
-            let path = path.into();
-            match classify_dicom_path(&path) {
-                Ok(DicomPathKind::Gsps) => {
-                    prepared.gsps_files_found = prepared.gsps_files_found.saturating_add(1);
-                    match load_gsps_overlays(&path) {
-                        Ok(overlays) => {
-                            Self::merge_gsps_overlays(&mut prepared.gsps_overlays, &overlays)
-                        }
-                        Err(err) => {
-                            log::warn!("Could not parse GSPS input: {err:#}");
-                        }
-                    }
-                }
-                Ok(DicomPathKind::StructuredReport) => {
-                    match load_mammography_cad_sr_overlays(&path) {
-                        Ok(overlays) => {
-                            Self::merge_sr_overlays(&mut prepared.sr_overlays, &overlays)
-                        }
-                        Err(err) => {
-                            log::warn!("Could not parse Mammography CAD SR overlay input: {err:#}");
-                        }
-                    }
-                    prepared.structured_report_paths.push(path);
-                }
-                Ok(DicomPathKind::ParametricMap) => match load_parametric_map_overlays(&path) {
-                    Ok(overlays) => {
-                        prepared_parametric_maps.push(PreparedParametricMapPath { path, overlays })
-                    }
-                    Err(err) => {
-                        log::warn!("Could not parse Parametric Map overlay input: {err:#}");
-                        prepared.parametric_map_paths.push(path);
-                    }
-                },
-                Ok(DicomPathKind::Image) | Err(_) => {
-                    let sop_instance_uid = match read_sop_instance_uid(&path) {
-                        Ok(uid) => uid,
-                        Err(err) => {
-                            log::warn!("Could not inspect image SOP Instance UID: {err:#}");
-                            None
-                        }
-                    };
-                    prepared_images.push(PreparedImagePath {
-                        path,
-                        sop_instance_uid,
-                    });
-                }
-                Ok(DicomPathKind::Other) => {
-                    prepared.other_files_found = prepared.other_files_found.saturating_add(1);
-                }
-            }
-        }
-
-        let selected_image_uids = prepared_images
-            .iter()
-            .filter_map(|image| image.sop_instance_uid.clone())
-            .collect::<HashSet<_>>();
-        prepared.image_paths = prepared_images
-            .into_iter()
-            .map(|image| image.path)
-            .collect::<Vec<_>>();
-
-        for prepared_map in prepared_parametric_maps {
-            let matched_overlays = prepared_map
-                .overlays
-                .into_iter()
-                .filter(|(sop_uid, overlay)| {
-                    selected_image_uids.contains(sop_uid) && !overlay.is_empty()
-                })
-                .collect::<HashMap<_, _>>();
-            if matched_overlays.is_empty() {
-                prepared.parametric_map_paths.push(prepared_map.path);
-            } else {
-                Self::merge_pm_overlays(&mut prepared.pm_overlays, &matched_overlays);
-            }
-        }
-
-        prepared
     }
 
     fn attach_matching_gsps_overlay(
@@ -1601,1547 +1433,6 @@ impl DicomViewerApp {
         self.load_error_message = Some(message.into());
     }
 
-    fn next_history_texture_name(&mut self, prefix: &str) -> String {
-        self.history_nonce = self.history_nonce.saturating_add(1);
-        format!("history-{prefix}-{}", self.history_nonce)
-    }
-
-    fn source_texture_name(prefix: &str, source: &DicomSourceMeta) -> String {
-        format!("{prefix}:{}", source.identity_key())
-    }
-
-    fn build_history_thumb(
-        &mut self,
-        image: &DicomImage,
-        frame_index: usize,
-        window_center: f32,
-        window_width: f32,
-        texture_key_prefix: &str,
-        ctx: &egui::Context,
-    ) -> Option<TextureHandle> {
-        let frame_count = image.frame_count();
-        if frame_count == 0 {
-            return None;
-        }
-        let safe_frame = frame_index.min(frame_count.saturating_sub(1));
-        let rendered =
-            Self::render_image_frame(image, safe_frame, window_center, window_width, false)?;
-        let thumb = downsample_color_image(&rendered, HISTORY_THUMB_MAX_DIM);
-        let texture_name = self.next_history_texture_name(texture_key_prefix);
-        Some(ctx.load_texture(texture_name, thumb, TextureOptions::LINEAR))
-    }
-
-    fn build_group_history_thumb(
-        &mut self,
-        group: &[MammoViewport],
-        texture_key_prefix: &str,
-        ctx: &egui::Context,
-    ) -> Option<TextureHandle> {
-        let ordered_indices = order_mammo_indices(group, |viewport| &viewport.image);
-        let mut rendered_views = Vec::new();
-        for index in ordered_indices {
-            let viewport = &group[index];
-            let frame_count = viewport.image.frame_count();
-            if frame_count == 0 {
-                continue;
-            }
-            let safe_frame = viewport.current_frame.min(frame_count.saturating_sub(1));
-            let rendered = Self::render_image_frame(
-                &viewport.image,
-                safe_frame,
-                viewport.window_center,
-                viewport.window_width,
-                false,
-            )?;
-            rendered_views.push(rendered);
-        }
-
-        if rendered_views.is_empty() {
-            return None;
-        }
-
-        let thumb = if rendered_views.len() == 1 {
-            downsample_color_image(&rendered_views[0], HISTORY_THUMB_MAX_DIM)
-        } else {
-            compose_grid_thumb(&rendered_views, HISTORY_THUMB_MAX_DIM)
-        };
-
-        let texture_name = self.next_history_texture_name(texture_key_prefix);
-        Some(ctx.load_texture(texture_name, thumb, TextureOptions::LINEAR))
-    }
-
-    fn build_report_history_thumb(
-        &mut self,
-        _report: &StructuredReportDocument,
-        texture_key_prefix: &str,
-        ctx: &egui::Context,
-    ) -> TextureHandle {
-        const OUTER_WIDTH: usize = 60;
-        const OUTER_HEIGHT: usize = 76;
-        const BORDER_INSET: usize = 2;
-        const INNER_X: usize = BORDER_INSET;
-        const INNER_Y: usize = BORDER_INSET;
-        const INNER_WIDTH: usize = OUTER_WIDTH - (BORDER_INSET * 2);
-        const INNER_HEIGHT: usize = OUTER_HEIGHT - (BORDER_INSET * 2);
-        const HEADER_HEIGHT: usize = 8;
-        const MAX_LINE_WIDTH: usize = 40;
-        const TEXT_PAD: usize = (INNER_WIDTH - MAX_LINE_WIDTH) / 2;
-        const TEXT_START_X: usize = INNER_X + TEXT_PAD;
-        const TEXT_START_Y: usize = INNER_Y + HEADER_HEIGHT + TEXT_PAD;
-        const TEXT_LINE_HEIGHT: usize = 4;
-        const TEXT_LINE_GAP: usize = 7;
-        const TEXT_LINE_STEP_Y: usize = TEXT_LINE_HEIGHT + TEXT_LINE_GAP;
-        const TEXT_LINE_WIDTHS: &[usize] = &[
-            MAX_LINE_WIDTH,
-            MAX_LINE_WIDTH - 4,
-            MAX_LINE_WIDTH - 10,
-            MAX_LINE_WIDTH - 6,
-            MAX_LINE_WIDTH - 18,
-        ];
-
-        let background = egui::Color32::TRANSPARENT;
-        let border = egui::Color32::from_rgb(40, 49, 60);
-        let header = border;
-        let paper = egui::Color32::from_rgb(20, 27, 34);
-        let text_line = egui::Color32::from_rgb(142, 152, 164);
-        let mut pixels = vec![background; OUTER_WIDTH * OUTER_HEIGHT];
-
-        let fill_rect = |pixels: &mut [egui::Color32],
-                         x: usize,
-                         y: usize,
-                         rect_width: usize,
-                         rect_height: usize,
-                         color: egui::Color32| {
-            let clamped_x1 = (x + rect_width).min(OUTER_WIDTH);
-            let clamped_y1 = (y + rect_height).min(OUTER_HEIGHT);
-            for row_y in y.min(OUTER_HEIGHT)..clamped_y1 {
-                let row = row_y * OUTER_WIDTH;
-                for col_x in x.min(OUTER_WIDTH)..clamped_x1 {
-                    pixels[row + col_x] = color;
-                }
-            }
-        };
-
-        fill_rect(&mut pixels, 0, 0, OUTER_WIDTH, OUTER_HEIGHT, border);
-        fill_rect(
-            &mut pixels,
-            INNER_X,
-            INNER_Y,
-            INNER_WIDTH,
-            INNER_HEIGHT,
-            paper,
-        );
-        fill_rect(
-            &mut pixels,
-            INNER_X,
-            INNER_Y,
-            INNER_WIDTH,
-            HEADER_HEIGHT,
-            header,
-        );
-        for (line_index, &line_width) in TEXT_LINE_WIDTHS.iter().enumerate() {
-            fill_rect(
-                &mut pixels,
-                TEXT_START_X,
-                TEXT_START_Y + (line_index * TEXT_LINE_STEP_Y),
-                line_width,
-                TEXT_LINE_HEIGHT,
-                text_line,
-            );
-        }
-
-        let texture_name = self.next_history_texture_name(texture_key_prefix);
-        ctx.load_texture(
-            texture_name,
-            ColorImage {
-                size: [OUTER_WIDTH, OUTER_HEIGHT],
-                pixels,
-            },
-            TextureOptions::LINEAR,
-        )
-    }
-
-    fn upsert_history_entry(&mut self, entry: HistoryEntry) {
-        if let Some(existing_index) = self
-            .history_entries
-            .iter()
-            .position(|existing| existing.id == entry.id)
-        {
-            self.history_entries.remove(existing_index);
-        }
-        self.history_entries.insert(0, entry);
-        if self.history_entries.len() > HISTORY_MAX_ENTRIES {
-            self.history_entries.truncate(HISTORY_MAX_ENTRIES);
-        }
-    }
-
-    fn push_single_history_entry(&mut self, single: HistorySingleData, ctx: &egui::Context) {
-        let Some(thumb_texture) = self.build_history_thumb(
-            &single.image,
-            single.current_frame,
-            single.window_center,
-            single.window_width,
-            "single",
-            ctx,
-        ) else {
-            return;
-        };
-
-        let history_paths = vec![single.path.clone()];
-        self.upsert_history_entry(HistoryEntry {
-            id: history_id_from_paths(&history_paths),
-            kind: HistoryKind::Single(Box::new(single)),
-            thumbs: vec![HistoryThumb {
-                texture: thumb_texture,
-            }],
-        });
-    }
-
-    fn push_group_history_entry(
-        &mut self,
-        group: &[MammoViewport],
-        selected_index: usize,
-        ctx: &egui::Context,
-    ) {
-        if !Self::is_supported_multi_view_group_size(group.len()) {
-            return;
-        }
-
-        let mut paths = Vec::new();
-        let mut cached_viewports = Vec::new();
-        for viewport in group {
-            paths.push(viewport.path.clone());
-            cached_viewports.push(HistoryGroupViewportData {
-                path: viewport.path.clone(),
-                image: viewport.image.clone(),
-                texture: viewport.texture.clone(),
-                label: viewport.label.clone(),
-                window_center: viewport.window_center,
-                window_width: viewport.window_width,
-                current_frame: viewport.current_frame,
-            });
-        }
-        let Some(group_thumb) = self.build_group_history_thumb(group, "group", ctx) else {
-            return;
-        };
-
-        self.upsert_history_entry(HistoryEntry {
-            id: history_id_from_paths(&paths),
-            kind: HistoryKind::Group(HistoryGroupData {
-                viewports: cached_viewports,
-                selected_index: selected_index.min(group.len().saturating_sub(1)),
-            }),
-            thumbs: vec![HistoryThumb {
-                texture: group_thumb,
-            }],
-        });
-    }
-
-    fn push_report_history_entry(
-        &mut self,
-        path: DicomSourceMeta,
-        report: StructuredReportDocument,
-        ctx: &egui::Context,
-    ) {
-        let thumb_texture = self.build_report_history_thumb(&report, "report", ctx);
-        let history_paths = vec![path.clone()];
-        self.upsert_history_entry(HistoryEntry {
-            id: history_id_from_paths(&history_paths),
-            kind: HistoryKind::Report(Box::new(HistoryReportData { path, report })),
-            thumbs: vec![HistoryThumb {
-                texture: thumb_texture,
-            }],
-        });
-    }
-
-    fn current_history_id(&self) -> Option<String> {
-        if let Some(path) = self.current_single_path.as_ref() {
-            let paths = vec![path.clone()];
-            return Some(history_id_from_paths(&paths));
-        }
-
-        if !self.mammo_group_complete() {
-            return None;
-        }
-
-        let paths = self
-            .loaded_mammo_viewports()
-            .map(|viewport| viewport.path.clone())
-            .collect::<Vec<_>>();
-        Some(history_id_from_paths(&paths))
-    }
-
-    fn has_open_study(&self) -> bool {
-        self.image.is_some()
-            || self.report.is_some()
-            || self.current_single_path.is_some()
-            || self.has_mammo_group()
-            || self.single_load_receiver.is_some()
-            || self.dicomweb_receiver.is_some()
-            || self.dicomweb_active_path_receiver.is_some()
-            || !self.dicomweb_active_pending_paths.is_empty()
-    }
-
-    fn clear_active_study(&mut self) {
-        self.pending_launch_request = None;
-        self.pending_local_open_paths = None;
-        self.pending_local_open_armed = false;
-        self.pending_history_open_id = None;
-        self.pending_history_open_armed = false;
-        self.dicomweb_receiver = None;
-        self.dicomweb_active_path_receiver = None;
-        self.dicomweb_active_group_expected = None;
-        self.dicomweb_active_group_paths.clear();
-        self.dicomweb_completed_background_groups.clear();
-        self.dicomweb_active_pending_paths.clear();
-        self.single_load_receiver = None;
-        self.mammo_load_receiver = None;
-        self.mammo_load_sender = None;
-        self.clear_history_preload();
-        self.history_pushed_for_active_group = false;
-        self.pending_gsps_overlays.clear();
-        self.authoritative_gsps_overlay_keys.clear();
-        self.pending_sr_overlays.clear();
-        self.authoritative_sr_overlay_keys.clear();
-        self.pending_pm_overlays.clear();
-        self.authoritative_pm_overlay_keys.clear();
-        self.clear_single_viewer();
-        self.mammo_group.clear();
-        self.mammo_selected_index = 0;
-        self.clear_load_error();
-    }
-
-    fn close_current_group(&mut self, ctx: &egui::Context) {
-        if !self.has_open_study() {
-            return;
-        }
-
-        self.sync_current_state_to_history();
-        let next_history_index = if let Some(current_id) = self.current_history_id() {
-            if let Some(index) = self
-                .history_entries
-                .iter()
-                .position(|entry| entry.id == current_id)
-            {
-                self.history_entries.remove(index);
-                if self.history_entries.is_empty() {
-                    None
-                } else {
-                    Some(index.min(self.history_entries.len().saturating_sub(1)))
-                }
-            } else if self.history_entries.is_empty() {
-                None
-            } else {
-                Some(0)
-            }
-        } else if self.history_entries.is_empty() {
-            None
-        } else {
-            Some(0)
-        };
-
-        self.clear_active_study();
-        if let Some(index) = next_history_index {
-            self.open_history_entry(index, ctx);
-        } else {
-            ctx.request_repaint();
-        }
-    }
-
-    fn handle_close_group_shortcut(&mut self, ctx: &egui::Context) -> bool {
-        if self.has_open_study() {
-            self.close_current_group(ctx);
-            false
-        } else {
-            true
-        }
-    }
-
-    fn move_current_history_to_front(&mut self) {
-        let Some(current_id) = self.current_history_id() else {
-            return;
-        };
-        let Some(index) = self
-            .history_entries
-            .iter()
-            .position(|entry| entry.id == current_id)
-        else {
-            return;
-        };
-        if index == 0 {
-            return;
-        }
-        let entry = self.history_entries.remove(index);
-        self.history_entries.insert(0, entry);
-    }
-
-    fn clear_history_preload(&mut self) {
-        self.history_preload_receiver = None;
-        self.history_preload_queue.clear();
-    }
-
-    fn preload_report_into_history(
-        path: DicomSource,
-        tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
-    ) {
-        let result = load_structured_report(&path)
-            .map(|report| HistoryPreloadResult::Report {
-                path: path.clone(),
-                report: Box::new(report),
-            })
-            .map_err(|err| format!("{err:#}"));
-        let _ = tx.send(result);
-    }
-
-    fn preload_parametric_map_into_history(
-        path: DicomSource,
-        tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
-    ) {
-        let result = load_parametric_map(&path)
-            .map(|image| HistoryPreloadResult::Single {
-                path: path.clone(),
-                image: Box::new(image),
-            })
-            .map_err(|err| format!("{err:#}"));
-        let _ = tx.send(result);
-    }
-
-    fn preload_group_into_history(
-        prepared: PreparedLoadPaths,
-        tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
-    ) {
-        let load_paths = prepared.image_paths;
-        let report_paths = prepared.structured_report_paths;
-        let parametric_map_paths = prepared.parametric_map_paths;
-        let gsps_overlays = prepared.gsps_overlays;
-        let sr_overlays = prepared.sr_overlays;
-        let pm_overlays = prepared.pm_overlays;
-
-        if load_paths.is_empty() {
-            if report_paths.is_empty() && parametric_map_paths.is_empty() {
-                let _ = tx.send(Err("Unsupported preload group size".to_string()));
-                return;
-            }
-            for path in report_paths {
-                Self::preload_report_into_history(path, tx);
-            }
-            for path in parametric_map_paths {
-                Self::preload_parametric_map_into_history(path, tx);
-            }
-            return;
-        }
-
-        for path in report_paths {
-            Self::preload_report_into_history(path, tx);
-        }
-        for path in parametric_map_paths {
-            Self::preload_parametric_map_into_history(path, tx);
-        }
-
-        let result = match load_paths.len() {
-            1 => {
-                let path = load_paths[0].clone();
-                load_dicom(&path)
-                    .map(|mut image| {
-                        Self::attach_matching_gsps_overlay(&mut image, &gsps_overlays);
-                        Self::attach_matching_sr_overlay(&mut image, &sr_overlays);
-                        Self::attach_matching_pm_overlay(&mut image, &pm_overlays);
-                        image
-                    })
-                    .map(|image| HistoryPreloadResult::Single {
-                        path,
-                        image: Box::new(image),
-                    })
-                    .map_err(|err| format!("{err:#}"))
-            }
-            count if Self::is_supported_multi_view_group_size(count) => {
-                let mut viewports = Vec::with_capacity(load_paths.len());
-                for path in &load_paths {
-                    let image = match load_dicom(path).map_err(|err| format!("{err:#}")) {
-                        Ok(image) => image,
-                        Err(err) => {
-                            let _ = tx.send(Err(err));
-                            return;
-                        }
-                    };
-                    let mut image = image;
-                    Self::attach_matching_gsps_overlay(&mut image, &gsps_overlays);
-                    Self::attach_matching_sr_overlay(&mut image, &sr_overlays);
-                    Self::attach_matching_pm_overlay(&mut image, &pm_overlays);
-                    viewports.push((path.clone(), image));
-                }
-                Ok(HistoryPreloadResult::Group { viewports })
-            }
-            _ => Err("Unsupported preload group size".to_string()),
-        };
-        let _ = tx.send(result);
-    }
-
-    fn start_next_history_preload(&mut self, ctx: &egui::Context) {
-        if self.history_preload_receiver.is_some() {
-            return;
-        }
-
-        let Some(job) = self.history_preload_queue.pop_front() else {
-            return;
-        };
-
-        let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
-        thread::spawn(move || match job {
-            HistoryPreloadJob::Group(prepared) => Self::preload_group_into_history(prepared, &tx),
-            HistoryPreloadJob::ParametricMap(path) => {
-                Self::preload_parametric_map_into_history(path, &tx);
-            }
-            HistoryPreloadJob::StructuredReport(path) => {
-                Self::preload_report_into_history(path, &tx);
-            }
-        });
-        self.history_preload_receiver = Some(rx);
-        ctx.request_repaint_after(Duration::from_millis(16));
-    }
-
-    fn enqueue_history_preload_job(&mut self, job: HistoryPreloadJob, ctx: &egui::Context) {
-        self.history_preload_queue.push_back(job);
-        self.start_next_history_preload(ctx);
-    }
-
-    fn preload_non_active_groups_into_history(
-        &mut self,
-        groups: &[PreparedLoadPaths],
-        open_group: usize,
-        completed_background_groups: Option<&HashSet<usize>>,
-        ctx: &egui::Context,
-    ) {
-        let queued_groups = groups
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(index, _)| {
-                *index != open_group
-                    && completed_background_groups
-                        .map(|completed_groups| !completed_groups.contains(index))
-                        .unwrap_or(true)
-            })
-            .map(|(_, group)| group.clone())
-            .collect::<Vec<_>>();
-
-        for group in queued_groups {
-            self.enqueue_history_preload_job(HistoryPreloadJob::Group(group), ctx);
-        }
-    }
-
-    fn sync_current_state_to_history(&mut self) {
-        let loaded_mammo_count = self.loaded_mammo_count();
-        let selected_index = self
-            .mammo_selected_index
-            .min(self.mammo_group.len().saturating_sub(1));
-        let Some(current_id) = self.current_history_id() else {
-            return;
-        };
-        let Some(entry) = self
-            .history_entries
-            .iter_mut()
-            .find(|entry| entry.id == current_id)
-        else {
-            return;
-        };
-
-        match &mut entry.kind {
-            HistoryKind::Single(single) => {
-                if let Some(path) = self.current_single_path.as_ref() {
-                    single.path = path.clone();
-                }
-                if let Some(image) = self.image.as_ref() {
-                    single.image.gsps_overlay = image.gsps_overlay.clone();
-                    single.image.sr_overlay = image.sr_overlay.clone();
-                    single.image.pm_overlay = image.pm_overlay.clone();
-                }
-                if let Some(texture) = self.texture.as_ref() {
-                    single.texture = texture.clone();
-                }
-                single.window_center = self.window_center;
-                single.window_width = self.window_width;
-                single.current_frame = self.current_frame;
-                single.cine_fps = self.cine_fps;
-            }
-            HistoryKind::Group(group) => {
-                if loaded_mammo_count == 0 {
-                    return;
-                }
-                group.selected_index = selected_index;
-                for cached_viewport in &mut group.viewports {
-                    if let Some(active_viewport) = self
-                        .mammo_group
-                        .iter()
-                        .filter_map(Option::as_ref)
-                        .find(|viewport| viewport.path == cached_viewport.path)
-                    {
-                        cached_viewport.image.gsps_overlay =
-                            active_viewport.image.gsps_overlay.clone();
-                        cached_viewport.image.sr_overlay = active_viewport.image.sr_overlay.clone();
-                        cached_viewport.image.pm_overlay = active_viewport.image.pm_overlay.clone();
-                        cached_viewport.texture = active_viewport.texture.clone();
-                        cached_viewport.window_center = active_viewport.window_center;
-                        cached_viewport.window_width = active_viewport.window_width;
-                        cached_viewport.current_frame = active_viewport.current_frame;
-                    }
-                    Self::attach_matching_gsps_overlay(
-                        &mut cached_viewport.image,
-                        &self.pending_gsps_overlays,
-                    );
-                    Self::attach_matching_sr_overlay(
-                        &mut cached_viewport.image,
-                        &self.pending_sr_overlays,
-                    );
-                    Self::attach_matching_pm_overlay(
-                        &mut cached_viewport.image,
-                        &self.pending_pm_overlays,
-                    );
-                }
-            }
-            HistoryKind::Report(report) => {
-                if let Some(path) = self.current_single_path.as_ref() {
-                    report.path = path.clone();
-                }
-            }
-        }
-    }
-
-    fn open_history_entry(&mut self, index: usize, ctx: &egui::Context) {
-        self.sync_current_state_to_history();
-        self.single_load_receiver = None;
-        self.mammo_load_receiver = None;
-        self.mammo_load_sender = None;
-
-        let Some(kind) = self
-            .history_entries
-            .get(index)
-            .map(|entry| entry.kind.clone())
-        else {
-            return;
-        };
-
-        match kind {
-            HistoryKind::Single(single) => {
-                self.report = None;
-                self.image = Some(single.image);
-                self.current_single_path = Some(single.path);
-                self.texture = None;
-                self.overlay_visible = false;
-                self.window_center = single.window_center;
-                self.window_width = single.window_width.max(1.0);
-                self.current_frame = single.current_frame;
-                self.cine_mode = false;
-                self.last_cine_advance = None;
-                self.cine_fps = single.cine_fps.clamp(1.0, 120.0);
-                self.mammo_group.clear();
-                self.mammo_selected_index = 0;
-                self.reset_single_view_transform();
-                self.single_view_frame_scroll_accum = 0.0;
-                if let Some(image) = self.image.as_ref() {
-                    let frame_count = image.frame_count();
-                    if frame_count == 0 {
-                        self.current_frame = 0;
-                    } else {
-                        self.current_frame = self.current_frame.min(frame_count.saturating_sub(1));
-                    }
-                }
-                self.attach_pending_overlays_to_current_study();
-                self.sync_current_state_to_history();
-                self.clear_load_error();
-                self.rebuild_texture(ctx);
-                log::info!("Loaded study from memory cache.");
-                ctx.request_repaint();
-            }
-            HistoryKind::Group(group) => {
-                self.clear_single_viewer();
-                self.overlay_visible = false;
-                let ordered_indices =
-                    order_mammo_indices(&group.viewports, |viewport| &viewport.image);
-                let (ordered_viewports, selected_index, _) = Self::restore_ordered_items_or_log(
-                    group.viewports,
-                    ordered_indices,
-                    Some(group.selected_index),
-                    "restoring history group",
-                );
-                self.mammo_group = ordered_viewports
-                    .into_iter()
-                    .map(|viewport| {
-                        Some(MammoViewport {
-                            path: viewport.path,
-                            image: viewport.image,
-                            texture: viewport.texture,
-                            label: viewport.label,
-                            window_center: viewport.window_center,
-                            window_width: viewport.window_width,
-                            current_frame: viewport.current_frame,
-                            zoom: 1.0,
-                            pan: egui::Vec2::ZERO,
-                            frame_scroll_accum: 0.0,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                if self.loaded_mammo_count() == 0 {
-                    log::warn!("History entry had no cached group images.");
-                    return;
-                }
-                self.mammo_selected_index = selected_index
-                    .unwrap_or(group.selected_index)
-                    .min(self.mammo_group.len().saturating_sub(1));
-                self.attach_pending_overlays_to_current_study();
-                self.refresh_active_textures(ctx);
-                self.sync_current_state_to_history();
-                self.clear_load_error();
-                log::info!("Loaded grouped study from memory cache.");
-                ctx.request_repaint();
-            }
-            HistoryKind::Report(report) => {
-                self.clear_single_viewer();
-                self.mammo_group.clear();
-                self.report = Some(report.report);
-                self.current_single_path = Some(report.path);
-                self.clear_load_error();
-                log::info!("Loaded structured report from memory cache.");
-                ctx.request_repaint();
-            }
-        }
-    }
-
-    fn cycle_history_entry(&mut self, direction: i32) {
-        let len = self.history_entries.len();
-        if len <= 1 {
-            return;
-        }
-
-        let current_index = self
-            .pending_history_open_id
-            .as_deref()
-            .and_then(|id| self.history_entries.iter().position(|entry| entry.id == id))
-            .or_else(|| {
-                self.current_history_id()
-                    .as_deref()
-                    .and_then(|id| self.history_entries.iter().position(|entry| entry.id == id))
-            })
-            .map(|index| index % len)
-            .unwrap_or(0);
-
-        let next_index = if direction < 0 {
-            if current_index == 0 {
-                len - 1
-            } else {
-                current_index - 1
-            }
-        } else {
-            (current_index + 1) % len
-        };
-
-        self.queue_history_open(next_index);
-    }
-
-    fn handle_launch_request(&mut self, request: LaunchRequest, ctx: &egui::Context) {
-        match request {
-            LaunchRequest::LocalPaths(paths) => self.queue_local_paths_open(paths),
-            LaunchRequest::LocalGroups { groups, open_group } => {
-                self.load_local_groups(groups, open_group, ctx)
-            }
-            LaunchRequest::DicomWebGroups(request) => self.start_dicomweb_group_download(request),
-            LaunchRequest::DicomWeb(request) => self.start_dicomweb_download(request),
-        }
-    }
-
-    fn load_local_groups<T>(&mut self, groups: Vec<Vec<T>>, open_group: usize, ctx: &egui::Context)
-    where
-        T: Clone + Into<DicomSource>,
-    {
-        if groups.is_empty() {
-            self.set_load_error("Launch request had no groups to open.");
-            log::warn!("Launch request had no groups to open.");
-            return;
-        }
-
-        self.clear_load_error();
-        let mut preload_groups = Vec::with_capacity(groups.len());
-        for (index, group) in groups.iter().enumerate() {
-            let prepared = Self::prepare_load_paths(group.clone());
-            let entry_count = if prepared.image_paths.is_empty() {
-                prepared.structured_report_paths.len()
-            } else {
-                prepared.image_paths.len()
-            };
-            if !Self::is_supported_prepared_group(&prepared) {
-                let err = Self::format_group_size_error(index + 1, entry_count);
-                self.set_load_error(err.clone());
-                log::warn!("{err}");
-                return;
-            }
-            preload_groups.push(prepared);
-        }
-
-        let active_group = open_group.min(groups.len().saturating_sub(1));
-        let _ = self.load_selected_paths(groups[active_group].clone(), ctx);
-        self.preload_non_active_groups_into_history(&preload_groups, active_group, None, ctx);
-    }
-
-    fn start_dicomweb_download(&mut self, request: DicomWebLaunchRequest) {
-        if self.dicomweb_receiver.is_some() {
-            log::warn!("DICOMweb download already in progress.");
-            return;
-        }
-
-        self.clear_load_error();
-        self.sync_current_state_to_history();
-        self.clear_history_preload();
-        self.mammo_load_receiver = None;
-        self.mammo_load_sender = None;
-        self.history_pushed_for_active_group = false;
-        self.pending_gsps_overlays.clear();
-        self.authoritative_gsps_overlay_keys.clear();
-        self.pending_sr_overlays.clear();
-        self.authoritative_sr_overlay_keys.clear();
-        self.pending_pm_overlays.clear();
-        self.authoritative_pm_overlay_keys.clear();
-        self.overlay_visible = false;
-        self.dicomweb_active_path_receiver = None;
-        self.dicomweb_active_group_expected = None;
-        self.dicomweb_active_group_paths.clear();
-        self.dicomweb_completed_background_groups.clear();
-        self.dicomweb_active_pending_paths.clear();
-        log::info!("Loading study from DICOMweb...");
-        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
-        thread::spawn(move || {
-            let result = download_dicomweb_request(&request).map_err(|err| format!("{err:#}"));
-            let _ = tx.send(result);
-        });
-        self.dicomweb_receiver = Some(rx);
-    }
-
-    fn start_dicomweb_group_download(&mut self, request: DicomWebGroupedLaunchRequest) {
-        if self.dicomweb_receiver.is_some() {
-            log::warn!("DICOMweb download already in progress.");
-            return;
-        }
-
-        self.clear_load_error();
-        self.sync_current_state_to_history();
-        self.clear_history_preload();
-        self.mammo_load_receiver = None;
-        self.mammo_load_sender = None;
-        self.history_pushed_for_active_group = false;
-        self.pending_gsps_overlays.clear();
-        self.authoritative_gsps_overlay_keys.clear();
-        self.pending_sr_overlays.clear();
-        self.authoritative_sr_overlay_keys.clear();
-        self.pending_pm_overlays.clear();
-        self.authoritative_pm_overlay_keys.clear();
-        self.overlay_visible = false;
-        log::info!("Loading grouped study from DICOMweb...");
-        self.dicomweb_active_group_expected = None;
-        self.dicomweb_active_group_paths.clear();
-        self.dicomweb_completed_background_groups.clear();
-        self.dicomweb_active_pending_paths.clear();
-
-        let (active_path_tx, active_path_rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
-        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
-        thread::spawn(move || {
-            let result = download_dicomweb_group_request(&request, |update| {
-                let _ = active_path_tx.send(update);
-            })
-            .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(result);
-        });
-        self.dicomweb_active_path_receiver = Some(active_path_rx);
-        self.dicomweb_receiver = Some(rx);
-    }
-
-    fn insert_loaded_mammo(
-        &mut self,
-        mut pending: PendingLoad,
-        ctx: &egui::Context,
-    ) -> Result<(), String> {
-        let slot = preferred_mammo_slot(&pending.image, self.mammo_group.len(), |index| {
-            self.mammo_group
-                .get(index)
-                .and_then(Option::as_ref)
-                .is_none()
-        })
-        .or_else(|| self.mammo_group.iter().position(Option::is_none));
-
-        let Some(slot_index) = slot else {
-            return Err(format!(
-                "Discarded streamed image: no available mammo slot (loaded={}, capacity={})",
-                self.loaded_mammo_count(),
-                self.mammo_group.len()
-            ));
-        };
-
-        Self::attach_matching_gsps_overlay(&mut pending.image, &self.pending_gsps_overlays);
-        Self::attach_matching_sr_overlay(&mut pending.image, &self.pending_sr_overlays);
-        Self::attach_matching_pm_overlay(&mut pending.image, &self.pending_pm_overlays);
-
-        let default_center = pending.image.window_center;
-        let default_width = pending.image.window_width;
-        let Some(color_image) =
-            Self::render_image_frame(&pending.image, 0, default_center, default_width, false)
-        else {
-            return Err("Could not prepare preview for image (no decodable frame).".to_string());
-        };
-
-        let path_meta = DicomSourceMeta::from(&pending.path);
-        let texture_name = Self::source_texture_name("mammo-group", &path_meta);
-        let texture = ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
-        let label = mammo_label(&pending.image, &path_meta);
-        self.mammo_group[slot_index] = Some(MammoViewport {
-            path: path_meta,
-            image: pending.image,
-            texture,
-            label,
-            window_center: default_center,
-            window_width: default_width,
-            current_frame: 0,
-            zoom: 1.0,
-            pan: egui::Vec2::ZERO,
-            frame_scroll_accum: 0.0,
-        });
-
-        if self.loaded_mammo_count() == 1 {
-            if let Some(first_loaded_slot) = self.mammo_group.iter().position(Option::is_some) {
-                self.mammo_selected_index = first_loaded_slot;
-            }
-        }
-        Ok(())
-    }
-
-    fn reorder_complete_mammo_group(&mut self) {
-        if !self.mammo_group_complete() {
-            return;
-        }
-
-        let selected_path = self
-            .mammo_group
-            .get(self.mammo_selected_index)
-            .and_then(Option::as_ref)
-            .map(|viewport| viewport.path.clone());
-
-        let viewports = self
-            .mammo_group
-            .iter_mut()
-            .filter_map(Option::take)
-            .collect::<Vec<_>>();
-        if viewports.len() != self.mammo_group.len() {
-            self.mammo_group = viewports.into_iter().map(Some).collect();
-            self.mammo_selected_index = self
-                .mammo_selected_index
-                .min(self.mammo_group.len().saturating_sub(1));
-            return;
-        }
-
-        let ordered_indices = order_mammo_indices(&viewports, |viewport| &viewport.image);
-        let (ordered, _, reordered) = Self::restore_ordered_items_or_log(
-            viewports,
-            ordered_indices,
-            None,
-            "reordering active group",
-        );
-        if !reordered {
-            self.mammo_group = ordered.into_iter().map(Some).collect::<Vec<_>>();
-            self.mammo_selected_index = self
-                .mammo_selected_index
-                .min(self.mammo_group.len().saturating_sub(1));
-            return;
-        }
-        self.mammo_group = ordered.into_iter().map(Some).collect::<Vec<_>>();
-
-        if let Some(selected_path) = selected_path {
-            if let Some(index) = self.mammo_group.iter().position(|slot| {
-                slot.as_ref()
-                    .is_some_and(|viewport| viewport.path == selected_path)
-            }) {
-                self.mammo_selected_index = index;
-                return;
-            }
-        }
-
-        self.mammo_selected_index = self
-            .mammo_group
-            .iter()
-            .position(Option::is_some)
-            .unwrap_or(0);
-    }
-
-    fn poll_dicomweb_active_paths(&mut self, ctx: &egui::Context) {
-        let mut keep_receiver = false;
-        if let Some(receiver) = self.dicomweb_active_path_receiver.take() {
-            keep_receiver = true;
-            loop {
-                match receiver.try_recv() {
-                    Ok(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(count)) => {
-                        self.dicomweb_active_group_expected = Some(count);
-                        if Self::is_supported_multi_view_group_size(count) {
-                            self.mammo_load_receiver = None;
-                            self.mammo_load_sender = None;
-                            self.history_pushed_for_active_group = false;
-                            self.clear_single_viewer();
-                            self.mammo_group = (0..count).map(|_| None).collect();
-                            self.mammo_selected_index = 0;
-                            self.cine_mode = false;
-                            self.last_cine_advance = None;
-                            log::info!(
-                                "Loading grouped study from DICOMweb (streaming active group {}, {} views)...",
-                                Self::multi_view_layout_label(count),
-                                count
-                            );
-                            let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
-                            self.mammo_load_sender = Some(tx);
-                            self.mammo_load_receiver = Some(rx);
-                        }
-                    }
-                    Ok(DicomWebGroupStreamUpdate::ActivePath(path)) => {
-                        self.dicomweb_active_pending_paths.push_back(path);
-                    }
-                    Ok(DicomWebGroupStreamUpdate::BackgroundGroupReady { group_index, paths }) => {
-                        if self
-                            .dicomweb_completed_background_groups
-                            .insert(group_index)
-                        {
-                            let prepared = Self::prepare_load_paths(paths);
-                            if Self::is_supported_prepared_group(&prepared) {
-                                self.enqueue_history_preload_job(
-                                    HistoryPreloadJob::Group(prepared),
-                                    ctx,
-                                );
-                            } else {
-                                log::warn!(
-                                    "Ignoring streamed background group {} with unsupported content.",
-                                    group_index
-                                );
-                            }
-                        }
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        if self
-                            .dicomweb_active_group_expected
-                            .is_some_and(Self::is_supported_multi_view_group_size)
-                        {
-                            self.mammo_load_sender = None;
-                        }
-                        keep_receiver = false;
-                        break;
-                    }
-                }
-            }
-            if keep_receiver {
-                self.dicomweb_active_path_receiver = Some(receiver);
-            }
-        }
-
-        let expected = self.dicomweb_active_group_expected.unwrap_or(0);
-        for _ in 0..DICOMWEB_ACTIVE_PENDING_BATCH_SIZE {
-            let Some(path) = self.dicomweb_active_pending_paths.pop_front() else {
-                break;
-            };
-            match classify_dicom_path(&path) {
-                Ok(DicomPathKind::Gsps) => match load_gsps_overlays(&path) {
-                    Ok(overlays) => {
-                        self.merge_pending_gsps_overlays(overlays);
-                    }
-                    Err(err) => {
-                        log::warn!("Could not parse streamed GSPS input: {err:#}");
-                    }
-                },
-                Ok(DicomPathKind::StructuredReport) => {
-                    match load_mammography_cad_sr_overlays(&path) {
-                        Ok(overlays) => {
-                            self.merge_pending_sr_overlays(overlays);
-                        }
-                        Err(err) => {
-                            log::warn!(
-                                "Could not parse streamed Mammography CAD SR overlay input: {err:#}"
-                            );
-                        }
-                    }
-                    self.enqueue_history_preload_job(
-                        HistoryPreloadJob::StructuredReport(path),
-                        ctx,
-                    );
-                }
-                Ok(DicomPathKind::ParametricMap) => {
-                    log::warn!("Ignoring streamed Parametric Map input.");
-                }
-                Ok(DicomPathKind::Image) | Err(_) => match expected {
-                    1 => {
-                        self.dicomweb_active_group_paths.push((&path).into());
-                        let active_group_is_displayed = self.displayed_study_matches_paths(
-                            self.dicomweb_active_group_paths.as_slice(),
-                        );
-                        let another_study_is_displayed = self.current_single_path.is_some()
-                            || self.report.is_some()
-                            || self.mammo_group_complete();
-                        if another_study_is_displayed && !active_group_is_displayed {
-                            log::info!(
-                                "Skipping streamed single-view activation because another study is open."
-                            );
-                        } else {
-                            let _ = self.load_selected_paths(vec![path], ctx);
-                        }
-                    }
-                    count if Self::is_supported_multi_view_group_size(count) => {
-                        self.dicomweb_active_group_paths.push((&path).into());
-                        if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
-                            thread::spawn(move || {
-                                let result = match load_dicom(&path) {
-                                    Ok(image) => Ok(PendingLoad { path, image }),
-                                    Err(err) => {
-                                        Err(format!("Error opening streamed DICOM: {err:#}"))
-                                    }
-                                };
-                                let _ = sender.send(result);
-                            });
-                        } else {
-                            let active_group_is_displayed = self.displayed_study_matches_paths(
-                                self.dicomweb_active_group_paths.as_slice(),
-                            );
-                            let another_study_is_displayed = self.current_single_path.is_some()
-                                || self.report.is_some()
-                                || self.mammo_group_complete();
-                            if another_study_is_displayed && !active_group_is_displayed {
-                                log::info!(
-                                    "Skipping streamed multi-view decode because another study is open."
-                                );
-                            } else {
-                                self.set_load_error(
-                                    "Streaming multi-view load channel was not available.",
-                                );
-                                log::error!("Streaming multi-view load channel not available.");
-                                self.mammo_group.clear();
-                                self.mammo_load_receiver = None;
-                                self.mammo_load_sender = None;
-                                self.history_pushed_for_active_group = false;
-                                self.cine_mode = false;
-                                self.dicomweb_active_group_paths.clear();
-                                self.dicomweb_completed_background_groups.clear();
-                                self.dicomweb_active_pending_paths.clear();
-                                self.dicomweb_active_group_expected = None;
-                                self.dicomweb_active_path_receiver = None;
-                            }
-                        }
-                    }
-                    _ => {}
-                },
-                Ok(DicomPathKind::Other) => {
-                    log::warn!("Ignoring streamed non-image DICOM input.");
-                }
-            }
-        }
-
-        if keep_receiver || !self.dicomweb_active_pending_paths.is_empty() {
-            ctx.request_repaint_after(Duration::from_millis(16));
-        }
-    }
-
-    fn poll_history_preload(&mut self, ctx: &egui::Context) {
-        self.start_next_history_preload(ctx);
-
-        let Some(receiver) = self.history_preload_receiver.take() else {
-            return;
-        };
-
-        let mut keep_receiver = true;
-        loop {
-            match receiver.try_recv() {
-                Ok(result) => match result {
-                    Ok(HistoryPreloadResult::Single { path, image }) => {
-                        let image = *image;
-                        let center = image.window_center;
-                        let width = image.window_width;
-                        let Some(color_image) =
-                            Self::render_image_frame(&image, 0, center, width, false)
-                        else {
-                            break;
-                        };
-                        let path_meta = DicomSourceMeta::from(&path);
-                        let texture_name =
-                            Self::source_texture_name("history-preload-single", &path_meta);
-                        let texture =
-                            ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
-                        self.push_single_history_entry(
-                            HistorySingleData {
-                                path: path_meta,
-                                image,
-                                texture,
-                                window_center: center,
-                                window_width: width,
-                                current_frame: 0,
-                                cine_fps: DEFAULT_CINE_FPS,
-                            },
-                            ctx,
-                        );
-                        self.move_current_history_to_front();
-                        break;
-                    }
-                    Ok(HistoryPreloadResult::Group { viewports }) => {
-                        let mut loaded = Vec::with_capacity(viewports.len());
-                        for (path, image) in viewports {
-                            let center = image.window_center;
-                            let width = image.window_width;
-                            let Some(color_image) =
-                                Self::render_image_frame(&image, 0, center, width, false)
-                            else {
-                                log::warn!(
-                                    "History preload skipped group viewport (instance {:?}).",
-                                    image.instance_number
-                                );
-                                continue;
-                            };
-                            let path_meta = DicomSourceMeta::from(&path);
-                            let texture_name =
-                                Self::source_texture_name("history-preload-group", &path_meta);
-                            let texture =
-                                ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
-                            let label = mammo_label(&image, &path_meta);
-                            loaded.push(MammoViewport {
-                                path: path_meta,
-                                image,
-                                texture,
-                                label,
-                                window_center: center,
-                                window_width: width,
-                                current_frame: 0,
-                                zoom: 1.0,
-                                pan: egui::Vec2::ZERO,
-                                frame_scroll_accum: 0.0,
-                            });
-                        }
-                        if Self::is_supported_multi_view_group_size(loaded.len()) {
-                            let ordered_indices =
-                                order_mammo_indices(&loaded, |viewport| &viewport.image);
-                            let (ordered, _, _) = Self::restore_ordered_items_or_log(
-                                loaded,
-                                ordered_indices,
-                                None,
-                                "preloading history group",
-                            );
-                            self.push_group_history_entry(&ordered, 0, ctx);
-                            self.move_current_history_to_front();
-                        }
-                        break;
-                    }
-                    Ok(HistoryPreloadResult::Report { path, report }) => {
-                        self.push_report_history_entry((&path).into(), *report, ctx);
-                        self.move_current_history_to_front();
-                        break;
-                    }
-                    Err(err) => {
-                        log::warn!("History preload skipped: {err}");
-                    }
-                },
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    keep_receiver = false;
-                    break;
-                }
-            }
-        }
-
-        if keep_receiver {
-            self.history_preload_receiver = Some(receiver);
-            ctx.request_repaint_after(Duration::from_millis(16));
-            return;
-        }
-
-        self.start_next_history_preload(ctx);
-    }
-
-    fn poll_dicomweb_download(&mut self, ctx: &egui::Context) {
-        let Some(receiver) = self.dicomweb_receiver.take() else {
-            return;
-        };
-
-        match receiver.try_recv() {
-            Ok(result) => match result {
-                Ok(download_result) => match download_result {
-                    DicomWebDownloadResult::Single(paths) => {
-                        let _ = self.load_selected_paths(paths, ctx);
-                    }
-                    DicomWebDownloadResult::Grouped { groups, open_group } => {
-                        let prepared_groups = groups
-                            .iter()
-                            .map(|group| Self::prepare_load_paths(group.clone()))
-                            .collect::<Vec<_>>();
-                        let grouped_gsps_overlays =
-                            Self::collect_grouped_gsps_overlays(&prepared_groups);
-                        let grouped_sr_overlays =
-                            Self::collect_grouped_sr_overlays(&prepared_groups);
-                        let validated_open_group = if prepared_groups.is_empty() {
-                            0
-                        } else {
-                            open_group.min(prepared_groups.len().saturating_sub(1))
-                        };
-                        let active_group_len = prepared_groups
-                            .get(validated_open_group)
-                            .map(|group| group.image_paths.len())
-                            .unwrap_or(0);
-                        let active_group_paths = prepared_groups
-                            .get(validated_open_group)
-                            .map(|group| group.image_paths.clone())
-                            .unwrap_or_default();
-                        let streamed_count = self.dicomweb_active_group_paths.len();
-                        let streaming_started = streamed_count > 0;
-                        let streamed_active_complete = streamed_count >= active_group_len
-                            && (active_group_len == 1
-                                || Self::is_supported_multi_view_group_size(active_group_len))
-                            && self.dicomweb_active_pending_paths.is_empty();
-                        let active_group_is_displayed =
-                            self.displayed_study_matches_paths(active_group_paths.as_slice());
-                        let grouped_ready;
-
-                        if !streamed_active_complete && !streaming_started {
-                            self.load_local_groups(groups, validated_open_group, ctx);
-                            grouped_ready =
-                                self.displayed_study_matches_paths(active_group_paths.as_slice());
-                        } else {
-                            let completed_background_groups =
-                                self.dicomweb_completed_background_groups.clone();
-                            self.preload_non_active_groups_into_history(
-                                &prepared_groups,
-                                validated_open_group,
-                                Some(&completed_background_groups),
-                                ctx,
-                            );
-                            if !self.history_pushed_for_active_group {
-                                if Self::is_supported_multi_view_group_size(active_group_len)
-                                    && self.mammo_group_complete()
-                                    && active_group_is_displayed
-                                {
-                                    self.reorder_complete_mammo_group();
-                                    let loaded = self
-                                        .mammo_group
-                                        .iter()
-                                        .filter_map(Option::as_ref)
-                                        .cloned()
-                                        .collect::<Vec<_>>();
-                                    self.push_group_history_entry(
-                                        &loaded,
-                                        self.mammo_selected_index,
-                                        ctx,
-                                    );
-                                } else if !active_group_is_displayed {
-                                    if let Some(active_group) =
-                                        prepared_groups.get(validated_open_group).cloned()
-                                    {
-                                        self.enqueue_history_preload_job(
-                                            HistoryPreloadJob::Group(active_group),
-                                            ctx,
-                                        );
-                                    }
-                                }
-                                self.history_pushed_for_active_group = true;
-                            }
-                            self.move_current_history_to_front();
-                            grouped_ready = active_group_is_displayed;
-                        }
-                        self.set_authoritative_pending_gsps_overlays(grouped_gsps_overlays);
-                        self.set_authoritative_pending_sr_overlays(grouped_sr_overlays);
-
-                        if streamed_active_complete || !streaming_started {
-                            self.dicomweb_active_group_expected = None;
-                            self.dicomweb_active_group_paths.clear();
-                            self.dicomweb_completed_background_groups.clear();
-                            self.dicomweb_active_pending_paths.clear();
-                            self.dicomweb_active_path_receiver = None;
-                            self.mammo_load_sender = None;
-                            self.history_pushed_for_active_group = false;
-                        }
-                        if grouped_ready {
-                            self.clear_load_error();
-                            log::info!("Loaded grouped study from DICOMweb.");
-                        }
-                    }
-                },
-                Err(err) => {
-                    self.set_load_error("DICOMweb request failed.");
-                    log::error!("DICOMweb error: {err}");
-                    self.dicomweb_active_group_expected = None;
-                    self.dicomweb_active_group_paths.clear();
-                    self.dicomweb_completed_background_groups.clear();
-                    self.dicomweb_active_pending_paths.clear();
-                    self.dicomweb_active_path_receiver = None;
-                    self.mammo_load_sender = None;
-                    self.history_pushed_for_active_group = false;
-                }
-            },
-            Err(TryRecvError::Empty) => {
-                self.dicomweb_receiver = Some(receiver);
-                ctx.request_repaint_after(Duration::from_millis(16));
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.set_load_error("DICOMweb download worker disconnected.");
-                log::error!("DICOMweb download worker disconnected.");
-                self.dicomweb_active_group_expected = None;
-                self.dicomweb_active_group_paths.clear();
-                self.dicomweb_completed_background_groups.clear();
-                self.dicomweb_active_pending_paths.clear();
-                self.dicomweb_active_path_receiver = None;
-                self.mammo_load_sender = None;
-                self.history_pushed_for_active_group = false;
-            }
-        }
-    }
-
-    fn poll_mammo_group_load(&mut self, ctx: &egui::Context) {
-        let Some(receiver) = self.mammo_load_receiver.take() else {
-            return;
-        };
-
-        let mut had_error = false;
-        let mut should_continue = true;
-        match receiver.try_recv() {
-            Ok(result) => match result {
-                Ok(pending) => {
-                    if let Err(err) = self.insert_loaded_mammo(pending, ctx) {
-                        self.set_load_error("Failed to load multi-view DICOM group.");
-                        log::error!("{err}");
-                        self.mammo_group.clear();
-                        self.mammo_load_receiver = None;
-                        self.mammo_load_sender = None;
-                        self.history_pushed_for_active_group = false;
-                        self.cine_mode = false;
-                        if self.dicomweb_active_group_expected.is_some()
-                            || self.dicomweb_active_path_receiver.is_some()
-                            || !self.dicomweb_active_pending_paths.is_empty()
-                        {
-                            self.dicomweb_active_group_expected = None;
-                            self.dicomweb_active_group_paths.clear();
-                            self.dicomweb_completed_background_groups.clear();
-                            self.dicomweb_active_pending_paths.clear();
-                            self.dicomweb_active_path_receiver = None;
-                        }
-                        return;
-                    }
-                    self.reorder_complete_mammo_group();
-                    self.clear_load_error();
-                    if self.mammo_group_complete()
-                        && (self
-                            .dicomweb_active_group_expected
-                            .is_some_and(Self::is_supported_multi_view_group_size)
-                            || self.dicomweb_active_path_receiver.is_some())
-                        && !self.history_pushed_for_active_group
-                    {
-                        let loaded = self
-                            .mammo_group
-                            .iter()
-                            .filter_map(Option::as_ref)
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
-                        self.move_current_history_to_front();
-                        self.history_pushed_for_active_group = true;
-                    }
-                    ctx.request_repaint();
-                }
-                Err(err) => {
-                    self.set_load_error("Failed to load multi-view DICOM group.");
-                    log::error!("{err}");
-                    self.mammo_group.clear();
-                    self.history_pushed_for_active_group = false;
-                    if self.dicomweb_active_group_expected.is_some()
-                        || self.dicomweb_active_path_receiver.is_some()
-                        || !self.dicomweb_active_pending_paths.is_empty()
-                    {
-                        self.dicomweb_active_group_expected = None;
-                        self.dicomweb_active_group_paths.clear();
-                        self.dicomweb_completed_background_groups.clear();
-                        self.dicomweb_active_pending_paths.clear();
-                        self.dicomweb_active_path_receiver = None;
-                    }
-                    had_error = true;
-                    should_continue = false;
-                }
-            },
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                should_continue = false;
-            }
-        }
-
-        if had_error {
-            self.mammo_load_receiver = None;
-            self.mammo_load_sender = None;
-            self.cine_mode = false;
-            return;
-        }
-
-        if should_continue {
-            self.mammo_load_receiver = Some(receiver);
-            ctx.request_repaint_after(Duration::from_millis(16));
-            return;
-        }
-
-        self.mammo_load_receiver = None;
-        self.mammo_load_sender = None;
-        if self.mammo_group_complete() {
-            self.reorder_complete_mammo_group();
-            self.clear_load_error();
-            if !self.history_pushed_for_active_group {
-                let loaded = self
-                    .mammo_group
-                    .iter()
-                    .filter_map(Option::as_ref)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
-            }
-        } else {
-            self.set_load_error(
-                "Multi-view group load incomplete: worker exited before all images were received.",
-            );
-            log::warn!(
-                "Multi-view group load incomplete: worker exited before all images were received."
-            );
-        }
-        ctx.request_repaint();
-    }
-
-    fn poll_single_load(&mut self, ctx: &egui::Context) {
-        let Some(receiver) = self.single_load_receiver.take() else {
-            return;
-        };
-
-        match receiver.try_recv() {
-            Ok(result) => {
-                match result {
-                    Ok(PendingSingleLoad::Image(pending)) => {
-                        let pending = *pending;
-                        self.apply_loaded_single(pending.path, pending.image, ctx);
-                        self.clear_load_error();
-                    }
-                    Ok(PendingSingleLoad::StructuredReport { path, report }) => {
-                        self.apply_loaded_structured_report(path, report, ctx);
-                        self.clear_load_error();
-                    }
-                    Err(err) => {
-                        self.set_load_error("Failed to load selected item.");
-                        log::error!("Failed to load selected item: {err}");
-                    }
-                }
-                self.single_load_receiver = None;
-                ctx.request_repaint();
-            }
-            Err(TryRecvError::Empty) => {
-                self.single_load_receiver = Some(receiver);
-                ctx.request_repaint_after(Duration::from_millis(16));
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.single_load_receiver = None;
-                self.set_load_error("Selected item load did not complete.");
-                log::error!(
-                    "Selected item load incomplete: worker exited before sending a result."
-                );
-                ctx.request_repaint();
-            }
-        }
-    }
-
     fn open_dicoms(&mut self, ctx: &egui::Context) {
         let picked = rfd::FileDialog::new()
             .add_filter("DICOM", &["dcm"])
@@ -3189,364 +1480,6 @@ impl DicomViewerApp {
                         });
                     });
             });
-    }
-
-    fn apply_prepared_load_paths(
-        &mut self,
-        prepared: PreparedLoadPaths,
-        ctx: &egui::Context,
-    ) -> Result<(), ()> {
-        let PreparedLoadPaths {
-            image_paths: paths,
-            structured_report_paths,
-            parametric_map_paths,
-            gsps_overlays,
-            sr_overlays,
-            pm_overlays,
-            gsps_files_found,
-            other_files_found,
-        } = prepared;
-        if !paths.is_empty()
-            || !structured_report_paths.is_empty()
-            || !parametric_map_paths.is_empty()
-            || gsps_files_found > 0
-        {
-            self.sync_current_state_to_history();
-        }
-        let preserve_history_preload = paths.len() == 1
-            && self.dicomweb_active_group_expected == Some(1)
-            && !self.dicomweb_active_group_paths.is_empty();
-        let pending_overlay_state = if preserve_history_preload {
-            let mut new_pending_gsps_overlays = self.pending_gsps_overlays.clone();
-            let mut new_pending_sr_overlays = self.pending_sr_overlays.clone();
-            let mut new_pending_pm_overlays = self.pending_pm_overlays.clone();
-            let inserted_gsps =
-                Self::insert_missing_gsps_overlays(&mut new_pending_gsps_overlays, gsps_overlays);
-            let inserted_sr =
-                Self::insert_missing_sr_overlays(&mut new_pending_sr_overlays, sr_overlays);
-            let inserted_pm =
-                Self::insert_missing_pm_overlays(&mut new_pending_pm_overlays, pm_overlays);
-            PendingOverlayState {
-                clear_history_preload: false,
-                pending_gsps_overlays: new_pending_gsps_overlays,
-                authoritative_gsps_overlay_keys: self.authoritative_gsps_overlay_keys.clone(),
-                pending_sr_overlays: new_pending_sr_overlays,
-                authoritative_sr_overlay_keys: self.authoritative_sr_overlay_keys.clone(),
-                pending_pm_overlays: new_pending_pm_overlays,
-                authoritative_pm_overlay_keys: self.authoritative_pm_overlay_keys.clone(),
-                overlay_visible: self.overlay_visible,
-                attach_to_current_study: inserted_gsps || inserted_sr || inserted_pm,
-            }
-        } else {
-            PendingOverlayState {
-                clear_history_preload: true,
-                pending_gsps_overlays: gsps_overlays,
-                authoritative_gsps_overlay_keys: HashSet::new(),
-                pending_sr_overlays: sr_overlays,
-                authoritative_sr_overlay_keys: HashSet::new(),
-                pending_pm_overlays: pm_overlays,
-                authoritative_pm_overlay_keys: HashSet::new(),
-                overlay_visible: false,
-                attach_to_current_study: false,
-            }
-        };
-
-        if paths.is_empty() {
-            if let Some((pm_path, remaining_parametric_maps)) = parametric_map_paths
-                .split_first()
-                .map(|(first, rest)| (first.clone(), rest))
-            {
-                self.commit_pending_overlay_state(pending_overlay_state);
-                self.stage_structured_report_history_entries(&structured_report_paths, ctx);
-                self.stage_parametric_map_history_entries(remaining_parametric_maps, ctx);
-                self.load_parametric_map_path(pm_path, ctx);
-                return Ok(());
-            }
-            if let Some((report_path, remaining_reports)) = structured_report_paths
-                .split_first()
-                .map(|(first, rest)| (first.clone(), rest))
-            {
-                self.commit_pending_overlay_state(pending_overlay_state);
-                self.stage_structured_report_history_entries(remaining_reports, ctx);
-                self.load_structured_report_path(report_path, ctx);
-                return Ok(());
-            }
-            if gsps_files_found > 0 {
-                self.set_load_error("GSPS detected, but no displayable DICOM image was selected.");
-                log::warn!("GSPS detected, but no displayable DICOM image was selected.");
-                ctx.request_repaint();
-                return Err(());
-            }
-            if other_files_found > 0 {
-                self.set_load_error(
-                    "Selected DICOM objects are not displayable images, parametric maps, or structured reports.",
-                );
-                log::warn!(
-                    "Selected DICOM objects are not displayable images, parametric maps, or structured reports."
-                );
-                ctx.request_repaint();
-                return Err(());
-            }
-            return Err(());
-        }
-
-        match paths.len() {
-            0 => Err(()),
-            1 => {
-                if !structured_report_paths.is_empty() {
-                    self.stage_structured_report_history_entries(&structured_report_paths, ctx);
-                    log::info!(
-                        "Opening {} image DICOM(s) and staging {} structured report object(s) as separate history entries.",
-                        paths.len(),
-                        structured_report_paths.len()
-                    );
-                }
-                if !parametric_map_paths.is_empty() {
-                    self.stage_parametric_map_history_entries(&parametric_map_paths, ctx);
-                }
-                self.commit_pending_overlay_state(pending_overlay_state);
-                self.single_load_receiver = None;
-                self.mammo_load_receiver = None;
-                self.mammo_load_sender = None;
-                self.history_pushed_for_active_group = false;
-                if let Some(path) = paths.into_iter().next() {
-                    self.load_path(path, ctx);
-                }
-                Ok(())
-            }
-            count if Self::is_supported_multi_view_group_size(count) => {
-                if !structured_report_paths.is_empty() {
-                    self.stage_structured_report_history_entries(&structured_report_paths, ctx);
-                    log::info!(
-                        "Opening {} image DICOM(s) and staging {} structured report object(s) as separate history entries.",
-                        paths.len(),
-                        structured_report_paths.len()
-                    );
-                }
-                if !parametric_map_paths.is_empty() {
-                    self.stage_parametric_map_history_entries(&parametric_map_paths, ctx);
-                }
-                self.commit_pending_overlay_state(pending_overlay_state);
-                self.load_mammo_group_paths(paths, ctx);
-                Ok(())
-            }
-            other => {
-                let err = Self::format_select_paths_count_error(other);
-                self.set_load_error(err.clone());
-                log::warn!("{err}");
-                ctx.request_repaint();
-                Err(())
-            }
-        }
-    }
-
-    fn load_selected_paths<T>(&mut self, paths: Vec<T>, ctx: &egui::Context) -> Result<(), ()>
-    where
-        T: Into<DicomSource>,
-    {
-        self.clear_load_error();
-        let prepared = Self::prepare_load_paths(paths);
-        self.apply_prepared_load_paths(prepared, ctx)
-    }
-
-    fn stage_structured_report_history_entries<T>(
-        &mut self,
-        report_paths: &[T],
-        ctx: &egui::Context,
-    ) where
-        T: Clone + Into<DicomSource>,
-    {
-        for path in report_paths {
-            self.enqueue_history_preload_job(
-                HistoryPreloadJob::StructuredReport(path.clone().into()),
-                ctx,
-            );
-        }
-    }
-
-    fn stage_parametric_map_history_entries<T>(&mut self, pm_paths: &[T], ctx: &egui::Context)
-    where
-        T: Clone + Into<DicomSource>,
-    {
-        for path in pm_paths {
-            self.enqueue_history_preload_job(
-                HistoryPreloadJob::ParametricMap(path.clone().into()),
-                ctx,
-            );
-        }
-    }
-
-    fn load_path(&mut self, path: DicomSource, ctx: &egui::Context) {
-        self.mammo_load_receiver = None;
-        self.mammo_load_sender = None;
-        self.single_load_receiver = None;
-        self.history_pushed_for_active_group = false;
-        self.clear_load_error();
-        log::info!("Loading selected DICOM...");
-        log::info!(target: "perf", "single-open started");
-        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
-        thread::spawn(move || {
-            let result = match load_dicom(&path) {
-                Ok(image) => {
-                    log::info!(target: "perf", "single-open dicom-load completed");
-                    Ok(PendingSingleLoad::Image(Box::new(PendingLoad {
-                        path,
-                        image,
-                    })))
-                }
-                Err(err) => Err(format!("Error opening selected DICOM: {err:#}")),
-            };
-            let _ = tx.send(result);
-        });
-        self.single_load_receiver = Some(rx);
-        ctx.request_repaint();
-    }
-
-    fn load_parametric_map_path(&mut self, path: DicomSource, ctx: &egui::Context) {
-        self.mammo_load_receiver = None;
-        self.mammo_load_sender = None;
-        self.single_load_receiver = None;
-        self.history_pushed_for_active_group = false;
-        self.clear_load_error();
-        log::info!("Loading selected Parametric Map...");
-        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
-        thread::spawn(move || {
-            let result = match load_parametric_map(&path) {
-                Ok(image) => Ok(PendingSingleLoad::Image(Box::new(PendingLoad {
-                    path,
-                    image,
-                }))),
-                Err(err) => Err(format!("Error opening selected Parametric Map: {err:#}")),
-            };
-            let _ = tx.send(result);
-        });
-        self.single_load_receiver = Some(rx);
-        ctx.request_repaint();
-    }
-
-    fn load_structured_report_path(&mut self, path: DicomSource, ctx: &egui::Context) {
-        self.mammo_load_receiver = None;
-        self.mammo_load_sender = None;
-        self.single_load_receiver = None;
-        self.history_pushed_for_active_group = false;
-        self.clear_load_error();
-        log::info!("Loading selected Structured Report...");
-        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
-        thread::spawn(move || {
-            let result = match load_structured_report(&path) {
-                Ok(report) => Ok(PendingSingleLoad::StructuredReport { path, report }),
-                Err(err) => Err(format!("Error opening selected Structured Report: {err:#}")),
-            };
-            let _ = tx.send(result);
-        });
-        self.single_load_receiver = Some(rx);
-        ctx.request_repaint();
-    }
-
-    fn apply_loaded_single(&mut self, path: DicomSource, image: DicomImage, ctx: &egui::Context) {
-        let mut image = image;
-        Self::attach_matching_gsps_overlay(&mut image, &self.pending_gsps_overlays);
-        Self::attach_matching_sr_overlay(&mut image, &self.pending_sr_overlays);
-        Self::attach_matching_pm_overlay(&mut image, &self.pending_pm_overlays);
-        self.overlay_visible = false;
-        self.clear_load_error();
-
-        self.window_center = image.window_center;
-        self.window_width = image.window_width;
-        self.current_frame = 0;
-        self.cine_mode = false;
-        self.last_cine_advance = None;
-        self.cine_fps = image
-            .recommended_cine_fps
-            .unwrap_or(DEFAULT_CINE_FPS)
-            .clamp(1.0, 120.0);
-
-        let history_image = image.clone();
-        let path_meta = DicomSourceMeta::from(&path);
-        self.report = None;
-        self.image = Some(image);
-        self.current_single_path = Some(path_meta.clone());
-        self.mammo_group.clear();
-        self.mammo_selected_index = 0;
-        self.reset_single_view_transform();
-        self.single_view_frame_scroll_accum = 0.0;
-        self.rebuild_texture(ctx);
-        log::info!(target: "perf", "single-open completed");
-        let history_texture = self.texture.clone();
-        if let Some(texture) = history_texture.as_ref() {
-            self.push_single_history_entry(
-                HistorySingleData {
-                    path: path_meta,
-                    image: history_image,
-                    texture: texture.clone(),
-                    window_center: self.window_center,
-                    window_width: self.window_width,
-                    current_frame: self.current_frame,
-                    cine_fps: self.cine_fps,
-                },
-                ctx,
-            );
-        }
-        log::info!("Loaded selected DICOM.");
-    }
-
-    fn apply_loaded_structured_report(
-        &mut self,
-        path: DicomSource,
-        report: StructuredReportDocument,
-        ctx: &egui::Context,
-    ) {
-        self.clear_single_viewer();
-        self.mammo_group.clear();
-        self.clear_load_error();
-        let path_meta = DicomSourceMeta::from(&path);
-        self.push_report_history_entry(path_meta.clone(), report.clone(), ctx);
-        self.report = Some(report);
-        self.current_single_path = Some(path_meta);
-        ctx.request_repaint();
-        log::info!("Loaded selected Structured Report.");
-    }
-
-    fn load_mammo_group_paths(&mut self, paths: Vec<DicomSource>, ctx: &egui::Context) {
-        if !Self::is_supported_multi_view_group_size(paths.len()) {
-            let err = Self::format_multi_view_size_error(paths.len());
-            self.set_load_error(err.clone());
-            log::warn!("{err}");
-            return;
-        }
-
-        let group_len = paths.len();
-        self.mammo_load_receiver = None;
-        self.mammo_load_sender = None;
-        self.single_load_receiver = None;
-        self.history_pushed_for_active_group = false;
-        self.clear_single_viewer();
-        self.clear_load_error();
-        self.mammo_group = (0..group_len).map(|_| None).collect();
-        self.mammo_selected_index = 0;
-        self.cine_mode = false;
-        self.last_cine_advance = None;
-        log::info!(
-            "Loading {} multi-view group...",
-            Self::multi_view_layout_label(group_len)
-        );
-
-        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
-        thread::spawn(move || {
-            for path in paths {
-                match load_dicom(&path) {
-                    Ok(image) => {
-                        let _ = tx.send(Ok(PendingLoad { path, image }));
-                    }
-                    Err(err) => {
-                        let _ = tx.send(Err(format!("Error opening DICOM in group: {err:#}")));
-                        return;
-                    }
-                }
-            }
-        });
-        self.mammo_load_receiver = Some(rx);
-        ctx.request_repaint();
     }
 
     fn toggle_cine_mode(&mut self) {
@@ -4573,59 +2506,6 @@ impl DicomViewerApp {
         });
     }
 
-    fn show_history_list(
-        &self,
-        ui: &mut egui::Ui,
-        current_history_id: Option<&str>,
-    ) -> Option<usize> {
-        if self.history_entries.is_empty() {
-            ui.label("No previous images.");
-            return None;
-        }
-
-        let mut clicked_index = None;
-        egui::ScrollArea::vertical()
-            .id_salt("history-thumbnails")
-            .show(ui, |ui| {
-                ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                    for (index, entry) in self.history_entries.iter().enumerate() {
-                        let is_current = current_history_id == Some(entry.id.as_str());
-                        let stroke_color = if is_current {
-                            PERSPECTA_BRAND_BLUE
-                        } else {
-                            egui::Color32::from_gray(35)
-                        };
-
-                        egui::Frame::none()
-                            .fill(egui::Color32::TRANSPARENT)
-                            .stroke(egui::Stroke::new(1.0, stroke_color))
-                            .inner_margin(egui::Margin::same(6.0))
-                            .show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    for thumb in &entry.thumbs {
-                                        let texture_size = thumb.texture.size_vec2();
-                                        let max_side = texture_size.x.max(texture_size.y).max(1.0);
-                                        let scale = (HISTORY_LIST_THUMB_MAX_DIM / max_side)
-                                            .clamp(0.01, 1.0);
-                                        let draw_size = texture_size * scale;
-                                        let response = ui.add(
-                                            egui::Image::new((thumb.texture.id(), draw_size))
-                                                .sense(Sense::click()),
-                                        );
-                                        if response.clicked() {
-                                            clicked_index = Some(index);
-                                        }
-                                    }
-                                });
-                            });
-                        ui.add_space(4.0);
-                    }
-                });
-            });
-
-        clicked_index
-    }
-
     fn show_resize_grip(&self, ctx: &egui::Context) {
         const GRIP_SIZE: f32 = 18.0;
         const MARGIN: f32 = 1.0;
@@ -4658,6 +2538,1165 @@ impl DicomViewerApp {
                     );
                 }
             });
+    }
+}
+
+impl DicomViewerApp {
+    fn commit_pending_overlay_state(&mut self, pending_overlay_state: PendingOverlayState) {
+        if pending_overlay_state.clear_history_preload {
+            self.clear_history_preload();
+        }
+
+        self.pending_gsps_overlays = pending_overlay_state.pending_gsps_overlays;
+        self.authoritative_gsps_overlay_keys =
+            pending_overlay_state.authoritative_gsps_overlay_keys;
+        self.pending_sr_overlays = pending_overlay_state.pending_sr_overlays;
+        self.authoritative_sr_overlay_keys = pending_overlay_state.authoritative_sr_overlay_keys;
+        self.pending_pm_overlays = pending_overlay_state.pending_pm_overlays;
+        self.authoritative_pm_overlay_keys = pending_overlay_state.authoritative_pm_overlay_keys;
+        self.overlay_visible = pending_overlay_state.overlay_visible;
+
+        if pending_overlay_state.attach_to_current_study {
+            self.attach_pending_overlays_to_current_study();
+            self.sync_current_state_to_history();
+        }
+    }
+
+    fn prepare_load_paths<T>(paths: Vec<T>) -> PreparedLoadPaths
+    where
+        T: Into<DicomSource>,
+    {
+        let mut prepared = PreparedLoadPaths::default();
+        let mut prepared_images = Vec::<PreparedImagePath>::new();
+        let mut prepared_parametric_maps = Vec::<PreparedParametricMapPath>::new();
+
+        for path in paths {
+            let path = path.into();
+            match classify_dicom_path(&path) {
+                Ok(DicomPathKind::Gsps) => {
+                    prepared.gsps_files_found = prepared.gsps_files_found.saturating_add(1);
+                    match load_gsps_overlays(&path) {
+                        Ok(overlays) => {
+                            Self::merge_gsps_overlays(&mut prepared.gsps_overlays, &overlays)
+                        }
+                        Err(err) => {
+                            log::warn!("Could not parse GSPS input: {err:#}");
+                        }
+                    }
+                }
+                Ok(DicomPathKind::StructuredReport) => {
+                    match load_mammography_cad_sr_overlays(&path) {
+                        Ok(overlays) => {
+                            Self::merge_sr_overlays(&mut prepared.sr_overlays, &overlays)
+                        }
+                        Err(err) => {
+                            log::warn!("Could not parse Mammography CAD SR overlay input: {err:#}");
+                        }
+                    }
+                    prepared.structured_report_paths.push(path);
+                }
+                Ok(DicomPathKind::ParametricMap) => match load_parametric_map_overlays(&path) {
+                    Ok(overlays) => {
+                        prepared_parametric_maps.push(PreparedParametricMapPath { path, overlays })
+                    }
+                    Err(err) => {
+                        log::warn!("Could not parse Parametric Map overlay input: {err:#}");
+                        prepared.parametric_map_paths.push(path);
+                    }
+                },
+                Ok(DicomPathKind::Image) | Err(_) => {
+                    let sop_instance_uid = match read_sop_instance_uid(&path) {
+                        Ok(uid) => uid,
+                        Err(err) => {
+                            log::warn!("Could not inspect image SOP Instance UID: {err:#}");
+                            None
+                        }
+                    };
+                    prepared_images.push(PreparedImagePath {
+                        path,
+                        sop_instance_uid,
+                    });
+                }
+                Ok(DicomPathKind::Other) => {
+                    prepared.other_files_found = prepared.other_files_found.saturating_add(1);
+                }
+            }
+        }
+
+        let selected_image_uids = prepared_images
+            .iter()
+            .filter_map(|image| image.sop_instance_uid.clone())
+            .collect::<HashSet<_>>();
+        prepared.image_paths = prepared_images
+            .into_iter()
+            .map(|image| image.path)
+            .collect::<Vec<_>>();
+
+        for prepared_map in prepared_parametric_maps {
+            let matched_overlays = prepared_map
+                .overlays
+                .into_iter()
+                .filter(|(sop_uid, overlay)| {
+                    selected_image_uids.contains(sop_uid) && !overlay.is_empty()
+                })
+                .collect::<HashMap<_, _>>();
+            if matched_overlays.is_empty() {
+                prepared.parametric_map_paths.push(prepared_map.path);
+            } else {
+                Self::merge_pm_overlays(&mut prepared.pm_overlays, &matched_overlays);
+            }
+        }
+
+        prepared
+    }
+
+    fn handle_launch_request(&mut self, request: LaunchRequest, ctx: &egui::Context) {
+        match request {
+            LaunchRequest::LocalPaths(paths) => self.queue_local_paths_open(paths),
+            LaunchRequest::LocalGroups { groups, open_group } => {
+                self.load_local_groups(groups, open_group, ctx)
+            }
+            LaunchRequest::DicomWebGroups(request) => self.start_dicomweb_group_download(request),
+            LaunchRequest::DicomWeb(request) => self.start_dicomweb_download(request),
+        }
+    }
+
+    fn load_local_groups<T>(&mut self, groups: Vec<Vec<T>>, open_group: usize, ctx: &egui::Context)
+    where
+        T: Clone + Into<DicomSource>,
+    {
+        if groups.is_empty() {
+            self.set_load_error("Launch request had no groups to open.");
+            log::warn!("Launch request had no groups to open.");
+            return;
+        }
+
+        self.clear_load_error();
+        let mut preload_groups = Vec::with_capacity(groups.len());
+        for (index, group) in groups.iter().enumerate() {
+            let prepared = Self::prepare_load_paths(group.clone());
+            let entry_count = if prepared.image_paths.is_empty() {
+                prepared.structured_report_paths.len()
+            } else {
+                prepared.image_paths.len()
+            };
+            if !Self::is_supported_prepared_group(&prepared) {
+                let err = Self::format_group_size_error(index + 1, entry_count);
+                self.set_load_error(err.clone());
+                log::warn!("{err}");
+                return;
+            }
+            preload_groups.push(prepared);
+        }
+
+        let active_group = open_group.min(groups.len().saturating_sub(1));
+        let _ = self.load_selected_paths(groups[active_group].clone(), ctx);
+        self.preload_non_active_groups_into_history(&preload_groups, active_group, None, ctx);
+    }
+
+    fn start_dicomweb_download(&mut self, request: DicomWebLaunchRequest) {
+        if self.dicomweb_receiver.is_some() {
+            log::warn!("DICOMweb download already in progress.");
+            return;
+        }
+
+        self.clear_load_error();
+        self.sync_current_state_to_history();
+        self.clear_history_preload();
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.history_pushed_for_active_group = false;
+        self.pending_gsps_overlays.clear();
+        self.authoritative_gsps_overlay_keys.clear();
+        self.pending_sr_overlays.clear();
+        self.authoritative_sr_overlay_keys.clear();
+        self.pending_pm_overlays.clear();
+        self.authoritative_pm_overlay_keys.clear();
+        self.overlay_visible = false;
+        self.dicomweb_active_path_receiver = None;
+        self.dicomweb_active_group_expected = None;
+        self.dicomweb_active_group_paths.clear();
+        self.dicomweb_completed_background_groups.clear();
+        self.dicomweb_active_pending_paths.clear();
+        log::info!("Loading study from DICOMweb...");
+        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        thread::spawn(move || {
+            let result = download_dicomweb_request(&request).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(result);
+        });
+        self.dicomweb_receiver = Some(rx);
+    }
+
+    fn start_dicomweb_group_download(&mut self, request: DicomWebGroupedLaunchRequest) {
+        if self.dicomweb_receiver.is_some() {
+            log::warn!("DICOMweb download already in progress.");
+            return;
+        }
+
+        self.clear_load_error();
+        self.sync_current_state_to_history();
+        self.clear_history_preload();
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.history_pushed_for_active_group = false;
+        self.pending_gsps_overlays.clear();
+        self.authoritative_gsps_overlay_keys.clear();
+        self.pending_sr_overlays.clear();
+        self.authoritative_sr_overlay_keys.clear();
+        self.pending_pm_overlays.clear();
+        self.authoritative_pm_overlay_keys.clear();
+        self.overlay_visible = false;
+        log::info!("Loading grouped study from DICOMweb...");
+        self.dicomweb_active_group_expected = None;
+        self.dicomweb_active_group_paths.clear();
+        self.dicomweb_completed_background_groups.clear();
+        self.dicomweb_active_pending_paths.clear();
+
+        let (active_path_tx, active_path_rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        thread::spawn(move || {
+            let result = download_dicomweb_group_request(&request, |update| {
+                let _ = active_path_tx.send(update);
+            })
+            .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(result);
+        });
+        self.dicomweb_active_path_receiver = Some(active_path_rx);
+        self.dicomweb_receiver = Some(rx);
+    }
+
+    fn insert_loaded_mammo(
+        &mut self,
+        mut pending: PendingLoad,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        let slot = preferred_mammo_slot(&pending.image, self.mammo_group.len(), |index| {
+            self.mammo_group
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_none()
+        })
+        .or_else(|| self.mammo_group.iter().position(Option::is_none));
+
+        let Some(slot_index) = slot else {
+            return Err(format!(
+                "Discarded streamed image: no available mammo slot (loaded={}, capacity={})",
+                self.loaded_mammo_count(),
+                self.mammo_group.len()
+            ));
+        };
+
+        Self::attach_matching_gsps_overlay(&mut pending.image, &self.pending_gsps_overlays);
+        Self::attach_matching_sr_overlay(&mut pending.image, &self.pending_sr_overlays);
+        Self::attach_matching_pm_overlay(&mut pending.image, &self.pending_pm_overlays);
+
+        let default_center = pending.image.window_center;
+        let default_width = pending.image.window_width;
+        let Some(color_image) =
+            Self::render_image_frame(&pending.image, 0, default_center, default_width, false)
+        else {
+            return Err("Could not prepare preview for image (no decodable frame).".to_string());
+        };
+
+        let path_meta = DicomSourceMeta::from(&pending.path);
+        let texture_name = Self::source_texture_name("mammo-group", &path_meta);
+        let texture = ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
+        let label = mammo_label(&pending.image, &path_meta);
+        self.mammo_group[slot_index] = Some(MammoViewport {
+            path: path_meta,
+            image: pending.image,
+            texture,
+            label,
+            window_center: default_center,
+            window_width: default_width,
+            current_frame: 0,
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            frame_scroll_accum: 0.0,
+        });
+
+        if self.loaded_mammo_count() == 1 {
+            if let Some(first_loaded_slot) = self.mammo_group.iter().position(Option::is_some) {
+                self.mammo_selected_index = first_loaded_slot;
+            }
+        }
+        Ok(())
+    }
+
+    fn reorder_complete_mammo_group(&mut self) {
+        if !self.mammo_group_complete() {
+            return;
+        }
+
+        let selected_path = self
+            .mammo_group
+            .get(self.mammo_selected_index)
+            .and_then(Option::as_ref)
+            .map(|viewport| viewport.path.clone());
+
+        let viewports = self
+            .mammo_group
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect::<Vec<_>>();
+        if viewports.len() != self.mammo_group.len() {
+            self.mammo_group = viewports.into_iter().map(Some).collect();
+            self.mammo_selected_index = self
+                .mammo_selected_index
+                .min(self.mammo_group.len().saturating_sub(1));
+            return;
+        }
+
+        let ordered_indices = order_mammo_indices(&viewports, |viewport| &viewport.image);
+        let (ordered, _, reordered) = Self::restore_ordered_items_or_log(
+            viewports,
+            ordered_indices,
+            None,
+            "reordering active group",
+        );
+        if !reordered {
+            self.mammo_group = ordered.into_iter().map(Some).collect::<Vec<_>>();
+            self.mammo_selected_index = self
+                .mammo_selected_index
+                .min(self.mammo_group.len().saturating_sub(1));
+            return;
+        }
+        self.mammo_group = ordered.into_iter().map(Some).collect::<Vec<_>>();
+
+        if let Some(selected_path) = selected_path {
+            if let Some(index) = self.mammo_group.iter().position(|slot| {
+                slot.as_ref()
+                    .is_some_and(|viewport| viewport.path == selected_path)
+            }) {
+                self.mammo_selected_index = index;
+                return;
+            }
+        }
+
+        self.mammo_selected_index = self
+            .mammo_group
+            .iter()
+            .position(Option::is_some)
+            .unwrap_or(0);
+    }
+
+    fn poll_dicomweb_active_paths(&mut self, ctx: &egui::Context) {
+        let mut keep_receiver = false;
+        if let Some(receiver) = self.dicomweb_active_path_receiver.take() {
+            keep_receiver = true;
+            loop {
+                match receiver.try_recv() {
+                    Ok(DicomWebGroupStreamUpdate::ActiveGroupInstanceCount(count)) => {
+                        self.dicomweb_active_group_expected = Some(count);
+                        if Self::is_supported_multi_view_group_size(count) {
+                            self.mammo_load_receiver = None;
+                            self.mammo_load_sender = None;
+                            self.history_pushed_for_active_group = false;
+                            self.clear_single_viewer();
+                            self.mammo_group = (0..count).map(|_| None).collect();
+                            self.mammo_selected_index = 0;
+                            self.cine_mode = false;
+                            self.last_cine_advance = None;
+                            log::info!(
+                                "Loading grouped study from DICOMweb (streaming active group {}, {} views)...",
+                                Self::multi_view_layout_label(count),
+                                count
+                            );
+                            let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+                            self.mammo_load_sender = Some(tx);
+                            self.mammo_load_receiver = Some(rx);
+                        }
+                    }
+                    Ok(DicomWebGroupStreamUpdate::ActivePath(path)) => {
+                        self.dicomweb_active_pending_paths.push_back(path);
+                    }
+                    Ok(DicomWebGroupStreamUpdate::BackgroundGroupReady { group_index, paths }) => {
+                        if self
+                            .dicomweb_completed_background_groups
+                            .insert(group_index)
+                        {
+                            let prepared = Self::prepare_load_paths(paths);
+                            if Self::is_supported_prepared_group(&prepared) {
+                                self.enqueue_history_preload_job(
+                                    HistoryPreloadJob::Group(prepared),
+                                    ctx,
+                                );
+                            } else {
+                                log::warn!(
+                                    "Ignoring streamed background group {} with unsupported content.",
+                                    group_index
+                                );
+                            }
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        if self
+                            .dicomweb_active_group_expected
+                            .is_some_and(Self::is_supported_multi_view_group_size)
+                        {
+                            self.mammo_load_sender = None;
+                        }
+                        keep_receiver = false;
+                        break;
+                    }
+                }
+            }
+            if keep_receiver {
+                self.dicomweb_active_path_receiver = Some(receiver);
+            }
+        }
+
+        let expected = self.dicomweb_active_group_expected.unwrap_or(0);
+        for _ in 0..DICOMWEB_ACTIVE_PENDING_BATCH_SIZE {
+            let Some(path) = self.dicomweb_active_pending_paths.pop_front() else {
+                break;
+            };
+            match classify_dicom_path(&path) {
+                Ok(DicomPathKind::Gsps) => match load_gsps_overlays(&path) {
+                    Ok(overlays) => {
+                        self.merge_pending_gsps_overlays(overlays);
+                    }
+                    Err(err) => {
+                        log::warn!("Could not parse streamed GSPS input: {err:#}");
+                    }
+                },
+                Ok(DicomPathKind::StructuredReport) => {
+                    match load_mammography_cad_sr_overlays(&path) {
+                        Ok(overlays) => {
+                            self.merge_pending_sr_overlays(overlays);
+                        }
+                        Err(err) => {
+                            log::warn!(
+                                "Could not parse streamed Mammography CAD SR overlay input: {err:#}"
+                            );
+                        }
+                    }
+                    self.enqueue_history_preload_job(
+                        HistoryPreloadJob::StructuredReport(path),
+                        ctx,
+                    );
+                }
+                Ok(DicomPathKind::ParametricMap) => {
+                    log::warn!("Ignoring streamed Parametric Map input.");
+                }
+                Ok(DicomPathKind::Image) | Err(_) => match expected {
+                    1 => {
+                        self.dicomweb_active_group_paths.push((&path).into());
+                        let active_group_is_displayed = self.displayed_study_matches_paths(
+                            self.dicomweb_active_group_paths.as_slice(),
+                        );
+                        let another_study_is_displayed = self.current_single_path.is_some()
+                            || self.report.is_some()
+                            || self.mammo_group_complete();
+                        if another_study_is_displayed && !active_group_is_displayed {
+                            log::info!(
+                                "Skipping streamed single-view activation because another study is open."
+                            );
+                        } else {
+                            let _ = self.load_selected_paths(vec![path], ctx);
+                        }
+                    }
+                    count if Self::is_supported_multi_view_group_size(count) => {
+                        self.dicomweb_active_group_paths.push((&path).into());
+                        if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
+                            thread::spawn(move || {
+                                let result = match load_dicom(&path) {
+                                    Ok(image) => Ok(PendingLoad { path, image }),
+                                    Err(err) => {
+                                        Err(format!("Error opening streamed DICOM: {err:#}"))
+                                    }
+                                };
+                                let _ = sender.send(result);
+                            });
+                        } else {
+                            let active_group_is_displayed = self.displayed_study_matches_paths(
+                                self.dicomweb_active_group_paths.as_slice(),
+                            );
+                            let another_study_is_displayed = self.current_single_path.is_some()
+                                || self.report.is_some()
+                                || self.mammo_group_complete();
+                            if another_study_is_displayed && !active_group_is_displayed {
+                                log::info!(
+                                    "Skipping streamed multi-view decode because another study is open."
+                                );
+                            } else {
+                                self.set_load_error(
+                                    "Streaming multi-view load channel was not available.",
+                                );
+                                log::error!("Streaming multi-view load channel not available.");
+                                self.mammo_group.clear();
+                                self.mammo_load_receiver = None;
+                                self.mammo_load_sender = None;
+                                self.history_pushed_for_active_group = false;
+                                self.cine_mode = false;
+                                self.dicomweb_active_group_paths.clear();
+                                self.dicomweb_completed_background_groups.clear();
+                                self.dicomweb_active_pending_paths.clear();
+                                self.dicomweb_active_group_expected = None;
+                                self.dicomweb_active_path_receiver = None;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Ok(DicomPathKind::Other) => {
+                    log::warn!("Ignoring streamed non-image DICOM input.");
+                }
+            }
+        }
+
+        if keep_receiver || !self.dicomweb_active_pending_paths.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    fn poll_dicomweb_download(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.dicomweb_receiver.take() else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(result) => match result {
+                Ok(download_result) => match download_result {
+                    DicomWebDownloadResult::Single(paths) => {
+                        let _ = self.load_selected_paths(paths, ctx);
+                    }
+                    DicomWebDownloadResult::Grouped { groups, open_group } => {
+                        let prepared_groups = groups
+                            .iter()
+                            .map(|group| Self::prepare_load_paths(group.clone()))
+                            .collect::<Vec<_>>();
+                        let grouped_gsps_overlays =
+                            Self::collect_grouped_gsps_overlays(&prepared_groups);
+                        let grouped_sr_overlays =
+                            Self::collect_grouped_sr_overlays(&prepared_groups);
+                        let validated_open_group = if prepared_groups.is_empty() {
+                            0
+                        } else {
+                            open_group.min(prepared_groups.len().saturating_sub(1))
+                        };
+                        let active_group_len = prepared_groups
+                            .get(validated_open_group)
+                            .map(|group| group.image_paths.len())
+                            .unwrap_or(0);
+                        let active_group_paths = prepared_groups
+                            .get(validated_open_group)
+                            .map(|group| group.image_paths.clone())
+                            .unwrap_or_default();
+                        let streamed_count = self.dicomweb_active_group_paths.len();
+                        let streaming_started = streamed_count > 0;
+                        let streamed_active_complete = streamed_count >= active_group_len
+                            && (active_group_len == 1
+                                || Self::is_supported_multi_view_group_size(active_group_len))
+                            && self.dicomweb_active_pending_paths.is_empty();
+                        let active_group_is_displayed =
+                            self.displayed_study_matches_paths(active_group_paths.as_slice());
+                        let grouped_ready;
+
+                        if !streamed_active_complete && !streaming_started {
+                            self.load_local_groups(groups, validated_open_group, ctx);
+                            grouped_ready =
+                                self.displayed_study_matches_paths(active_group_paths.as_slice());
+                        } else {
+                            let completed_background_groups =
+                                self.dicomweb_completed_background_groups.clone();
+                            self.preload_non_active_groups_into_history(
+                                &prepared_groups,
+                                validated_open_group,
+                                Some(&completed_background_groups),
+                                ctx,
+                            );
+                            if !self.history_pushed_for_active_group {
+                                if Self::is_supported_multi_view_group_size(active_group_len)
+                                    && self.mammo_group_complete()
+                                    && active_group_is_displayed
+                                {
+                                    self.reorder_complete_mammo_group();
+                                    let loaded = self
+                                        .mammo_group
+                                        .iter()
+                                        .filter_map(Option::as_ref)
+                                        .cloned()
+                                        .collect::<Vec<_>>();
+                                    self.push_group_history_entry(
+                                        &loaded,
+                                        self.mammo_selected_index,
+                                        ctx,
+                                    );
+                                } else if !active_group_is_displayed {
+                                    if let Some(active_group) =
+                                        prepared_groups.get(validated_open_group).cloned()
+                                    {
+                                        self.enqueue_history_preload_job(
+                                            HistoryPreloadJob::Group(active_group),
+                                            ctx,
+                                        );
+                                    }
+                                }
+                                self.history_pushed_for_active_group = true;
+                            }
+                            self.move_current_history_to_front();
+                            grouped_ready = active_group_is_displayed;
+                        }
+                        self.set_authoritative_pending_gsps_overlays(grouped_gsps_overlays);
+                        self.set_authoritative_pending_sr_overlays(grouped_sr_overlays);
+
+                        if streamed_active_complete || !streaming_started {
+                            self.dicomweb_active_group_expected = None;
+                            self.dicomweb_active_group_paths.clear();
+                            self.dicomweb_completed_background_groups.clear();
+                            self.dicomweb_active_pending_paths.clear();
+                            self.dicomweb_active_path_receiver = None;
+                            self.mammo_load_sender = None;
+                            self.history_pushed_for_active_group = false;
+                        }
+                        if grouped_ready {
+                            self.clear_load_error();
+                            log::info!("Loaded grouped study from DICOMweb.");
+                        }
+                    }
+                },
+                Err(err) => {
+                    self.set_load_error("DICOMweb request failed.");
+                    log::error!("DICOMweb error: {err}");
+                    self.dicomweb_active_group_expected = None;
+                    self.dicomweb_active_group_paths.clear();
+                    self.dicomweb_completed_background_groups.clear();
+                    self.dicomweb_active_pending_paths.clear();
+                    self.dicomweb_active_path_receiver = None;
+                    self.mammo_load_sender = None;
+                    self.history_pushed_for_active_group = false;
+                }
+            },
+            Err(TryRecvError::Empty) => {
+                self.dicomweb_receiver = Some(receiver);
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.set_load_error("DICOMweb download worker disconnected.");
+                log::error!("DICOMweb download worker disconnected.");
+                self.dicomweb_active_group_expected = None;
+                self.dicomweb_active_group_paths.clear();
+                self.dicomweb_completed_background_groups.clear();
+                self.dicomweb_active_pending_paths.clear();
+                self.dicomweb_active_path_receiver = None;
+                self.mammo_load_sender = None;
+                self.history_pushed_for_active_group = false;
+            }
+        }
+    }
+
+    fn poll_mammo_group_load(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.mammo_load_receiver.take() else {
+            return;
+        };
+
+        let mut had_error = false;
+        let mut should_continue = true;
+        match receiver.try_recv() {
+            Ok(result) => match result {
+                Ok(pending) => {
+                    if let Err(err) = self.insert_loaded_mammo(pending, ctx) {
+                        self.set_load_error("Failed to load multi-view DICOM group.");
+                        log::error!("{err}");
+                        self.mammo_group.clear();
+                        self.mammo_load_receiver = None;
+                        self.mammo_load_sender = None;
+                        self.history_pushed_for_active_group = false;
+                        self.cine_mode = false;
+                        if self.dicomweb_active_group_expected.is_some()
+                            || self.dicomweb_active_path_receiver.is_some()
+                            || !self.dicomweb_active_pending_paths.is_empty()
+                        {
+                            self.dicomweb_active_group_expected = None;
+                            self.dicomweb_active_group_paths.clear();
+                            self.dicomweb_completed_background_groups.clear();
+                            self.dicomweb_active_pending_paths.clear();
+                            self.dicomweb_active_path_receiver = None;
+                        }
+                        return;
+                    }
+                    self.reorder_complete_mammo_group();
+                    self.clear_load_error();
+                    if self.mammo_group_complete()
+                        && (self
+                            .dicomweb_active_group_expected
+                            .is_some_and(Self::is_supported_multi_view_group_size)
+                            || self.dicomweb_active_path_receiver.is_some())
+                        && !self.history_pushed_for_active_group
+                    {
+                        let loaded = self
+                            .mammo_group
+                            .iter()
+                            .filter_map(Option::as_ref)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
+                        self.move_current_history_to_front();
+                        self.history_pushed_for_active_group = true;
+                    }
+                    ctx.request_repaint();
+                }
+                Err(err) => {
+                    self.set_load_error("Failed to load multi-view DICOM group.");
+                    log::error!("{err}");
+                    self.mammo_group.clear();
+                    self.history_pushed_for_active_group = false;
+                    if self.dicomweb_active_group_expected.is_some()
+                        || self.dicomweb_active_path_receiver.is_some()
+                        || !self.dicomweb_active_pending_paths.is_empty()
+                    {
+                        self.dicomweb_active_group_expected = None;
+                        self.dicomweb_active_group_paths.clear();
+                        self.dicomweb_completed_background_groups.clear();
+                        self.dicomweb_active_pending_paths.clear();
+                        self.dicomweb_active_path_receiver = None;
+                    }
+                    had_error = true;
+                    should_continue = false;
+                }
+            },
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                should_continue = false;
+            }
+        }
+
+        if had_error {
+            self.mammo_load_receiver = None;
+            self.mammo_load_sender = None;
+            self.cine_mode = false;
+            return;
+        }
+
+        if should_continue {
+            self.mammo_load_receiver = Some(receiver);
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return;
+        }
+
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        if self.mammo_group_complete() {
+            self.reorder_complete_mammo_group();
+            self.clear_load_error();
+            if !self.history_pushed_for_active_group {
+                let loaded = self
+                    .mammo_group
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
+            }
+        } else {
+            self.set_load_error(
+                "Multi-view group load incomplete: worker exited before all images were received.",
+            );
+            log::warn!(
+                "Multi-view group load incomplete: worker exited before all images were received."
+            );
+        }
+        ctx.request_repaint();
+    }
+
+    fn poll_single_load(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.single_load_receiver.take() else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(result) => {
+                match result {
+                    Ok(PendingSingleLoad::Image(pending)) => {
+                        let pending = *pending;
+                        self.apply_loaded_single(pending.path, pending.image, ctx);
+                        self.clear_load_error();
+                    }
+                    Ok(PendingSingleLoad::StructuredReport { path, report }) => {
+                        self.apply_loaded_structured_report(path, report, ctx);
+                        self.clear_load_error();
+                    }
+                    Err(err) => {
+                        self.set_load_error("Failed to load selected item.");
+                        log::error!("Failed to load selected item: {err}");
+                    }
+                }
+                self.single_load_receiver = None;
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {
+                self.single_load_receiver = Some(receiver);
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.single_load_receiver = None;
+                self.set_load_error("Selected item load did not complete.");
+                log::error!(
+                    "Selected item load incomplete: worker exited before sending a result."
+                );
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn apply_prepared_load_paths(
+        &mut self,
+        prepared: PreparedLoadPaths,
+        ctx: &egui::Context,
+    ) -> Result<(), ()> {
+        let PreparedLoadPaths {
+            image_paths: paths,
+            structured_report_paths,
+            parametric_map_paths,
+            gsps_overlays,
+            sr_overlays,
+            pm_overlays,
+            gsps_files_found,
+            other_files_found,
+        } = prepared;
+        if !paths.is_empty()
+            || !structured_report_paths.is_empty()
+            || !parametric_map_paths.is_empty()
+            || gsps_files_found > 0
+        {
+            self.sync_current_state_to_history();
+        }
+        let preserve_history_preload = paths.len() == 1
+            && self.dicomweb_active_group_expected == Some(1)
+            && !self.dicomweb_active_group_paths.is_empty();
+        let pending_overlay_state = if preserve_history_preload {
+            let mut new_pending_gsps_overlays = self.pending_gsps_overlays.clone();
+            let mut new_pending_sr_overlays = self.pending_sr_overlays.clone();
+            let mut new_pending_pm_overlays = self.pending_pm_overlays.clone();
+            let inserted_gsps =
+                Self::insert_missing_gsps_overlays(&mut new_pending_gsps_overlays, gsps_overlays);
+            let inserted_sr =
+                Self::insert_missing_sr_overlays(&mut new_pending_sr_overlays, sr_overlays);
+            let inserted_pm =
+                Self::insert_missing_pm_overlays(&mut new_pending_pm_overlays, pm_overlays);
+            PendingOverlayState {
+                clear_history_preload: false,
+                pending_gsps_overlays: new_pending_gsps_overlays,
+                authoritative_gsps_overlay_keys: self.authoritative_gsps_overlay_keys.clone(),
+                pending_sr_overlays: new_pending_sr_overlays,
+                authoritative_sr_overlay_keys: self.authoritative_sr_overlay_keys.clone(),
+                pending_pm_overlays: new_pending_pm_overlays,
+                authoritative_pm_overlay_keys: self.authoritative_pm_overlay_keys.clone(),
+                overlay_visible: self.overlay_visible,
+                attach_to_current_study: inserted_gsps || inserted_sr || inserted_pm,
+            }
+        } else {
+            PendingOverlayState {
+                clear_history_preload: true,
+                pending_gsps_overlays: gsps_overlays,
+                authoritative_gsps_overlay_keys: HashSet::new(),
+                pending_sr_overlays: sr_overlays,
+                authoritative_sr_overlay_keys: HashSet::new(),
+                pending_pm_overlays: pm_overlays,
+                authoritative_pm_overlay_keys: HashSet::new(),
+                overlay_visible: false,
+                attach_to_current_study: false,
+            }
+        };
+
+        if paths.is_empty() {
+            if let Some((pm_path, remaining_parametric_maps)) = parametric_map_paths
+                .split_first()
+                .map(|(first, rest)| (first.clone(), rest))
+            {
+                self.commit_pending_overlay_state(pending_overlay_state);
+                self.stage_structured_report_history_entries(&structured_report_paths, ctx);
+                self.stage_parametric_map_history_entries(remaining_parametric_maps, ctx);
+                self.load_parametric_map_path(pm_path, ctx);
+                return Ok(());
+            }
+            if let Some((report_path, remaining_reports)) = structured_report_paths
+                .split_first()
+                .map(|(first, rest)| (first.clone(), rest))
+            {
+                self.commit_pending_overlay_state(pending_overlay_state);
+                self.stage_structured_report_history_entries(remaining_reports, ctx);
+                self.load_structured_report_path(report_path, ctx);
+                return Ok(());
+            }
+            if gsps_files_found > 0 {
+                self.set_load_error("GSPS detected, but no displayable DICOM image was selected.");
+                log::warn!("GSPS detected, but no displayable DICOM image was selected.");
+                ctx.request_repaint();
+                return Err(());
+            }
+            if other_files_found > 0 {
+                self.set_load_error(
+                    "Selected DICOM objects are not displayable images, parametric maps, or structured reports.",
+                );
+                log::warn!(
+                    "Selected DICOM objects are not displayable images, parametric maps, or structured reports."
+                );
+                ctx.request_repaint();
+                return Err(());
+            }
+            return Err(());
+        }
+
+        match paths.len() {
+            0 => Err(()),
+            1 => {
+                if !structured_report_paths.is_empty() {
+                    self.stage_structured_report_history_entries(&structured_report_paths, ctx);
+                    log::info!(
+                        "Opening {} image DICOM(s) and staging {} structured report object(s) as separate history entries.",
+                        paths.len(),
+                        structured_report_paths.len()
+                    );
+                }
+                if !parametric_map_paths.is_empty() {
+                    self.stage_parametric_map_history_entries(&parametric_map_paths, ctx);
+                }
+                self.commit_pending_overlay_state(pending_overlay_state);
+                self.single_load_receiver = None;
+                self.mammo_load_receiver = None;
+                self.mammo_load_sender = None;
+                self.history_pushed_for_active_group = false;
+                if let Some(path) = paths.into_iter().next() {
+                    self.load_path(path, ctx);
+                }
+                Ok(())
+            }
+            count if Self::is_supported_multi_view_group_size(count) => {
+                if !structured_report_paths.is_empty() {
+                    self.stage_structured_report_history_entries(&structured_report_paths, ctx);
+                    log::info!(
+                        "Opening {} image DICOM(s) and staging {} structured report object(s) as separate history entries.",
+                        paths.len(),
+                        structured_report_paths.len()
+                    );
+                }
+                if !parametric_map_paths.is_empty() {
+                    self.stage_parametric_map_history_entries(&parametric_map_paths, ctx);
+                }
+                self.commit_pending_overlay_state(pending_overlay_state);
+                self.load_mammo_group_paths(paths, ctx);
+                Ok(())
+            }
+            other => {
+                let err = Self::format_select_paths_count_error(other);
+                self.set_load_error(err.clone());
+                log::warn!("{err}");
+                ctx.request_repaint();
+                Err(())
+            }
+        }
+    }
+
+    fn load_selected_paths<T>(&mut self, paths: Vec<T>, ctx: &egui::Context) -> Result<(), ()>
+    where
+        T: Into<DicomSource>,
+    {
+        self.clear_load_error();
+        let prepared = Self::prepare_load_paths(paths);
+        self.apply_prepared_load_paths(prepared, ctx)
+    }
+
+    fn stage_structured_report_history_entries<T>(
+        &mut self,
+        report_paths: &[T],
+        ctx: &egui::Context,
+    ) where
+        T: Clone + Into<DicomSource>,
+    {
+        for path in report_paths {
+            self.enqueue_history_preload_job(
+                HistoryPreloadJob::StructuredReport(path.clone().into()),
+                ctx,
+            );
+        }
+    }
+
+    fn stage_parametric_map_history_entries<T>(&mut self, pm_paths: &[T], ctx: &egui::Context)
+    where
+        T: Clone + Into<DicomSource>,
+    {
+        for path in pm_paths {
+            self.enqueue_history_preload_job(
+                HistoryPreloadJob::ParametricMap(path.clone().into()),
+                ctx,
+            );
+        }
+    }
+
+    fn load_path(&mut self, path: DicomSource, ctx: &egui::Context) {
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.single_load_receiver = None;
+        self.history_pushed_for_active_group = false;
+        self.clear_load_error();
+        log::info!("Loading selected DICOM...");
+        log::info!(target: "perf", "single-open started");
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        thread::spawn(move || {
+            let result = match load_dicom(&path) {
+                Ok(image) => {
+                    log::info!(target: "perf", "single-open dicom-load completed");
+                    Ok(PendingSingleLoad::Image(Box::new(PendingLoad {
+                        path,
+                        image,
+                    })))
+                }
+                Err(err) => Err(format!("Error opening selected DICOM: {err:#}")),
+            };
+            let _ = tx.send(result);
+        });
+        self.single_load_receiver = Some(rx);
+        ctx.request_repaint();
+    }
+
+    fn load_parametric_map_path(&mut self, path: DicomSource, ctx: &egui::Context) {
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.single_load_receiver = None;
+        self.history_pushed_for_active_group = false;
+        self.clear_load_error();
+        log::info!("Loading selected Parametric Map...");
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        thread::spawn(move || {
+            let result = match load_parametric_map(&path) {
+                Ok(image) => Ok(PendingSingleLoad::Image(Box::new(PendingLoad {
+                    path,
+                    image,
+                }))),
+                Err(err) => Err(format!("Error opening selected Parametric Map: {err:#}")),
+            };
+            let _ = tx.send(result);
+        });
+        self.single_load_receiver = Some(rx);
+        ctx.request_repaint();
+    }
+
+    fn load_structured_report_path(&mut self, path: DicomSource, ctx: &egui::Context) {
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.single_load_receiver = None;
+        self.history_pushed_for_active_group = false;
+        self.clear_load_error();
+        log::info!("Loading selected Structured Report...");
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        thread::spawn(move || {
+            let result = match load_structured_report(&path) {
+                Ok(report) => Ok(PendingSingleLoad::StructuredReport { path, report }),
+                Err(err) => Err(format!("Error opening selected Structured Report: {err:#}")),
+            };
+            let _ = tx.send(result);
+        });
+        self.single_load_receiver = Some(rx);
+        ctx.request_repaint();
+    }
+
+    fn apply_loaded_single(&mut self, path: DicomSource, image: DicomImage, ctx: &egui::Context) {
+        let mut image = image;
+        Self::attach_matching_gsps_overlay(&mut image, &self.pending_gsps_overlays);
+        Self::attach_matching_sr_overlay(&mut image, &self.pending_sr_overlays);
+        Self::attach_matching_pm_overlay(&mut image, &self.pending_pm_overlays);
+        self.overlay_visible = false;
+        self.clear_load_error();
+
+        self.window_center = image.window_center;
+        self.window_width = image.window_width;
+        self.current_frame = 0;
+        self.cine_mode = false;
+        self.last_cine_advance = None;
+        self.cine_fps = image
+            .recommended_cine_fps
+            .unwrap_or(DEFAULT_CINE_FPS)
+            .clamp(1.0, 120.0);
+
+        let history_image = image.clone();
+        let path_meta = DicomSourceMeta::from(&path);
+        self.report = None;
+        self.image = Some(image);
+        self.current_single_path = Some(path_meta.clone());
+        self.mammo_group.clear();
+        self.mammo_selected_index = 0;
+        self.reset_single_view_transform();
+        self.single_view_frame_scroll_accum = 0.0;
+        self.rebuild_texture(ctx);
+        log::info!(target: "perf", "single-open completed");
+        let history_texture = self.texture.clone();
+        if let Some(texture) = history_texture.as_ref() {
+            self.push_single_history_entry(
+                HistorySingleData {
+                    path: path_meta,
+                    image: history_image,
+                    texture: texture.clone(),
+                    window_center: self.window_center,
+                    window_width: self.window_width,
+                    current_frame: self.current_frame,
+                    cine_fps: self.cine_fps,
+                },
+                ctx,
+            );
+        }
+        log::info!("Loaded selected DICOM.");
+    }
+
+    fn apply_loaded_structured_report(
+        &mut self,
+        path: DicomSource,
+        report: StructuredReportDocument,
+        ctx: &egui::Context,
+    ) {
+        self.clear_single_viewer();
+        self.mammo_group.clear();
+        self.clear_load_error();
+        let path_meta = DicomSourceMeta::from(&path);
+        self.push_report_history_entry(path_meta.clone(), report.clone(), ctx);
+        self.report = Some(report);
+        self.current_single_path = Some(path_meta);
+        ctx.request_repaint();
+        log::info!("Loaded selected Structured Report.");
+    }
+
+    fn load_mammo_group_paths(&mut self, paths: Vec<DicomSource>, ctx: &egui::Context) {
+        if !Self::is_supported_multi_view_group_size(paths.len()) {
+            let err = Self::format_multi_view_size_error(paths.len());
+            self.set_load_error(err.clone());
+            log::warn!("{err}");
+            return;
+        }
+
+        let group_len = paths.len();
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.single_load_receiver = None;
+        self.history_pushed_for_active_group = false;
+        self.clear_single_viewer();
+        self.clear_load_error();
+        self.mammo_group = (0..group_len).map(|_| None).collect();
+        self.mammo_selected_index = 0;
+        self.cine_mode = false;
+        self.last_cine_advance = None;
+        log::info!(
+            "Loading {} multi-view group...",
+            Self::multi_view_layout_label(group_len)
+        );
+
+        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        thread::spawn(move || {
+            for path in paths {
+                match load_dicom(&path) {
+                    Ok(image) => {
+                        let _ = tx.send(Ok(PendingLoad { path, image }));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Err(format!("Error opening DICOM in group: {err:#}")));
+                        return;
+                    }
+                }
+            }
+        });
+        self.mammo_load_receiver = Some(rx);
+        ctx.request_repaint();
     }
 }
 
@@ -5516,98 +4555,6 @@ impl eframe::App for DicomViewerApp {
     }
 }
 
-fn downsample_color_image(source: &ColorImage, max_dim: usize) -> ColorImage {
-    let source_width = source.size[0];
-    let source_height = source.size[1];
-    if source_width == 0 || source_height == 0 || max_dim == 0 {
-        return source.clone();
-    }
-
-    let longest_edge = source_width.max(source_height);
-    if longest_edge <= max_dim {
-        return source.clone();
-    }
-
-    let scale = max_dim as f32 / longest_edge as f32;
-    let target_width = ((source_width as f32 * scale).round() as usize).max(1);
-    let target_height = ((source_height as f32 * scale).round() as usize).max(1);
-
-    let mut pixels = Vec::with_capacity(target_width * target_height);
-    for target_y in 0..target_height {
-        let source_y = ((target_y * source_height) / target_height).min(source_height - 1);
-        for target_x in 0..target_width {
-            let source_x = ((target_x * source_width) / target_width).min(source_width - 1);
-            let source_index = source_y * source_width + source_x;
-            pixels.push(source.pixels[source_index]);
-        }
-    }
-
-    ColorImage {
-        size: [target_width, target_height],
-        pixels,
-    }
-}
-
-fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
-    if images.is_empty() || max_dim == 0 {
-        return ColorImage {
-            size: [1, 1],
-            pixels: vec![egui::Color32::BLACK],
-        };
-    }
-    if images.len() == 1 {
-        return downsample_color_image(&images[0], max_dim);
-    }
-
-    let (rows, columns) =
-        DicomViewerApp::multi_view_grid_dimensions(images.len()).unwrap_or((1, images.len()));
-    let cell_width = (max_dim / columns).max(1);
-    let cell_height = (max_dim / rows).max(1);
-    let target_width = cell_width * columns;
-    let target_height = cell_height * rows;
-    let mut pixels = vec![egui::Color32::BLACK; target_width * target_height];
-
-    let align_mammo = matches!(images.len(), 4 | 8);
-
-    for (index, image) in images.iter().enumerate() {
-        let source_width = image.size[0].max(1);
-        let source_height = image.size[1].max(1);
-
-        let scale = (cell_width as f32 / source_width as f32)
-            .min(cell_height as f32 / source_height as f32);
-        let draw_width = ((source_width as f32 * scale).round() as usize).clamp(1, cell_width);
-        let draw_height = ((source_height as f32 * scale).round() as usize).clamp(1, cell_height);
-
-        let col = index % columns;
-        let row = index / columns;
-        let base_x = if align_mammo {
-            match mammo_image_align(index) {
-                egui::Align::Max => col * cell_width + (cell_width - draw_width),
-                egui::Align::Min => col * cell_width,
-                _ => col * cell_width + (cell_width - draw_width) / 2,
-            }
-        } else {
-            col * cell_width + (cell_width - draw_width) / 2
-        };
-        let base_y = row * cell_height + (cell_height - draw_height) / 2;
-
-        for y in 0..draw_height {
-            let source_y = ((y * source_height) / draw_height).min(source_height - 1);
-            for x in 0..draw_width {
-                let source_x = ((x * source_width) / draw_width).min(source_width - 1);
-                let source_index = source_y * source_width + source_x;
-                let target_index = (base_y + y) * target_width + (base_x + x);
-                pixels[target_index] = image.pixels[source_index];
-            }
-        }
-    }
-
-    ColorImage {
-        size: [target_width, target_height],
-        pixels,
-    }
-}
-
 fn default_visible_metadata_fields() -> HashSet<String> {
     METADATA_FIELD_NAMES
         .iter()
@@ -5729,25 +4676,6 @@ fn unescape_toml_string(value: &str) -> String {
         }
     }
     output
-}
-
-fn history_id_from_paths<T>(paths: &[T]) -> String
-where
-    T: Clone + Into<DicomSourceMeta>,
-{
-    let mut normalized = paths
-        .iter()
-        .cloned()
-        .map(Into::into)
-        .map(|path: DicomSourceMeta| path.identity_key().to_string())
-        .collect::<Vec<_>>();
-    normalized.sort();
-
-    let mut history_id = format!("{}:", normalized.len());
-    for identity in normalized {
-        history_id.push_str(&format!("{}:{}", identity.len(), identity));
-    }
-    history_id
 }
 
 #[cfg(test)]
