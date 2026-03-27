@@ -1,20 +1,18 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::dicom::{FullMetadataField, FullMetadataItem, FullMetadataValue};
+use crate::dicom::{
+    load_full_metadata_from_source, FullMetadataField, FullMetadataItem, FullMetadataValue,
+};
 
 impl DicomViewerApp {
-    pub(super) fn active_full_metadata(&mut self) -> Option<Arc<[FullMetadataField]>> {
+    pub(super) fn active_full_metadata(&self) -> Option<Arc<[FullMetadataField]>> {
         if self.image.is_some() || self.loaded_mammo_count() > 0 {
-            let image = self.active_image_mut()?;
-            image.ensure_full_metadata_loaded();
-            image
-                .has_full_metadata()
-                .then(|| Arc::clone(&image.full_metadata))
+            self.active_image()?.loaded_full_metadata()
         } else {
             self.report
                 .as_ref()
-                .map(|report| Arc::<[FullMetadataField]>::from(report.full_metadata.clone()))
+                .map(|report| Arc::clone(&report.full_metadata))
         }
     }
 
@@ -31,6 +29,34 @@ impl DicomViewerApp {
 
     pub(super) fn close_full_metadata_popup(&mut self) {
         self.full_metadata_popup_open = false;
+    }
+
+    pub(super) fn poll_full_metadata_load(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.full_metadata_receiver.as_ref() else {
+            return;
+        };
+
+        let mut loaded_results = Vec::new();
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => loaded_results.push(result),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.full_metadata_receiver = None;
+                    self.full_metadata_sender = None;
+                    break;
+                }
+            }
+        }
+
+        let mut updated = false;
+        for result in loaded_results {
+            updated |= self.apply_loaded_full_metadata(result);
+        }
+
+        if updated {
+            ctx.request_repaint();
+        }
     }
 
     pub(super) fn show_metadata_ui(&mut self, ctx: &egui::Context) {
@@ -60,6 +86,16 @@ impl DicomViewerApp {
             return;
         }
 
+        self.ensure_active_full_metadata_loading(ctx);
+
+        if self.active_full_metadata_loading() {
+            let mut popup_open = self.full_metadata_popup_open;
+            Self::show_full_metadata_loading_popup(ctx, &mut popup_open);
+            self.full_metadata_popup_open = popup_open;
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return;
+        }
+
         let Some(metadata) = self.active_full_metadata() else {
             self.full_metadata_popup_open = false;
             return;
@@ -78,6 +114,58 @@ impl DicomViewerApp {
                 .as_ref()
                 .is_some_and(|report| !report.full_metadata.is_empty())
         }
+    }
+
+    fn active_full_metadata_loading(&self) -> bool {
+        self.active_image()
+            .is_some_and(DicomImage::full_metadata_loading)
+    }
+
+    fn ensure_active_full_metadata_loading(&mut self, ctx: &egui::Context) {
+        let Some(sender) = self.full_metadata_sender.clone() else {
+            return;
+        };
+        let Some(image) = self.active_image_mut() else {
+            return;
+        };
+        let Some(source) = image.begin_full_metadata_load() else {
+            return;
+        };
+
+        let source_key = source.stable_id();
+        thread::spawn(move || {
+            let metadata = match load_full_metadata_from_source(&source) {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    log::warn!("Could not load full metadata: {err:#}");
+                    Arc::default()
+                }
+            };
+            let _ = sender.send(FullMetadataLoadResult {
+                source_key,
+                metadata,
+            });
+        });
+        ctx.request_repaint_after(Duration::from_millis(16));
+    }
+
+    fn apply_loaded_full_metadata(&mut self, result: FullMetadataLoadResult) -> bool {
+        if let Some(image) = self.image.as_mut() {
+            if image.finish_full_metadata_load(&result.source_key, Arc::clone(&result.metadata)) {
+                return true;
+            }
+        }
+
+        for viewport in self.mammo_group.iter_mut().filter_map(Option::as_mut) {
+            if viewport
+                .image
+                .finish_full_metadata_load(&result.source_key, Arc::clone(&result.metadata))
+            {
+                return true;
+            }
+        }
+
+        false
     }
 
     fn show_summary_metadata_overlay(
@@ -204,6 +292,37 @@ impl DicomViewerApp {
         ctx.set_visuals(previous_visuals);
     }
 
+    fn show_full_metadata_loading_popup(ctx: &egui::Context, popup_open: &mut bool) {
+        let popup_id = egui::Id::new("full-metadata-popup");
+        let screen_rect = ctx.screen_rect();
+        let default_size = egui::vec2(
+            (screen_rect.width() * 0.74).clamp(520.0, 980.0),
+            (screen_rect.height() * 0.76).clamp(360.0, 760.0),
+        );
+
+        let previous_visuals = ctx.style().visuals.clone();
+        let mut popup_visuals = previous_visuals.clone();
+        popup_visuals.widgets.open.weak_bg_fill = egui::Color32::BLACK;
+        ctx.set_visuals(popup_visuals);
+
+        egui::Window::new(
+            egui::RichText::new("Metadata fields").color(previous_visuals.text_color()),
+        )
+        .id(popup_id)
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .collapsible(false)
+        .default_size(default_size)
+        .open(popup_open)
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.label("Loading metadata fields...");
+        });
+        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, popup_id));
+
+        ctx.set_visuals(previous_visuals);
+    }
+
     fn show_full_metadata_fields(
         ui: &mut egui::Ui,
         fields: &[FullMetadataField],
@@ -323,8 +442,8 @@ mod tests {
     #[test]
     fn active_full_metadata_reads_report_when_no_image_is_active() {
         let mut report = StructuredReportDocument::test_stub();
-        report.full_metadata = sample_full_metadata();
-        let mut app = DicomViewerApp {
+        report.full_metadata = sample_full_metadata().into();
+        let app = DicomViewerApp {
             report: Some(report),
             ..Default::default()
         };

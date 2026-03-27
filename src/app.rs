@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,9 +14,9 @@ use eframe::egui::{
 use crate::dicom::{
     classify_dicom_path, load_dicom, load_gsps_overlays, load_mammography_cad_sr_overlays,
     load_parametric_map, load_parametric_map_overlays, load_structured_report,
-    read_sop_instance_uid, DicomImage, DicomPathKind, DicomSource, DicomSourceMeta, GspsGraphic,
-    GspsOverlay, GspsUnits, ParametricMapOverlay, SrOverlay, StructuredReportDocument,
-    StructuredReportNode, METADATA_FIELD_NAMES,
+    read_sop_instance_uid, DicomImage, DicomPathKind, DicomSource, DicomSourceMeta,
+    FullMetadataField, GspsGraphic, GspsOverlay, GspsUnits, ParametricMapOverlay, SrOverlay,
+    StructuredReportDocument, StructuredReportNode, METADATA_FIELD_NAMES,
 };
 use crate::dicomweb::{
     download_dicomweb_group_request, download_dicomweb_request, DicomWebDownloadResult,
@@ -101,6 +102,11 @@ struct ActiveViewportState {
     current_frame: usize,
 }
 
+struct FullMetadataLoadResult {
+    source_key: String,
+    metadata: Arc<[FullMetadataField]>,
+}
+
 pub struct DicomViewerApp {
     image: Option<DicomImage>,
     report: Option<StructuredReportDocument>,
@@ -124,6 +130,8 @@ pub struct DicomViewerApp {
     dicomweb_active_group_paths: Vec<DicomSourceMeta>,
     dicomweb_completed_background_groups: HashSet<usize>,
     dicomweb_active_pending_paths: VecDeque<DicomSource>,
+    full_metadata_receiver: Option<Receiver<FullMetadataLoadResult>>,
+    full_metadata_sender: Option<Sender<FullMetadataLoadResult>>,
     single_load_receiver: Option<Receiver<Result<PendingSingleLoad, String>>>,
     mammo_load_receiver: Option<Receiver<Result<PendingLoad, String>>>,
     mammo_load_sender: Option<Sender<Result<PendingLoad, String>>>,
@@ -160,6 +168,7 @@ impl Default for DicomViewerApp {
 impl DicomViewerApp {
     pub fn new(initial_request: Option<LaunchRequest>) -> Self {
         let settings_path = metadata_settings_file_path();
+        let (full_metadata_sender, full_metadata_receiver) = mpsc::channel();
         let visible_metadata_fields = settings_path
             .as_deref()
             .and_then(load_visible_metadata_fields)
@@ -188,6 +197,8 @@ impl DicomViewerApp {
             dicomweb_active_group_paths: Vec::new(),
             dicomweb_completed_background_groups: HashSet::new(),
             dicomweb_active_pending_paths: VecDeque::new(),
+            full_metadata_receiver: Some(full_metadata_receiver),
+            full_metadata_sender: Some(full_metadata_sender),
             single_load_receiver: None,
             mammo_load_receiver: None,
             mammo_load_sender: None,
@@ -1867,6 +1878,7 @@ impl eframe::App for DicomViewerApp {
         self.poll_dicomweb_active_paths(ctx);
         self.poll_dicomweb_download(ctx);
         self.poll_history_preload(ctx);
+        self.poll_full_metadata_load(ctx);
         self.poll_single_load(ctx);
         self.poll_mammo_group_load(ctx);
         if self.frame_wait_pending && !self.cine_mode {

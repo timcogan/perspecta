@@ -276,6 +276,7 @@ fn parse_parametric_map(
         full_metadata: Arc::default(),
         full_metadata_source: Some(source_label.clone()),
         full_metadata_loaded: false,
+        full_metadata_loading: false,
     };
 
     Ok(ParsedParametricMap {

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use dicom_object::{DefaultDicomObject, InMemDicomObject, Tag};
@@ -108,7 +109,7 @@ pub struct StructuredReportDocument {
     pub verification_flag: Option<String>,
     pub content: Vec<StructuredReportNode>,
     pub metadata: Vec<(String, String)>,
-    pub full_metadata: Vec<FullMetadataField>,
+    pub full_metadata: Arc<[FullMetadataField]>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -235,7 +236,7 @@ impl StructuredReportDocument {
                     "Structured Report".to_string(),
                 ),
             ],
-            full_metadata: Vec::new(),
+            full_metadata: Arc::default(),
         }
     }
 }
@@ -331,7 +332,7 @@ pub(crate) fn parse_structured_report_document(
         verification_flag: read_string(obj, "VerificationFlag"),
         content,
         metadata: collect_metadata(obj),
-        full_metadata: collect_full_metadata(obj),
+        full_metadata: collect_full_metadata(obj).into(),
     }
 }
 

@@ -369,6 +369,7 @@ pub struct DicomImage {
     pub full_metadata: Arc<[FullMetadataField]>,
     full_metadata_source: Option<DicomSource>,
     full_metadata_loaded: bool,
+    full_metadata_loading: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -463,8 +464,48 @@ impl DicomImage {
             || (!self.full_metadata_loaded && self.full_metadata_source.is_some())
     }
 
+    pub(crate) fn full_metadata_loading(&self) -> bool {
+        self.full_metadata_loading
+    }
+
+    pub(crate) fn loaded_full_metadata(&self) -> Option<Arc<[FullMetadataField]>> {
+        (!self.full_metadata.is_empty()).then(|| Arc::clone(&self.full_metadata))
+    }
+
+    pub(crate) fn begin_full_metadata_load(&mut self) -> Option<DicomSource> {
+        if self.full_metadata_loaded || self.full_metadata_loading || !self.full_metadata.is_empty()
+        {
+            return None;
+        }
+
+        let source = self.full_metadata_source.clone()?;
+        self.full_metadata_loading = true;
+        Some(source)
+    }
+
+    pub(crate) fn finish_full_metadata_load(
+        &mut self,
+        source_key: &str,
+        metadata: Arc<[FullMetadataField]>,
+    ) -> bool {
+        let matches_source = self
+            .full_metadata_source
+            .as_ref()
+            .is_some_and(|source| source.stable_id() == source_key);
+        if !matches_source {
+            return false;
+        }
+
+        self.full_metadata = metadata;
+        self.full_metadata_loaded = true;
+        self.full_metadata_loading = false;
+        true
+    }
+
+    #[cfg(test)]
     pub(crate) fn ensure_full_metadata_loaded(&mut self) {
-        if self.full_metadata_loaded || !self.full_metadata.is_empty() {
+        if self.full_metadata_loaded || self.full_metadata_loading || !self.full_metadata.is_empty()
+        {
             return;
         }
 
@@ -473,17 +514,18 @@ impl DicomImage {
             return;
         };
 
-        match open_dicom_object(&source) {
-            Ok(obj) => {
-                self.full_metadata = collect_full_metadata(&obj).into();
+        match load_full_metadata_from_source(&source) {
+            Ok(metadata) => {
+                self.full_metadata = metadata;
             }
             Err(err) => {
-                log::warn!("Could not load full metadata for {source}: {err:#}");
+                log::warn!("Could not load full metadata: {err:#}");
                 self.full_metadata = Arc::default();
             }
         }
 
         self.full_metadata_loaded = true;
+        self.full_metadata_loading = false;
     }
 }
 
@@ -830,6 +872,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 full_metadata: Arc::default(),
                 full_metadata_source: Some(source.clone()),
                 full_metadata_loaded: false,
+                full_metadata_loading: false,
             })
         }
         spp if spp >= 3 => {
@@ -951,6 +994,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 full_metadata: Arc::default(),
                 full_metadata_source: Some(source.clone()),
                 full_metadata_loaded: false,
+                full_metadata_loading: false,
             })
         }
         other => bail!(
@@ -1821,6 +1865,13 @@ fn collect_full_metadata(obj: &DefaultDicomObject) -> Vec<FullMetadataField> {
     obj.into_iter().map(collect_full_metadata_field).collect()
 }
 
+pub(crate) fn load_full_metadata_from_source(
+    source: &DicomSource,
+) -> Result<Arc<[FullMetadataField]>> {
+    let obj = open_dicom_object(source)?;
+    Ok(collect_full_metadata(&obj).into())
+}
+
 fn collect_full_metadata_field(element: &InMemElement) -> FullMetadataField {
     let tag = element.tag();
     let keyword = StandardDataDictionary
@@ -2169,6 +2220,7 @@ impl DicomImage {
             full_metadata: Arc::default(),
             full_metadata_source: None,
             full_metadata_loaded: false,
+            full_metadata_loading: false,
         }
     }
 }
