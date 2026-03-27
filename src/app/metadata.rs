@@ -1,14 +1,20 @@
+use std::sync::Arc;
+
 use super::*;
 use crate::dicom::{FullMetadataField, FullMetadataItem, FullMetadataValue};
 
 impl DicomViewerApp {
-    pub(super) fn active_full_metadata(&self) -> Option<&[FullMetadataField]> {
-        if let Some(image) = self.active_image() {
-            Some(image.full_metadata.as_ref())
+    pub(super) fn active_full_metadata(&mut self) -> Option<Arc<[FullMetadataField]>> {
+        if self.image.is_some() || self.loaded_mammo_count() > 0 {
+            let image = self.active_image_mut()?;
+            image.ensure_full_metadata_loaded();
+            image
+                .has_full_metadata()
+                .then(|| Arc::clone(&image.full_metadata))
         } else {
             self.report
                 .as_ref()
-                .map(|report| report.full_metadata.as_slice())
+                .map(|report| Arc::<[FullMetadataField]>::from(report.full_metadata.clone()))
         }
     }
 
@@ -50,19 +56,28 @@ impl DicomViewerApp {
             return;
         }
 
+        if !self.full_metadata_popup_open {
+            return;
+        }
+
         let Some(metadata) = self.active_full_metadata() else {
             self.full_metadata_popup_open = false;
             return;
         };
 
         let mut popup_open = self.full_metadata_popup_open;
-        Self::show_full_metadata_popup(ctx, metadata, &mut popup_open);
+        Self::show_full_metadata_popup(ctx, metadata.as_ref(), &mut popup_open);
         self.full_metadata_popup_open = popup_open;
     }
 
     fn has_active_full_metadata(&self) -> bool {
-        self.active_full_metadata()
-            .is_some_and(|metadata| !metadata.is_empty())
+        if let Some(image) = self.active_image() {
+            image.has_full_metadata()
+        } else {
+            self.report
+                .as_ref()
+                .is_some_and(|report| !report.full_metadata.is_empty())
+        }
     }
 
     fn show_summary_metadata_overlay(
@@ -309,7 +324,7 @@ mod tests {
     fn active_full_metadata_reads_report_when_no_image_is_active() {
         let mut report = StructuredReportDocument::test_stub();
         report.full_metadata = sample_full_metadata();
-        let app = DicomViewerApp {
+        let mut app = DicomViewerApp {
             report: Some(report),
             ..Default::default()
         };

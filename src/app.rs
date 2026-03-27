@@ -979,6 +979,15 @@ impl DicomViewerApp {
         }
     }
 
+    fn active_image_mut(&mut self) -> Option<&mut DicomImage> {
+        if self.image.is_some() {
+            self.image.as_mut()
+        } else {
+            self.selected_mammo_viewport_mut()
+                .map(|viewport| &mut viewport.image)
+        }
+    }
+
     fn active_metadata(&self) -> Option<&[(String, String)]> {
         if let Some(image) = self.active_image() {
             Some(image.metadata.as_slice())

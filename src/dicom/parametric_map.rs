@@ -6,10 +6,10 @@ use dicom_object::{DefaultDicomObject, Tag};
 use dicom_pixeldata::PixelDecoder;
 
 use super::{
-    classify_dicom_object, collect_full_metadata, collect_metadata, open_dicom_object,
-    read_int_first, read_item_multi_int, read_item_string, read_laterality, read_string,
-    read_view_position, sequence_items_from_item, sequence_items_from_object, DicomImage,
-    DicomPathKind, DicomSource, ImageColorMode, MonoFrames, RgbFrames,
+    classify_dicom_object, collect_metadata, open_dicom_object, read_int_first,
+    read_item_multi_int, read_item_string, read_laterality, read_string, read_view_position,
+    sequence_items_from_item, sequence_items_from_object, DicomImage, DicomPathKind, DicomSource,
+    ImageColorMode, MonoFrames, RgbFrames,
 };
 
 const FLOAT_PIXEL_DATA: Tag = Tag(0x7FE0, 0x0008);
@@ -273,7 +273,9 @@ fn parse_parametric_map(
         sr_overlay: None,
         pm_overlay: None,
         metadata: collect_metadata(obj),
-        full_metadata: collect_full_metadata(obj).into(),
+        full_metadata: Arc::default(),
+        full_metadata_source: Some(source_label.clone()),
+        full_metadata_loaded: false,
     };
 
     Ok(ParsedParametricMap {
@@ -709,10 +711,16 @@ mod tests {
             None,
             None,
         );
+        let mut bytes = Vec::new();
+        obj.write_all(&mut bytes)
+            .expect("Parametric Map test object should serialize");
 
-        let image = parse_parametric_map(&obj, &DicomSource::from_memory("pm", Vec::new()))
+        let mut image = parse_parametric_map(&obj, &DicomSource::from_memory("pm", bytes))
             .expect("Parametric Map should parse")
             .display_image;
+
+        assert!(image.full_metadata.is_empty());
+        image.ensure_full_metadata_loaded();
 
         assert!(image
             .full_metadata
