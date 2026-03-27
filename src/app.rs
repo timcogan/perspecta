@@ -44,6 +44,7 @@ use self::load::{PendingLoad, PendingSingleLoad, PreparedLoadPaths};
 
 const APP_TITLE: &str = "Perspecta Viewer";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TITLE_TEXT_SIZE: f32 = 14.0;
 const HISTORY_MAX_ENTRIES: usize = 24;
 const HISTORY_THUMB_MAX_DIM: usize = 96;
 const HISTORY_LIST_THUMB_MAX_DIM: f32 = 56.0;
@@ -2032,7 +2033,7 @@ impl eframe::App for DicomViewerApp {
                         window_centered_title_pos,
                         egui::Align2::CENTER_CENTER,
                         &title_text,
-                        egui::FontId::proportional(14.0),
+                        egui::FontId::proportional(TITLE_TEXT_SIZE),
                         ui.visuals().text_color(),
                     );
 
