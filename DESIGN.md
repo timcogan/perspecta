@@ -76,6 +76,8 @@ Its primary purpose is consistency during development, not full architecture cov
    - Run module-specific validations for decode and renderer output tests.
 5. Streaming/overlay/history/concurrency changes (`app/overlay.rs` GSPS/SR/Parametric Map attach helpers and overlay toggle/navigation, `app/load.rs` launch/load pipeline and worker channels, `app/history.rs` history/preload orchestration):
    - Run all launch/parsing checks above.
+   - Run paired baseline vs refactor benchmark runs via `make benchmark` with identical `BENCH_*` environment settings.
+   - Report median deltas for `total`, `startup`, `dicom_load`, and `render_ui`, and summarize any regressions before approving the PR.
    - Confirm SR-only open uses the dedicated SR parser/UI path and that `load_dicom` rejects SR objects.
    - Confirm Parametric Map-only open uses the dedicated parser/UI path and that `load_dicom` rejects Parametric Map objects.
    - Ensure mixed image+SR selections keep images in active viewports while staging SR documents as separate history entries, without regressing GSPS/SR/Parametric Map/history/streaming invariants.
@@ -85,4 +87,5 @@ Its primary purpose is consistency during development, not full architecture cov
    - Run `cargo fmt --all -- --check`.
    - Run `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
    - Run `cargo test --workspace --all-targets --all-features --locked`.
+   - Run paired baseline vs refactor benchmark runs via `make benchmark` with identical `BENCH_*` environment settings, and include a short summary of median deltas/regressions for `total`, `startup`, `dicom_load`, and `render_ui`.
    - If benchmark launch flow changed, build both `cargo build --release -p perspecta --bin perspecta` and `cargo build --release -p benchmark-tools --bin benchmark_full_single_open`.
