@@ -4,7 +4,7 @@ use crate::dicom::{FullMetadataField, FullMetadataItem, FullMetadataValue};
 impl DicomViewerApp {
     pub(super) fn active_full_metadata(&self) -> Option<&[FullMetadataField]> {
         if let Some(image) = self.active_image() {
-            Some(image.full_metadata.as_slice())
+            Some(image.full_metadata.as_ref())
         } else {
             self.report
                 .as_ref()
@@ -12,8 +12,12 @@ impl DicomViewerApp {
         }
     }
 
+    pub(super) fn can_toggle_full_metadata_popup(&self) -> bool {
+        self.pending_history_open_id.is_none() && self.has_active_full_metadata()
+    }
+
     pub(super) fn toggle_full_metadata_popup(&mut self) {
-        if !self.has_active_full_metadata() {
+        if !self.can_toggle_full_metadata_popup() {
             return;
         }
         self.full_metadata_popup_open = !self.full_metadata_popup_open;
@@ -32,7 +36,7 @@ impl DicomViewerApp {
             })
             .unwrap_or(false);
 
-        if open_requested && has_full_metadata {
+        if open_requested && self.can_toggle_full_metadata_popup() {
             self.full_metadata_popup_open = true;
         }
         if !has_full_metadata {
@@ -268,7 +272,7 @@ mod tests {
     #[test]
     fn toggle_full_metadata_popup_toggles_for_active_image() {
         let mut image = DicomImage::test_stub(None);
-        image.full_metadata = sample_full_metadata();
+        image.full_metadata = sample_full_metadata().into();
         let mut app = DicomViewerApp {
             image: Some(image),
             ..Default::default()
@@ -301,7 +305,7 @@ mod tests {
     #[test]
     fn close_full_metadata_popup_clears_popup_state() {
         let mut image = DicomImage::test_stub(None);
-        image.full_metadata = sample_full_metadata();
+        image.full_metadata = sample_full_metadata().into();
         let mut app = DicomViewerApp {
             image: Some(image),
             full_metadata_popup_open: true,
@@ -309,6 +313,41 @@ mod tests {
         };
 
         app.close_full_metadata_popup();
+
+        assert!(!app.full_metadata_popup_open);
+    }
+
+    #[test]
+    fn can_toggle_full_metadata_popup_requires_loaded_metadata() {
+        let app = DicomViewerApp::default();
+
+        assert!(!app.can_toggle_full_metadata_popup());
+    }
+
+    #[test]
+    fn can_toggle_full_metadata_popup_respects_pending_history_transition() {
+        let mut image = DicomImage::test_stub(None);
+        image.full_metadata = sample_full_metadata().into();
+        let app = DicomViewerApp {
+            image: Some(image),
+            pending_history_open_id: Some("history-entry".to_string()),
+            ..Default::default()
+        };
+
+        assert!(!app.can_toggle_full_metadata_popup());
+    }
+
+    #[test]
+    fn toggle_full_metadata_popup_ignores_pending_history_transition() {
+        let mut image = DicomImage::test_stub(None);
+        image.full_metadata = sample_full_metadata().into();
+        let mut app = DicomViewerApp {
+            image: Some(image),
+            pending_history_open_id: Some("history-entry".to_string()),
+            ..Default::default()
+        };
+
+        app.toggle_full_metadata_popup();
 
         assert!(!app.full_metadata_popup_open);
     }

@@ -1883,6 +1883,7 @@ impl eframe::App for DicomViewerApp {
         let mut n_pressed = false;
         let mut v_pressed = false;
         let mut escape_pressed = false;
+        let history_transition_pending = self.pending_history_open_id.is_some();
         ctx.input_mut(|input| {
             if input.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -1899,7 +1900,9 @@ impl eframe::App for DicomViewerApp {
             c_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::C);
             g_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::G);
             n_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::N);
-            v_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::V);
+            if self.can_toggle_full_metadata_popup() {
+                v_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::V);
+            }
             if self.full_metadata_popup_open {
                 escape_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
             }
@@ -1911,7 +1914,6 @@ impl eframe::App for DicomViewerApp {
         if let Some(direction) = history_cycle_direction {
             self.cycle_history_entry(direction);
         }
-        let history_transition_pending = self.pending_history_open_id.is_some();
         if close_group_requested
             && !history_transition_pending
             && self.handle_close_group_shortcut(ctx)
@@ -1928,7 +1930,7 @@ impl eframe::App for DicomViewerApp {
         if n_pressed && !history_transition_pending {
             self.jump_to_next_overlay(ctx);
         }
-        if v_pressed && !history_transition_pending {
+        if v_pressed {
             self.toggle_full_metadata_popup();
         }
         if escape_pressed {

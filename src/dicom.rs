@@ -366,7 +366,7 @@ pub struct DicomImage {
     pub sr_overlay: Option<SrOverlay>,
     pub pm_overlay: Option<ParametricMapOverlay>,
     pub metadata: Vec<(String, String)>,
-    pub full_metadata: Vec<FullMetadataField>,
+    pub full_metadata: Arc<[FullMetadataField]>,
 }
 
 #[derive(Debug, Clone)]
@@ -697,7 +697,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     let sop_instance_uid = read_string(&obj, "SOPInstanceUID");
     let reverse_frame_order = infer_reverse_frame_order(&obj, frame_count);
     let metadata = collect_metadata(&obj);
-    let full_metadata = collect_full_metadata(&obj);
+    let full_metadata = Arc::<[FullMetadataField]>::from(collect_full_metadata(&obj));
 
     match samples_per_pixel {
         1 => {
@@ -2137,7 +2137,7 @@ impl DicomImage {
             sr_overlay: None,
             pm_overlay: None,
             metadata: Vec::new(),
-            full_metadata: Vec::new(),
+            full_metadata: Arc::default(),
         }
     }
 }

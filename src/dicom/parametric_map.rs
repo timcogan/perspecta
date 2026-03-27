@@ -273,7 +273,7 @@ fn parse_parametric_map(
         sr_overlay: None,
         pm_overlay: None,
         metadata: collect_metadata(obj),
-        full_metadata: collect_full_metadata(obj),
+        full_metadata: collect_full_metadata(obj).into(),
     };
 
     Ok(ParsedParametricMap {
