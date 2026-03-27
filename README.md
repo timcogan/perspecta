@@ -35,7 +35,7 @@ Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`efra
 - Structured Report (SR) DICOM support with a dedicated text/document view.
 - Mouse-wheel zoom + drag pan in single-image and multi-view (`1x2` / `1x3` / `2x2` / `2x4`) mammo views.
 - Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation and `Shift + drag` for window/level in multi-view layouts.
-- Metadata side panel for quick inspection.
+- Metadata side panel for quick inspection, with a full-field popup for the active object (`V`).
 - Launch through a custom URL scheme (`perspecta://...`).
 - Launch directly from DICOMweb (study/series/instance aware).
 
@@ -151,6 +151,7 @@ This writes a desktop entry under `~/.local/share/applications`.
 - `C`: toggle cine mode
 - `G`: toggle image overlay (GSPS, Mammography CAD SR, or a matching Parametric Map, when available)
 - `N`: jump to the next image/frame with an overlay
+- `V`: open or close the full metadata field popup for the active object
 - `Tab`: next history item
 - `Shift+Tab`: previous history item
 - `Cmd/Ctrl+W`: close the active study/group; if the window is already empty, close the window

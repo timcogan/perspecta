@@ -27,6 +27,7 @@ use crate::renderer::{blend_rgba_overlay, render_rgb, render_window_level};
 
 mod history;
 mod load;
+mod metadata;
 mod overlay;
 
 #[cfg(test)]
@@ -109,6 +110,7 @@ pub struct DicomViewerApp {
     mammo_selected_index: usize,
     history_entries: Vec<HistoryEntry>,
     visible_metadata_fields: HashSet<String>,
+    full_metadata_popup_open: bool,
     settings_path: Option<PathBuf>,
     history_nonce: u64,
     pending_history_open_id: Option<String>,
@@ -172,6 +174,7 @@ impl DicomViewerApp {
             mammo_selected_index: 0,
             history_entries: Vec::new(),
             visible_metadata_fields,
+            full_metadata_popup_open: false,
             settings_path,
             history_nonce: 0,
             pending_history_open_id: None,
@@ -1878,6 +1881,8 @@ impl eframe::App for DicomViewerApp {
         let mut c_pressed = false;
         let mut g_pressed = false;
         let mut n_pressed = false;
+        let mut v_pressed = false;
+        let mut escape_pressed = false;
         ctx.input_mut(|input| {
             if input.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -1894,6 +1899,10 @@ impl eframe::App for DicomViewerApp {
             c_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::C);
             g_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::G);
             n_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::N);
+            v_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::V);
+            if self.full_metadata_popup_open {
+                escape_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            }
         });
         if close_app_requested {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1918,6 +1927,12 @@ impl eframe::App for DicomViewerApp {
         }
         if n_pressed && !history_transition_pending {
             self.jump_to_next_overlay(ctx);
+        }
+        if v_pressed && !history_transition_pending {
+            self.toggle_full_metadata_popup();
+        }
+        if escape_pressed {
+            self.close_full_metadata_popup();
         }
 
         let mut open_dicoms_clicked = false;
@@ -2592,35 +2607,7 @@ impl eframe::App for DicomViewerApp {
             }
         });
 
-        if let Some(metadata) = self.active_metadata() {
-            let overlay_height = (ctx.screen_rect().height() * 0.62).max(180.0);
-            egui::Area::new(egui::Id::new("metadata-overlay-left"))
-                .order(egui::Order::Foreground)
-                .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 36.0))
-                .show(ctx, |ui| {
-                    ui.set_min_width(300.0);
-                    ui.set_max_width(300.0);
-                    ui.set_max_height(overlay_height);
-                    egui::ScrollArea::vertical()
-                        .id_salt("metadata-overlay-scroll")
-                        .show(ui, |ui| {
-                            let mut shown_count = 0usize;
-                            for (key, value) in metadata {
-                                if !self.visible_metadata_fields.contains(key.as_str()) {
-                                    continue;
-                                }
-                                shown_count = shown_count.saturating_add(1);
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.monospace(key);
-                                    ui.label(value);
-                                });
-                            }
-                            if shown_count == 0 {
-                                ui.label("No metadata fields selected.");
-                            }
-                        });
-                });
-        }
+        self.show_metadata_ui(ctx);
 
         if has_history {
             let overlay_height = (ctx.screen_rect().height() * 0.62).max(160.0);
@@ -5854,7 +5841,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         tx.send(Ok(PendingSingleLoad::StructuredReport {
             path: test_source("report.dcm"),
-            report: StructuredReportDocument::test_stub(),
+            report: Box::new(StructuredReportDocument::test_stub()),
         }))
         .expect("report should send");
 

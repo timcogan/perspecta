@@ -4,10 +4,10 @@ use anyhow::{bail, Result};
 use dicom_object::{DefaultDicomObject, InMemDicomObject, Tag};
 
 use super::{
-    classify_dicom_object, collect_metadata, open_dicom_object, read_item_multi_float,
-    read_item_multi_int, read_item_string, read_string, sequence_items_from_item,
-    sequence_items_from_object, DicomPathKind, DicomSource, GspsGraphic, GspsUnits,
-    MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+    classify_dicom_object, collect_full_metadata, collect_metadata, open_dicom_object,
+    read_item_multi_float, read_item_multi_int, read_item_string, read_string,
+    sequence_items_from_item, sequence_items_from_object, DicomPathKind, DicomSource,
+    FullMetadataField, GspsGraphic, GspsUnits, MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +108,7 @@ pub struct StructuredReportDocument {
     pub verification_flag: Option<String>,
     pub content: Vec<StructuredReportNode>,
     pub metadata: Vec<(String, String)>,
+    pub full_metadata: Vec<FullMetadataField>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -234,6 +235,7 @@ impl StructuredReportDocument {
                     "Structured Report".to_string(),
                 ),
             ],
+            full_metadata: Vec::new(),
         }
     }
 }
@@ -329,6 +331,7 @@ pub(crate) fn parse_structured_report_document(
         verification_flag: read_string(obj, "VerificationFlag"),
         content,
         metadata: collect_metadata(obj),
+        full_metadata: collect_full_metadata(obj),
     }
 }
 
@@ -743,8 +746,9 @@ fn default_sr_label(value_type: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::dicom::{
-        DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID, EXPLICIT_VR_LITTLE_ENDIAN_UID,
-        MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID, STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX,
+        BASIC_TEXT_SR_SOP_CLASS_UID, DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID,
+        EXPLICIT_VR_LITTLE_ENDIAN_UID, MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+        STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX,
     };
     use dicom_core::value::DataSetSequence;
     use dicom_core::{DataElement, PrimitiveValue, VR};
@@ -964,6 +968,39 @@ mod tests {
                 .media_storage_sop_instance_uid("9.8.7.6"),
         )
         .expect("mammography CAD SR test object should build file meta")
+    }
+
+    fn simple_structured_report_object() -> DefaultDicomObject {
+        InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+            DataElement::new(Tag(0x0008, 0x103E), VR::LO, "Chest SR"),
+            DataElement::new(Tag(0x0040, 0xA491), VR::CS, "COMPLETE"),
+            DataElement::new(Tag(0x0040, 0xA493), VR::CS, "UNVERIFIED"),
+        ])
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                .media_storage_sop_class_uid(BASIC_TEXT_SR_SOP_CLASS_UID)
+                .media_storage_sop_instance_uid("9.8.7.5"),
+        )
+        .expect("simple structured report test object should build file meta")
+    }
+
+    #[test]
+    fn parse_structured_report_document_populates_full_metadata() {
+        let sr_obj = simple_structured_report_object();
+
+        let report = parse_structured_report_document(&sr_obj);
+
+        assert!(report
+            .full_metadata
+            .iter()
+            .any(|field| field.keyword == "SeriesDescription"));
+        assert!(report
+            .full_metadata
+            .iter()
+            .any(|field| field.keyword == "CompletionFlag"));
     }
 
     #[test]

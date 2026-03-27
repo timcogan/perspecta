@@ -6,10 +6,10 @@ use dicom_object::{DefaultDicomObject, Tag};
 use dicom_pixeldata::PixelDecoder;
 
 use super::{
-    classify_dicom_object, collect_metadata, open_dicom_object, read_int_first,
-    read_item_multi_int, read_item_string, read_laterality, read_string, read_view_position,
-    sequence_items_from_item, sequence_items_from_object, DicomImage, DicomPathKind, DicomSource,
-    ImageColorMode, MonoFrames, RgbFrames,
+    classify_dicom_object, collect_full_metadata, collect_metadata, open_dicom_object,
+    read_int_first, read_item_multi_int, read_item_string, read_laterality, read_string,
+    read_view_position, sequence_items_from_item, sequence_items_from_object, DicomImage,
+    DicomPathKind, DicomSource, ImageColorMode, MonoFrames, RgbFrames,
 };
 
 const FLOAT_PIXEL_DATA: Tag = Tag(0x7FE0, 0x0008);
@@ -273,6 +273,7 @@ fn parse_parametric_map(
         sr_overlay: None,
         pm_overlay: None,
         metadata: collect_metadata(obj),
+        full_metadata: collect_full_metadata(obj),
     };
 
     Ok(ParsedParametricMap {
@@ -694,6 +695,33 @@ mod tests {
         assert_eq!(image.color_mode, ImageColorMode::Rgb);
         assert_eq!(image.samples_per_pixel, 3);
         assert!(image.frame_rgb_pixels(0).is_some());
+    }
+
+    #[test]
+    fn parse_parametric_map_populates_full_metadata() {
+        let obj = build_parametric_map_test_object(
+            DataElement::new(
+                FLOAT_PIXEL_DATA,
+                VR::OF,
+                PrimitiveValue::F32(vec![0.25f32].into()),
+            ),
+            1,
+            None,
+            None,
+        );
+
+        let image = parse_parametric_map(&obj, &DicomSource::from_memory("pm", Vec::new()))
+            .expect("Parametric Map should parse")
+            .display_image;
+
+        assert!(image
+            .full_metadata
+            .iter()
+            .any(|field| field.keyword == "FloatPixelData"));
+        assert!(image
+            .full_metadata
+            .iter()
+            .any(|field| field.keyword == "SOPInstanceUID"));
     }
 
     #[test]
