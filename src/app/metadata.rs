@@ -252,32 +252,7 @@ impl DicomViewerApp {
         metadata: &[FullMetadataField],
         popup_open: &mut bool,
     ) {
-        let popup_id = egui::Id::new("full-metadata-popup");
-        let screen_rect = ctx.screen_rect();
-        let default_size = egui::vec2(
-            (screen_rect.width() * 0.74).clamp(520.0, 980.0),
-            (screen_rect.height() * 0.76).clamp(360.0, 760.0),
-        );
-
-        let previous_visuals = ctx.style().visuals.clone();
-        let mut popup_visuals = previous_visuals.clone();
-        popup_visuals.widgets.open.weak_bg_fill = egui::Color32::BLACK;
-        popup_visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
-        ctx.set_visuals(popup_visuals);
-
-        egui::Window::new(
-            egui::RichText::new("Metadata fields")
-                .size(TITLE_TEXT_SIZE)
-                .color(previous_visuals.text_color()),
-        )
-        .id(popup_id)
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .collapsible(false)
-        .default_size(default_size)
-        .open(popup_open)
-        .resizable(true)
-        .show(ctx, |ui| {
+        Self::with_full_metadata_popup_window(ctx, popup_open, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("full-metadata-popup-scroll")
                 .show(ui, |ui| {
@@ -290,12 +265,19 @@ impl DicomViewerApp {
                     Self::show_full_metadata_fields(ui, metadata, &mut path);
                 });
         });
-        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, popup_id));
-
-        ctx.set_visuals(previous_visuals);
     }
 
     fn show_full_metadata_loading_popup(ctx: &egui::Context, popup_open: &mut bool) {
+        Self::with_full_metadata_popup_window(ctx, popup_open, |ui| {
+            ui.label("Loading metadata fields...");
+        });
+    }
+
+    fn with_full_metadata_popup_window(
+        ctx: &egui::Context,
+        popup_open: &mut bool,
+        add_contents: impl FnOnce(&mut egui::Ui),
+    ) {
         let popup_id = egui::Id::new("full-metadata-popup");
         let screen_rect = ctx.screen_rect();
         let default_size = egui::vec2(
@@ -321,9 +303,7 @@ impl DicomViewerApp {
         .default_size(default_size)
         .open(popup_open)
         .resizable(true)
-        .show(ctx, |ui| {
-            ui.label("Loading metadata fields...");
-        });
+        .show(ctx, add_contents);
         ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, popup_id));
 
         ctx.set_visuals(previous_visuals);
