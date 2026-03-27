@@ -103,9 +103,14 @@ struct ActiveViewportState {
     current_frame: usize,
 }
 
-struct FullMetadataLoadResult {
-    source_key: String,
-    metadata: Arc<[FullMetadataField]>,
+enum FullMetadataLoadResult {
+    Loaded {
+        source: DicomSource,
+        metadata: Arc<[FullMetadataField]>,
+    },
+    Failed {
+        source: DicomSource,
+    },
 }
 
 pub struct DicomViewerApp {

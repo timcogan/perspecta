@@ -51,7 +51,7 @@ impl DicomViewerApp {
 
         let mut updated = false;
         for result in loaded_results {
-            updated |= self.apply_loaded_full_metadata(result);
+            updated |= self.apply_full_metadata_load_result(result);
         }
 
         if updated {
@@ -132,40 +132,54 @@ impl DicomViewerApp {
             return;
         };
 
-        let source_key = source.stable_id();
         thread::spawn(move || {
-            let metadata = match load_full_metadata_from_source(&source) {
-                Ok(metadata) => metadata,
-                Err(err) => {
-                    log::warn!("Could not load full metadata: {err:#}");
-                    Arc::default()
-                }
+            let result = match load_full_metadata_from_source(&source) {
+                Ok(metadata) => FullMetadataLoadResult::Loaded { source, metadata },
+                Err(_) => FullMetadataLoadResult::Failed { source },
             };
-            let _ = sender.send(FullMetadataLoadResult {
-                source_key,
-                metadata,
-            });
+            let _ = sender.send(result);
         });
         ctx.request_repaint_after(Duration::from_millis(16));
     }
 
-    fn apply_loaded_full_metadata(&mut self, result: FullMetadataLoadResult) -> bool {
-        if let Some(image) = self.image.as_mut() {
-            if image.finish_full_metadata_load(&result.source_key, Arc::clone(&result.metadata)) {
-                return true;
+    fn apply_full_metadata_load_result(&mut self, result: FullMetadataLoadResult) -> bool {
+        match result {
+            FullMetadataLoadResult::Loaded { source, metadata } => {
+                if let Some(image) = self.image.as_mut() {
+                    if image.finish_full_metadata_load(&source, Arc::clone(&metadata)) {
+                        return true;
+                    }
+                }
+
+                for viewport in self.mammo_group.iter_mut().filter_map(Option::as_mut) {
+                    if viewport
+                        .image
+                        .finish_full_metadata_load(&source, Arc::clone(&metadata))
+                    {
+                        return true;
+                    }
+                }
+
+                false
+            }
+            FullMetadataLoadResult::Failed { source } => {
+                if let Some(image) = self.image.as_mut() {
+                    if image.finish_full_metadata_load_failure(&source) {
+                        log::warn!("Could not load full metadata");
+                        return true;
+                    }
+                }
+
+                for viewport in self.mammo_group.iter_mut().filter_map(Option::as_mut) {
+                    if viewport.image.finish_full_metadata_load_failure(&source) {
+                        log::warn!("Could not load full metadata");
+                        return true;
+                    }
+                }
+
+                false
             }
         }
-
-        for viewport in self.mammo_group.iter_mut().filter_map(Option::as_mut) {
-            if viewport
-                .image
-                .finish_full_metadata_load(&result.source_key, Arc::clone(&result.metadata))
-            {
-                return true;
-            }
-        }
-
-        false
     }
 
     fn show_summary_metadata_overlay(

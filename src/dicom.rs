@@ -485,13 +485,10 @@ impl DicomImage {
 
     pub(crate) fn finish_full_metadata_load(
         &mut self,
-        source_key: &str,
+        source: &DicomSource,
         metadata: Arc<[FullMetadataField]>,
     ) -> bool {
-        let matches_source = self
-            .full_metadata_source
-            .as_ref()
-            .is_some_and(|source| source.stable_id() == source_key);
+        let matches_source = self.full_metadata_source.as_ref() == Some(source);
         if !matches_source {
             return false;
         }
@@ -499,6 +496,20 @@ impl DicomImage {
         self.full_metadata = metadata;
         self.full_metadata_loaded = true;
         self.full_metadata_loading = false;
+        self.full_metadata_source = None;
+        true
+    }
+
+    pub(crate) fn finish_full_metadata_load_failure(&mut self, source: &DicomSource) -> bool {
+        let matches_source = self.full_metadata_source.as_ref() == Some(source);
+        if !matches_source {
+            return false;
+        }
+
+        self.full_metadata = Arc::default();
+        self.full_metadata_loaded = true;
+        self.full_metadata_loading = false;
+        self.full_metadata_source = None;
         true
     }
 
@@ -526,6 +537,7 @@ impl DicomImage {
 
         self.full_metadata_loaded = true;
         self.full_metadata_loading = false;
+        self.full_metadata_source = None;
     }
 }
 
@@ -2821,12 +2833,42 @@ mod tests {
 
         assert!(image.full_metadata.is_empty());
         assert!(image.has_full_metadata());
+        assert!(image.full_metadata_source.is_some());
         image.ensure_full_metadata_loaded();
 
         assert!(image
             .full_metadata
             .iter()
             .any(|field| field.keyword == "PatientName"));
+        assert!(image.full_metadata_source.is_none());
+    }
+
+    #[test]
+    fn finish_full_metadata_load_requires_exact_memory_source_match() {
+        let source = DicomSource::from_memory_with_identity("memory.dcm", "same-id", vec![1, 2, 3]);
+        let stale_source =
+            DicomSource::from_memory_with_identity("memory.dcm", "same-id", vec![1, 2, 3]);
+        let mut image = DicomImage::test_stub(None);
+        image.full_metadata_source = Some(source.clone());
+        image.full_metadata_loading = true;
+
+        assert_eq!(source.stable_id(), stale_source.stable_id());
+        assert!(!image.finish_full_metadata_load(&stale_source, Arc::default()));
+        assert!(image.full_metadata_source.is_some());
+        assert!(image.full_metadata_loading);
+    }
+
+    #[test]
+    fn finish_full_metadata_load_failure_clears_pending_source() {
+        let source = DicomSource::from_memory("memory.dcm", vec![1, 2, 3]);
+        let mut image = DicomImage::test_stub(None);
+        image.full_metadata_source = Some(source.clone());
+        image.full_metadata_loading = true;
+
+        assert!(image.finish_full_metadata_load_failure(&source));
+        assert!(image.full_metadata_loaded);
+        assert!(!image.full_metadata_loading);
+        assert!(image.full_metadata_source.is_none());
     }
 
     #[test]
