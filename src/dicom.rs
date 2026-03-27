@@ -1810,7 +1810,7 @@ fn collect_full_metadata_field(element: &InMemElement) -> FullMetadataField {
     FullMetadataField {
         keyword,
         tag: format_metadata_tag(tag),
-        vr: element.vr().to_string().to_string(),
+        vr: element.vr().to_string().into(),
         value,
     }
 }
@@ -1822,12 +1822,8 @@ fn format_metadata_tag(tag: Tag) -> String {
 fn format_full_metadata_scalar(element: &InMemElement) -> String {
     let tag = element.tag();
     if tag == Tag(0x7FE0, 0x0010) {
-        return if element.value().fragments().is_some() {
-            let fragment_count = element.value().fragments().map(|fragments| fragments.len());
-            match fragment_count {
-                Some(count) => format!("<encapsulated pixel data; {count} fragments>"),
-                None => "<encapsulated pixel data>".to_string(),
-            }
+        return if let Some(fragments) = element.value().fragments() {
+            format!("<encapsulated pixel data; {} fragments>", fragments.len())
         } else {
             summarize_binary_value(element, "pixel data")
         };

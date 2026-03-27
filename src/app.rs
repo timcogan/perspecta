@@ -1883,7 +1883,6 @@ impl eframe::App for DicomViewerApp {
         let mut n_pressed = false;
         let mut v_pressed = false;
         let mut escape_pressed = false;
-        let history_transition_pending = self.pending_history_open_id.is_some();
         ctx.input_mut(|input| {
             if input.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -1914,6 +1913,7 @@ impl eframe::App for DicomViewerApp {
         if let Some(direction) = history_cycle_direction {
             self.cycle_history_entry(direction);
         }
+        let history_transition_pending = self.pending_history_open_id.is_some();
         if close_group_requested
             && !history_transition_pending
             && self.handle_close_group_shortcut(ctx)

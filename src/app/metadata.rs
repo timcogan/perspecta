@@ -29,14 +29,20 @@ impl DicomViewerApp {
 
     pub(super) fn show_metadata_ui(&mut self, ctx: &egui::Context) {
         let has_full_metadata = self.has_active_full_metadata();
+        let toggle_enabled = has_full_metadata && self.can_toggle_full_metadata_popup();
         let open_requested = self
             .active_metadata()
             .map(|metadata| {
-                Self::show_summary_metadata_overlay(ctx, metadata, &self.visible_metadata_fields)
+                Self::show_summary_metadata_overlay(
+                    ctx,
+                    metadata,
+                    &self.visible_metadata_fields,
+                    toggle_enabled,
+                )
             })
             .unwrap_or(false);
 
-        if open_requested && self.can_toggle_full_metadata_popup() {
+        if open_requested && toggle_enabled {
             self.full_metadata_popup_open = true;
         }
         if !has_full_metadata {
@@ -63,6 +69,7 @@ impl DicomViewerApp {
         ctx: &egui::Context,
         metadata: &[(String, String)],
         visible_metadata_fields: &HashSet<String>,
+        toggle_enabled: bool,
     ) -> bool {
         let overlay_height = (ctx.screen_rect().height() * 0.62).max(180.0);
         let mut open_requested = false;
@@ -92,7 +99,9 @@ impl DicomViewerApp {
                         }
 
                         ui.add_space(ui.spacing().item_spacing.y);
-                        if Self::metadata_overlay_action(ui, "View all fields (V)").clicked() {
+                        if Self::metadata_overlay_action(ui, "View all fields (V)", toggle_enabled)
+                            .clicked()
+                        {
                             open_requested = true;
                         }
                     });
@@ -100,19 +109,30 @@ impl DicomViewerApp {
         open_requested
     }
 
-    fn metadata_overlay_action(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    fn metadata_overlay_action(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
         let font_id = egui::TextStyle::Body.resolve(ui.style());
         let galley = ui.painter().layout_no_wrap(
             text.to_owned(),
             font_id.clone(),
             ui.visuals().weak_text_color(),
         );
-        let (rect, response) = ui.allocate_exact_size(galley.size(), egui::Sense::click());
-        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-        let color = if response.hovered() {
-            egui::Color32::WHITE
+        let sense = if enabled {
+            egui::Sense::click()
         } else {
+            egui::Sense::hover()
+        };
+        let (rect, response) = ui.allocate_exact_size(galley.size(), sense);
+        let response = if enabled {
+            response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            response
+        };
+        let color = if enabled && response.hovered() {
+            egui::Color32::WHITE
+        } else if enabled {
             ui.visuals().weak_text_color()
+        } else {
+            ui.visuals().weak_text_color().gamma_multiply(0.65)
         };
         ui.painter().text(
             rect.left_top(),
