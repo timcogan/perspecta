@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,9 +14,9 @@ use eframe::egui::{
 use crate::dicom::{
     classify_dicom_path, load_dicom, load_gsps_overlays, load_mammography_cad_sr_overlays,
     load_parametric_map, load_parametric_map_overlays, load_structured_report,
-    read_sop_instance_uid, DicomImage, DicomPathKind, DicomSource, DicomSourceMeta, GspsGraphic,
-    GspsOverlay, GspsUnits, ParametricMapOverlay, SrOverlay, StructuredReportDocument,
-    StructuredReportNode, METADATA_FIELD_NAMES,
+    read_sop_instance_uid, DicomImage, DicomPathKind, DicomSource, DicomSourceMeta,
+    FullMetadataField, GspsGraphic, GspsOverlay, GspsUnits, ParametricMapOverlay, SrOverlay,
+    StructuredReportDocument, StructuredReportNode, METADATA_FIELD_NAMES,
 };
 use crate::dicomweb::{
     download_dicomweb_group_request, download_dicomweb_request, DicomWebDownloadResult,
@@ -27,6 +28,7 @@ use crate::renderer::{blend_rgba_overlay, render_rgb, render_window_level};
 
 mod history;
 mod load;
+mod metadata;
 mod overlay;
 
 #[cfg(test)]
@@ -42,6 +44,7 @@ use self::load::{PendingLoad, PendingSingleLoad, PreparedLoadPaths};
 
 const APP_TITLE: &str = "Perspecta Viewer";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TITLE_TEXT_SIZE: f32 = 14.0;
 const HISTORY_MAX_ENTRIES: usize = 24;
 const HISTORY_THUMB_MAX_DIM: usize = 96;
 const HISTORY_LIST_THUMB_MAX_DIM: f32 = 56.0;
@@ -100,6 +103,16 @@ struct ActiveViewportState {
     current_frame: usize,
 }
 
+enum FullMetadataLoadResult {
+    Loaded {
+        source: DicomSource,
+        metadata: Arc<[FullMetadataField]>,
+    },
+    Failed {
+        source: DicomSource,
+    },
+}
+
 pub struct DicomViewerApp {
     image: Option<DicomImage>,
     report: Option<StructuredReportDocument>,
@@ -109,6 +122,7 @@ pub struct DicomViewerApp {
     mammo_selected_index: usize,
     history_entries: Vec<HistoryEntry>,
     visible_metadata_fields: HashSet<String>,
+    full_metadata_popup_open: bool,
     settings_path: Option<PathBuf>,
     history_nonce: u64,
     pending_history_open_id: Option<String>,
@@ -122,6 +136,8 @@ pub struct DicomViewerApp {
     dicomweb_active_group_paths: Vec<DicomSourceMeta>,
     dicomweb_completed_background_groups: HashSet<usize>,
     dicomweb_active_pending_paths: VecDeque<DicomSource>,
+    full_metadata_receiver: Option<Receiver<FullMetadataLoadResult>>,
+    full_metadata_sender: Option<Sender<FullMetadataLoadResult>>,
     single_load_receiver: Option<Receiver<Result<PendingSingleLoad, String>>>,
     mammo_load_receiver: Option<Receiver<Result<PendingLoad, String>>>,
     mammo_load_sender: Option<Sender<Result<PendingLoad, String>>>,
@@ -158,6 +174,7 @@ impl Default for DicomViewerApp {
 impl DicomViewerApp {
     pub fn new(initial_request: Option<LaunchRequest>) -> Self {
         let settings_path = metadata_settings_file_path();
+        let (full_metadata_sender, full_metadata_receiver) = mpsc::channel();
         let visible_metadata_fields = settings_path
             .as_deref()
             .and_then(load_visible_metadata_fields)
@@ -172,6 +189,7 @@ impl DicomViewerApp {
             mammo_selected_index: 0,
             history_entries: Vec::new(),
             visible_metadata_fields,
+            full_metadata_popup_open: false,
             settings_path,
             history_nonce: 0,
             pending_history_open_id: None,
@@ -185,6 +203,8 @@ impl DicomViewerApp {
             dicomweb_active_group_paths: Vec::new(),
             dicomweb_completed_background_groups: HashSet::new(),
             dicomweb_active_pending_paths: VecDeque::new(),
+            full_metadata_receiver: Some(full_metadata_receiver),
+            full_metadata_sender: Some(full_metadata_sender),
             single_load_receiver: None,
             mammo_load_receiver: None,
             mammo_load_sender: None,
@@ -973,6 +993,15 @@ impl DicomViewerApp {
         } else {
             self.selected_mammo_viewport()
                 .map(|viewport| &viewport.image)
+        }
+    }
+
+    fn active_image_mut(&mut self) -> Option<&mut DicomImage> {
+        if self.image.is_some() {
+            self.image.as_mut()
+        } else {
+            self.selected_mammo_viewport_mut()
+                .map(|viewport| &mut viewport.image)
         }
     }
 
@@ -1855,6 +1884,7 @@ impl eframe::App for DicomViewerApp {
         self.poll_dicomweb_active_paths(ctx);
         self.poll_dicomweb_download(ctx);
         self.poll_history_preload(ctx);
+        self.poll_full_metadata_load(ctx);
         self.poll_single_load(ctx);
         self.poll_mammo_group_load(ctx);
         if self.frame_wait_pending && !self.cine_mode {
@@ -1878,6 +1908,8 @@ impl eframe::App for DicomViewerApp {
         let mut c_pressed = false;
         let mut g_pressed = false;
         let mut n_pressed = false;
+        let mut v_pressed = false;
+        let mut escape_pressed = false;
         ctx.input_mut(|input| {
             if input.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -1894,6 +1926,12 @@ impl eframe::App for DicomViewerApp {
             c_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::C);
             g_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::G);
             n_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::N);
+            if self.can_toggle_full_metadata_popup() {
+                v_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::V);
+            }
+            if self.full_metadata_popup_open {
+                escape_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            }
         });
         if close_app_requested {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1918,6 +1956,12 @@ impl eframe::App for DicomViewerApp {
         }
         if n_pressed && !history_transition_pending {
             self.jump_to_next_overlay(ctx);
+        }
+        if v_pressed {
+            self.toggle_full_metadata_popup();
+        }
+        if escape_pressed {
+            self.close_full_metadata_popup();
         }
 
         let mut open_dicoms_clicked = false;
@@ -1994,7 +2038,7 @@ impl eframe::App for DicomViewerApp {
                         window_centered_title_pos,
                         egui::Align2::CENTER_CENTER,
                         &title_text,
-                        egui::FontId::proportional(14.0),
+                        egui::FontId::proportional(TITLE_TEXT_SIZE),
                         ui.visuals().text_color(),
                     );
 
@@ -2592,35 +2636,7 @@ impl eframe::App for DicomViewerApp {
             }
         });
 
-        if let Some(metadata) = self.active_metadata() {
-            let overlay_height = (ctx.screen_rect().height() * 0.62).max(180.0);
-            egui::Area::new(egui::Id::new("metadata-overlay-left"))
-                .order(egui::Order::Foreground)
-                .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 36.0))
-                .show(ctx, |ui| {
-                    ui.set_min_width(300.0);
-                    ui.set_max_width(300.0);
-                    ui.set_max_height(overlay_height);
-                    egui::ScrollArea::vertical()
-                        .id_salt("metadata-overlay-scroll")
-                        .show(ui, |ui| {
-                            let mut shown_count = 0usize;
-                            for (key, value) in metadata {
-                                if !self.visible_metadata_fields.contains(key.as_str()) {
-                                    continue;
-                                }
-                                shown_count = shown_count.saturating_add(1);
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.monospace(key);
-                                    ui.label(value);
-                                });
-                            }
-                            if shown_count == 0 {
-                                ui.label("No metadata fields selected.");
-                            }
-                        });
-                });
-        }
+        self.show_metadata_ui(ctx);
 
         if has_history {
             let overlay_height = (ctx.screen_rect().height() * 0.62).max(160.0);
@@ -5854,7 +5870,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         tx.send(Ok(PendingSingleLoad::StructuredReport {
             path: test_source("report.dcm"),
-            report: StructuredReportDocument::test_stub(),
+            report: Box::new(StructuredReportDocument::test_stub()),
         }))
         .expect("report should send");
 

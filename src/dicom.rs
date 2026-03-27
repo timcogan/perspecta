@@ -8,7 +8,13 @@ use std::thread;
 use std::{fs, io::Cursor};
 
 use anyhow::{bail, Context, Result};
-use dicom_object::{from_reader, open_file, DefaultDicomObject, InMemDicomObject, ReadError, Tag};
+use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
+use dicom_core::header::{HasLength, Header, VR};
+use dicom_object::mem::InMemElement;
+use dicom_object::{
+    from_reader, open_file, DefaultDicomObject, InMemDicomObject, ReadError,
+    StandardDataDictionary, Tag,
+};
 use dicom_pixeldata::PixelDecoder;
 
 mod gsps;
@@ -66,6 +72,25 @@ pub const METADATA_FIELD_NAMES: &[&str] = &[
     "CompletionFlag",
     "VerificationFlag",
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullMetadataField {
+    pub keyword: String,
+    pub tag: String,
+    pub vr: String,
+    pub value: FullMetadataValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FullMetadataValue {
+    Scalar(String),
+    Sequence(Vec<FullMetadataItem>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullMetadataItem {
+    pub fields: Vec<FullMetadataField>,
+}
 
 pub const GSPS_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.11.1";
 pub const PARAMETRIC_MAP_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.30";
@@ -341,6 +366,10 @@ pub struct DicomImage {
     pub sr_overlay: Option<SrOverlay>,
     pub pm_overlay: Option<ParametricMapOverlay>,
     pub metadata: Vec<(String, String)>,
+    pub full_metadata: Arc<[FullMetadataField]>,
+    full_metadata_source: Option<DicomSource>,
+    full_metadata_loaded: bool,
+    full_metadata_loading: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -428,6 +457,87 @@ impl DicomImage {
             RgbFrames::Eager(frames) => frames.get(stored_frame_index).cloned(),
             RgbFrames::Lazy(lazy) => lazy.frame(stored_frame_index),
         }
+    }
+
+    pub(crate) fn has_full_metadata(&self) -> bool {
+        !self.full_metadata.is_empty()
+            || (!self.full_metadata_loaded && self.full_metadata_source.is_some())
+    }
+
+    pub(crate) fn full_metadata_loading(&self) -> bool {
+        self.full_metadata_loading
+    }
+
+    pub(crate) fn loaded_full_metadata(&self) -> Option<Arc<[FullMetadataField]>> {
+        (!self.full_metadata.is_empty()).then(|| Arc::clone(&self.full_metadata))
+    }
+
+    pub(crate) fn begin_full_metadata_load(&mut self) -> Option<DicomSource> {
+        if self.full_metadata_loaded || self.full_metadata_loading || !self.full_metadata.is_empty()
+        {
+            return None;
+        }
+
+        let source = self.full_metadata_source.clone()?;
+        self.full_metadata_loading = true;
+        Some(source)
+    }
+
+    pub(crate) fn finish_full_metadata_load(
+        &mut self,
+        source: &DicomSource,
+        metadata: Arc<[FullMetadataField]>,
+    ) -> bool {
+        let matches_source = self.full_metadata_source.as_ref() == Some(source);
+        if !matches_source {
+            return false;
+        }
+
+        self.full_metadata = metadata;
+        self.full_metadata_loaded = true;
+        self.full_metadata_loading = false;
+        self.full_metadata_source = None;
+        true
+    }
+
+    pub(crate) fn finish_full_metadata_load_failure(&mut self, source: &DicomSource) -> bool {
+        let matches_source = self.full_metadata_source.as_ref() == Some(source);
+        if !matches_source {
+            return false;
+        }
+
+        self.full_metadata = Arc::default();
+        self.full_metadata_loaded = true;
+        self.full_metadata_loading = false;
+        self.full_metadata_source = None;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ensure_full_metadata_loaded(&mut self) {
+        if self.full_metadata_loaded || self.full_metadata_loading || !self.full_metadata.is_empty()
+        {
+            return;
+        }
+
+        let Some(source) = self.full_metadata_source.clone() else {
+            self.full_metadata_loaded = true;
+            return;
+        };
+
+        match load_full_metadata_from_source(&source) {
+            Ok(metadata) => {
+                self.full_metadata = metadata;
+            }
+            Err(err) => {
+                log::warn!("Could not load full metadata: {err:#}");
+                self.full_metadata = Arc::default();
+            }
+        }
+
+        self.full_metadata_loaded = true;
+        self.full_metadata_loading = false;
+        self.full_metadata_source = None;
     }
 }
 
@@ -771,6 +881,10 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 sr_overlay: None,
                 pm_overlay: None,
                 metadata,
+                full_metadata: Arc::default(),
+                full_metadata_source: Some(source.clone()),
+                full_metadata_loaded: false,
+                full_metadata_loading: false,
             })
         }
         spp if spp >= 3 => {
@@ -889,6 +1003,10 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 sr_overlay: None,
                 pm_overlay: None,
                 metadata,
+                full_metadata: Arc::default(),
+                full_metadata_source: Some(source.clone()),
+                full_metadata_loaded: false,
+                full_metadata_loading: false,
             })
         }
         other => bail!(
@@ -1755,6 +1873,93 @@ fn collect_metadata(obj: &DefaultDicomObject) -> Vec<(String, String)> {
         .collect()
 }
 
+fn collect_full_metadata(obj: &DefaultDicomObject) -> Vec<FullMetadataField> {
+    obj.into_iter().map(collect_full_metadata_field).collect()
+}
+
+pub(crate) fn load_full_metadata_from_source(
+    source: &DicomSource,
+) -> Result<Arc<[FullMetadataField]>> {
+    let obj = open_dicom_object(source)?;
+    Ok(collect_full_metadata(&obj).into())
+}
+
+fn collect_full_metadata_field(element: &InMemElement) -> FullMetadataField {
+    let tag = element.tag();
+    let keyword = StandardDataDictionary
+        .by_tag(tag)
+        .map(|entry| entry.alias().to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+    let value = if let Some(items) = element.items() {
+        FullMetadataValue::Sequence(
+            items
+                .iter()
+                .map(|item| FullMetadataItem {
+                    fields: item.iter().map(collect_full_metadata_field).collect(),
+                })
+                .collect(),
+        )
+    } else {
+        FullMetadataValue::Scalar(format_full_metadata_scalar(element))
+    };
+
+    FullMetadataField {
+        keyword,
+        tag: format_metadata_tag(tag),
+        vr: element.vr().to_string().into(),
+        value,
+    }
+}
+
+fn format_metadata_tag(tag: Tag) -> String {
+    format!("({:04X},{:04X})", tag.0, tag.1)
+}
+
+fn format_full_metadata_scalar(element: &InMemElement) -> String {
+    let tag = element.tag();
+    if tag.0 == 0x7FE0 {
+        return if let Some(fragments) = element.value().fragments() {
+            format!("<encapsulated pixel data; {} fragments>", fragments.len())
+        } else {
+            summarize_binary_value(element, "pixel data")
+        };
+    }
+
+    if is_binary_metadata_vr(element.vr()) {
+        return summarize_binary_value(element, "binary");
+    }
+
+    element
+        .to_str()
+        .map(|value| value.into_owned())
+        .or_else(|_| {
+            element.to_multi_str().map(|values| {
+                values
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\\")
+            })
+        })
+        .unwrap_or_else(|_| "<unavailable>".to_string())
+}
+
+fn summarize_binary_value(element: &InMemElement, label: &str) -> String {
+    let length = element.length();
+    if length.is_undefined() {
+        format!("<{label}; undefined length>")
+    } else {
+        format!("<{label}; {} bytes>", length.0)
+    }
+}
+
+fn is_binary_metadata_vr(vr: VR) -> bool {
+    matches!(
+        vr,
+        VR::OB | VR::OD | VR::OF | VR::OL | VR::OV | VR::OW | VR::UN
+    )
+}
+
 fn read_string_or_default(obj: &DefaultDicomObject, name: &str, default: &str) -> String {
     obj.element_by_name(name)
         .ok()
@@ -2024,6 +2229,10 @@ impl DicomImage {
             sr_overlay: None,
             pm_overlay: None,
             metadata: Vec::new(),
+            full_metadata: Arc::default(),
+            full_metadata_source: None,
+            full_metadata_loaded: false,
+            full_metadata_loading: false,
         }
     }
 }
@@ -2195,6 +2404,48 @@ mod tests {
         object
             .write_all(&mut bytes)
             .expect("test object should serialize");
+        bytes
+    }
+
+    fn basic_image_test_object(
+        extra_elements: Vec<DataElement<InMemDicomObject>>,
+    ) -> DefaultDicomObject {
+        let mut elements = vec![
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, "1.2.840.10008.5.1.4.1.1.4.1"),
+            DataElement::new(Tag(0x0008, 0x0018), VR::UI, "4.3.2.12"),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "MR"),
+            DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0004), VR::CS, "MONOCHROME2"),
+            DataElement::new(Tag(0x0028, 0x0010), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0011), VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(7u16)),
+            DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(0u16)),
+        ];
+        elements.extend(extra_elements);
+        elements.push(DataElement::new(
+            Tag(0x7FE0, 0x0010),
+            VR::OB,
+            PrimitiveValue::from(vec![64u8]),
+        ));
+
+        InMemDicomObject::from_element_iter(elements)
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                    .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.4.1")
+                    .media_storage_sop_instance_uid("4.3.2.12"),
+            )
+            .expect("basic image test object should build file meta")
+    }
+
+    fn basic_image_test_bytes(extra_elements: Vec<DataElement<InMemDicomObject>>) -> Vec<u8> {
+        let object = basic_image_test_object(extra_elements);
+        let mut bytes = Vec::new();
+        object
+            .write_all(&mut bytes)
+            .expect("basic image test object should serialize");
         bytes
     }
 
@@ -2484,6 +2735,140 @@ mod tests {
     fn repair_ignores_non_explicit_vr_little_endian_sources() {
         let bytes = private_text_test_bytes("123.45", "1.2.840.10008.1.2");
         assert!(repair_private_malformed_binary_vrs_to_un(&bytes).is_none());
+    }
+
+    #[test]
+    fn collect_full_metadata_preserves_sequences_and_summarizes_pixel_data() {
+        let referenced_image = InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0008, 0x1155),
+            VR::UI,
+            "1.2.3.4",
+        )]);
+        let object = basic_image_test_object(vec![
+            DataElement::new(Tag(0x0010, 0x0010), VR::PN, "Doe^Jane"),
+            DataElement::new(
+                Tag(0x0008, 0x1140),
+                VR::SQ,
+                DataSetSequence::from(vec![referenced_image]),
+            ),
+        ]);
+
+        let metadata = collect_full_metadata(&object);
+
+        assert_eq!(metadata[0].keyword, "SOPClassUID");
+        let sequence_field = metadata
+            .iter()
+            .find(|field| field.keyword == "ReferencedImageSequence")
+            .expect("sequence field should be collected");
+        match &sequence_field.value {
+            FullMetadataValue::Sequence(items) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].fields.len(), 1);
+                assert_eq!(items[0].fields[0].keyword, "ReferencedSOPInstanceUID");
+            }
+            FullMetadataValue::Scalar(_) => panic!("sequence field should not render as scalar"),
+        }
+
+        let pixel_data = metadata
+            .iter()
+            .find(|field| field.keyword == "PixelData")
+            .expect("pixel data field should be present");
+        match &pixel_data.value {
+            FullMetadataValue::Scalar(value) => {
+                assert_eq!(value, "<pixel data; 1 bytes>");
+            }
+            FullMetadataValue::Sequence(_) => panic!("pixel data should not render as sequence"),
+        }
+    }
+
+    #[test]
+    fn collect_full_metadata_uses_unknown_keyword_fallback_for_private_tags() {
+        let object = basic_image_test_object(vec![DataElement::new(
+            Tag(0x0011, 0x1010),
+            VR::LO,
+            "Private",
+        )]);
+
+        let metadata = collect_full_metadata(&object);
+        let field = metadata
+            .iter()
+            .find(|field| field.tag == "(0011,1010)")
+            .expect("private tag should be present");
+
+        assert_eq!(field.keyword, "Unknown");
+    }
+
+    #[test]
+    fn collect_full_metadata_treats_all_pixel_data_group_tags_as_pixel_data() {
+        let object = basic_image_test_object(vec![DataElement::new(
+            Tag(0x7FE0, 0x0008),
+            VR::OF,
+            PrimitiveValue::F32(vec![0.25f32].into()),
+        )]);
+
+        let metadata = collect_full_metadata(&object);
+        let field = metadata
+            .iter()
+            .find(|field| field.tag == "(7FE0,0008)")
+            .expect("FloatPixelData should be present");
+
+        match &field.value {
+            FullMetadataValue::Scalar(value) => assert!(value.contains("pixel data")),
+            FullMetadataValue::Sequence(_) => {
+                panic!("FloatPixelData should not render as sequence")
+            }
+        }
+    }
+
+    #[test]
+    fn load_dicom_loads_full_metadata_on_demand() {
+        let bytes = basic_image_test_bytes(vec![DataElement::new(
+            Tag(0x0010, 0x0010),
+            VR::PN,
+            "Doe^Jane",
+        )]);
+
+        let mut image = load_dicom(DicomSource::from_memory("full-metadata-image", bytes))
+            .expect("image should load");
+
+        assert!(image.full_metadata.is_empty());
+        assert!(image.has_full_metadata());
+        assert!(image.full_metadata_source.is_some());
+        image.ensure_full_metadata_loaded();
+
+        assert!(image
+            .full_metadata
+            .iter()
+            .any(|field| field.keyword == "PatientName"));
+        assert!(image.full_metadata_source.is_none());
+    }
+
+    #[test]
+    fn finish_full_metadata_load_requires_exact_memory_source_match() {
+        let source = DicomSource::from_memory_with_identity("memory.dcm", "same-id", vec![1, 2, 3]);
+        let stale_source =
+            DicomSource::from_memory_with_identity("memory.dcm", "same-id", vec![1, 2, 3]);
+        let mut image = DicomImage::test_stub(None);
+        image.full_metadata_source = Some(source.clone());
+        image.full_metadata_loading = true;
+
+        assert_eq!(source.stable_id(), stale_source.stable_id());
+        assert!(!image.finish_full_metadata_load(&stale_source, Arc::default()));
+        assert!(image.full_metadata_source.is_some());
+        assert!(image.full_metadata_loading);
+    }
+
+    #[test]
+    fn finish_full_metadata_load_failure_clears_pending_source() {
+        let source = DicomSource::from_memory("memory.dcm", vec![1, 2, 3]);
+        let mut image = DicomImage::test_stub(None);
+        image.full_metadata_source = Some(source.clone());
+        image.full_metadata_loading = true;
+
+        assert!(image.finish_full_metadata_load_failure(&source));
+        assert!(image.full_metadata_loaded);
+        assert!(!image.full_metadata_loading);
+        assert!(image.full_metadata_source.is_none());
     }
 
     #[test]

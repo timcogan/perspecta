@@ -273,6 +273,10 @@ fn parse_parametric_map(
         sr_overlay: None,
         pm_overlay: None,
         metadata: collect_metadata(obj),
+        full_metadata: Arc::default(),
+        full_metadata_source: Some(source_label.clone()),
+        full_metadata_loaded: false,
+        full_metadata_loading: false,
     };
 
     Ok(ParsedParametricMap {
@@ -694,6 +698,39 @@ mod tests {
         assert_eq!(image.color_mode, ImageColorMode::Rgb);
         assert_eq!(image.samples_per_pixel, 3);
         assert!(image.frame_rgb_pixels(0).is_some());
+    }
+
+    #[test]
+    fn parse_parametric_map_populates_full_metadata() {
+        let obj = build_parametric_map_test_object(
+            DataElement::new(
+                FLOAT_PIXEL_DATA,
+                VR::OF,
+                PrimitiveValue::F32(vec![0.25f32].into()),
+            ),
+            1,
+            None,
+            None,
+        );
+        let mut bytes = Vec::new();
+        obj.write_all(&mut bytes)
+            .expect("Parametric Map test object should serialize");
+
+        let mut image = parse_parametric_map(&obj, &DicomSource::from_memory("pm", bytes))
+            .expect("Parametric Map should parse")
+            .display_image;
+
+        assert!(image.full_metadata.is_empty());
+        image.ensure_full_metadata_loaded();
+
+        assert!(image
+            .full_metadata
+            .iter()
+            .any(|field| field.keyword == "FloatPixelData"));
+        assert!(image
+            .full_metadata
+            .iter()
+            .any(|field| field.keyword == "SOPInstanceUID"));
     }
 
     #[test]

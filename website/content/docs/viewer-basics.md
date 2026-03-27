@@ -16,6 +16,7 @@ Use this page after a study or report is already open. It covers the main viewer
 - `8` images: comparison grid (`2x4`)
 - GSPS DICOM objects can accompany image files as overlays and do not consume display slots
 - Structured Reports open in a dedicated document view instead of an image layout
+- The metadata overlay on the left shows selected fields for the active object; use `View all fields (V)` to open the full field list with expandable sequences
 
 ## Navigation
 
@@ -23,6 +24,7 @@ Use this page after a study or report is already open. It covers the main viewer
 - `Shift+Tab`: move to the previous history item
 - `Cmd/Ctrl+W`: close the active study or group; if the window is already empty, close the window
 - `Cmd/Ctrl+Shift+W`: close the window
+- `V`: open or close the full metadata field popup for the active object
 
 ## Image controls
 

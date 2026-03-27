@@ -19,6 +19,7 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
 - `src/logging.rs`: logging setup and log-level configuration.
 - `src/app.rs`: UI, application state, interactions, and worker orchestration.
+- `src/app/metadata.rs`: metadata overlay, metadata popup, and active-object metadata presentation.
 - `src/app/overlay.rs`: overlay reconciliation, authoritative overlay snapshots, and overlay availability/navigation.
 - `src/app/load.rs`: launch/open/load orchestration and DICOMweb/local load pipelines.
 - `src/app/history.rs`: history management and preload/orchestration.
@@ -47,6 +48,7 @@ Its primary purpose is consistency during development, not full architecture cov
 19. If the user switches away from a streaming DICOMweb active group, remaining active-group work MUST continue staging into history and MUST NOT clear, replace, or visually mask the currently displayed study.
 20. Multi-frame images with per-frame `ImagePositionPatient` MUST expose frames in logical patient-position order; if the dominant per-frame patient-position progression increases across stored frames, display and cine MUST reverse with it, and GSPS/SR frame lookups MUST translate the displayed frame back to the referenced stored DICOM frame.
 21. DICOM content inside the viewer MUST use explicit `DicomSource` ownership; DICOMweb bytes MUST be represented as `DicomSource::Memory`, not temp files or a global backing store.
+22. Visible metadata field settings MUST apply only to the summary overlay; the full metadata popup MUST ignore that filter and show all extracted fields for the active object.
 
 ## Change Rules
 

@@ -31,7 +31,7 @@ pub(super) enum PendingSingleLoad {
     Image(Box<PendingLoad>),
     StructuredReport {
         path: DicomSource,
-        report: StructuredReportDocument,
+        report: Box<StructuredReportDocument>,
     },
 }
 
@@ -837,7 +837,7 @@ impl DicomViewerApp {
                         self.clear_load_error();
                     }
                     Ok(PendingSingleLoad::StructuredReport { path, report }) => {
-                        self.apply_loaded_structured_report(path, report, ctx);
+                        self.apply_loaded_structured_report(path, *report, ctx);
                         self.clear_load_error();
                     }
                     Err(err) => {
@@ -1113,7 +1113,10 @@ impl DicomViewerApp {
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         thread::spawn(move || {
             let result = match load_structured_report(&path) {
-                Ok(report) => Ok(PendingSingleLoad::StructuredReport { path, report }),
+                Ok(report) => Ok(PendingSingleLoad::StructuredReport {
+                    path,
+                    report: Box::new(report),
+                }),
                 Err(err) => Err(format!("Error opening selected Structured Report: {err:#}")),
             };
             let _ = tx.send(result);
