@@ -57,6 +57,7 @@ const CLOSE_ICON_SIZE_FACTOR: f32 = 0.36;
 const TITLEBAR_MINIMIZE_ICON_HORIZONTAL_PADDING: f32 = 10.0;
 const TITLEBAR_MINIMIZE_ICON_VERTICAL_PADDING: f32 = 9.0;
 const TITLEBAR_MAXIMIZE_ICON_MARGIN: f32 = 15.0;
+const TITLEBAR_MAXIMIZE_ICON_MIN_SIDE: f32 = 1.0;
 const ERROR_OVERLAY_CLOSE_BUTTON_SIZE: f32 = 18.0;
 const CONTROL_VALUE_WIDTH: f32 = 64.0;
 const CONTROL_ACTION_BUTTON_WIDTH: f32 = 110.0;
@@ -1315,6 +1316,13 @@ impl DicomViewerApp {
         )
     }
 
+    fn register_icon_button_accessibility(response: &egui::Response, label: &'static str) {
+        let enabled = response.enabled();
+        response.widget_info(move || {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
+        });
+    }
+
     fn paint_close_icon(painter: &egui::Painter, button_rect: egui::Rect, stroke: egui::Stroke) {
         let icon_side = button_rect.width().min(button_rect.height()) * CLOSE_ICON_SIZE_FACTOR;
         let icon_rect =
@@ -1348,7 +1356,8 @@ impl DicomViewerApp {
         stroke: egui::Stroke,
     ) {
         let icon_side = (button_rect.height() - TITLEBAR_MAXIMIZE_ICON_MARGIN)
-            .min(button_rect.width() - TITLEBAR_MAXIMIZE_ICON_MARGIN);
+            .min(button_rect.width() - TITLEBAR_MAXIMIZE_ICON_MARGIN)
+            .max(TITLEBAR_MAXIMIZE_ICON_MIN_SIDE);
         let icon_rect =
             egui::Rect::from_center_size(button_rect.center(), egui::vec2(icon_side, icon_side));
         let top_left = icon_rect.left_top();
@@ -2125,6 +2134,7 @@ impl eframe::App for DicomViewerApp {
                             if close_response.clicked() {
                                 ctx.send_viewport_cmd(ViewportCommand::Close);
                             }
+                            Self::register_icon_button_accessibility(&close_response, "Close");
 
                             let maximize_response = ui.add_sized(
                                 button_size,
@@ -2140,6 +2150,10 @@ impl eframe::App for DicomViewerApp {
                             if maximize_response.clicked() {
                                 ctx.send_viewport_cmd(ViewportCommand::Maximized(!is_maximized));
                             }
+                            Self::register_icon_button_accessibility(
+                                &maximize_response,
+                                "Maximize",
+                            );
 
                             let minimize_response = ui.add_sized(
                                 button_size,
@@ -2155,6 +2169,10 @@ impl eframe::App for DicomViewerApp {
                             if minimize_response.clicked() {
                                 ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
                             }
+                            Self::register_icon_button_accessibility(
+                                &minimize_response,
+                                "Minimize",
+                            );
                         },
                     );
                 });
@@ -2754,6 +2772,10 @@ impl eframe::App for DicomViewerApp {
                                 if dismiss_response.clicked() {
                                     dismiss_error = true;
                                 }
+                                Self::register_icon_button_accessibility(
+                                    &dismiss_response,
+                                    "Dismiss",
+                                );
                             });
                         });
                 });
