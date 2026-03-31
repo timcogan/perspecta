@@ -2898,7 +2898,8 @@ mod tests {
             DataElement::new(Tag(0x0018, 0x1164), VR::DS, "1.25\\1.50"),
         ]);
 
-        let image = load_dicom(DicomSource::from_memory("pixel-spacing-priority", bytes)).unwrap();
+        let image = load_dicom(DicomSource::from_memory("pixel-spacing-priority", bytes))
+            .expect("failed to load DICOM: pixel-spacing-priority");
 
         assert_eq!(
             image.pixel_spacing_mm,
@@ -2921,7 +2922,7 @@ mod tests {
             "pixel-spacing-imager-fallback",
             bytes,
         ))
-        .unwrap();
+        .expect("failed to load DICOM: pixel-spacing-imager-fallback");
 
         assert_eq!(
             image.pixel_spacing_mm,
@@ -2944,7 +2945,7 @@ mod tests {
             "pixel-spacing-nominal-fallback",
             bytes,
         ))
-        .unwrap();
+        .expect("failed to load DICOM: pixel-spacing-nominal-fallback");
 
         assert_eq!(
             image.pixel_spacing_mm,

@@ -175,17 +175,15 @@ impl DicomViewerApp {
         painter.circle_filled(end, MEASUREMENT_HANDLE_RADIUS, MEASUREMENT_COLOR);
 
         let label = measurement_label_text(*measurement, geometry);
-        let (label_offset, label_anchor) = measurement_label_layout(start, end);
-        let label_pos = end + label_offset;
         let font_id = FontId::monospace(12.0);
-        painter.text(
-            label_pos + egui::vec2(1.0, 1.0),
-            label_anchor,
-            &label,
-            font_id.clone(),
+        let galley = painter.layout_no_wrap(label, font_id, MEASUREMENT_COLOR);
+        let label_rect = measurement_label_rect(start, end, galley.size(), painter.clip_rect());
+        painter.galley(
+            label_rect.min + egui::vec2(1.0, 1.0),
+            galley.clone(),
             egui::Color32::BLACK,
         );
-        painter.text(label_pos, label_anchor, label, font_id, MEASUREMENT_COLOR);
+        painter.galley(label_rect.min, galley, MEASUREMENT_COLOR);
     }
 
     pub(super) fn update_measurement_cursor(
@@ -270,6 +268,13 @@ fn measurement_label_layout(start: egui::Pos2, end: egui::Pos2) -> (egui::Vec2, 
     let delta = end - start;
     let place_right = delta.x >= 0.0;
     let place_below = delta.y >= 0.0;
+    measurement_label_layout_from_quadrant(place_right, place_below)
+}
+
+fn measurement_label_layout_from_quadrant(
+    place_right: bool,
+    place_below: bool,
+) -> (egui::Vec2, Align2) {
     let offset = egui::vec2(
         if place_right {
             MEASUREMENT_LABEL_OFFSET_X
@@ -289,6 +294,61 @@ fn measurement_label_layout(start: egui::Pos2, end: egui::Pos2) -> (egui::Vec2, 
         (false, false) => Align2::RIGHT_BOTTOM,
     };
     (offset, anchor)
+}
+
+fn measurement_label_rect(
+    start: egui::Pos2,
+    end: egui::Pos2,
+    label_size: egui::Vec2,
+    clip_rect: egui::Rect,
+) -> egui::Rect {
+    let delta = end - start;
+    let mut place_right = delta.x >= 0.0;
+    let mut place_below = delta.y >= 0.0;
+    let mut rect = measurement_label_rect_for_quadrant(end, label_size, place_right, place_below);
+
+    if rect.left() < clip_rect.left() || rect.right() > clip_rect.right() {
+        place_right = !place_right;
+        rect = measurement_label_rect_for_quadrant(end, label_size, place_right, place_below);
+    }
+    if rect.top() < clip_rect.top() || rect.bottom() > clip_rect.bottom() {
+        place_below = !place_below;
+        rect = measurement_label_rect_for_quadrant(end, label_size, place_right, place_below);
+    }
+
+    clamp_rect_to_clip(rect, clip_rect)
+}
+
+fn measurement_label_rect_for_quadrant(
+    end: egui::Pos2,
+    label_size: egui::Vec2,
+    place_right: bool,
+    place_below: bool,
+) -> egui::Rect {
+    let (offset, anchor) = measurement_label_layout_from_quadrant(place_right, place_below);
+    anchor.anchor_size(end + offset, label_size)
+}
+
+fn clamp_rect_to_clip(rect: egui::Rect, clip_rect: egui::Rect) -> egui::Rect {
+    let translation_x = if rect.width() >= clip_rect.width() {
+        clip_rect.left() - rect.left()
+    } else if rect.left() < clip_rect.left() {
+        clip_rect.left() - rect.left()
+    } else if rect.right() > clip_rect.right() {
+        clip_rect.right() - rect.right()
+    } else {
+        0.0
+    };
+    let translation_y = if rect.height() >= clip_rect.height() {
+        clip_rect.top() - rect.top()
+    } else if rect.top() < clip_rect.top() {
+        clip_rect.top() - rect.top()
+    } else if rect.bottom() > clip_rect.bottom() {
+        clip_rect.bottom() - rect.bottom()
+    } else {
+        0.0
+    };
+    rect.translate(egui::vec2(translation_x, translation_y))
 }
 
 #[cfg(test)]
@@ -393,5 +453,35 @@ mod tests {
             egui::vec2(-MEASUREMENT_LABEL_OFFSET_X, -MEASUREMENT_LABEL_OFFSET_Y)
         );
         assert_eq!(anchor, Align2::RIGHT_BOTTOM);
+    }
+
+    #[test]
+    fn measurement_label_rect_flips_inside_clip_when_default_quadrant_overflows() {
+        let rect = measurement_label_rect(
+            egui::pos2(60.0, 60.0),
+            egui::pos2(95.0, 95.0),
+            egui::vec2(20.0, 10.0),
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(100.0, 100.0)),
+        );
+
+        assert_eq!(
+            rect,
+            egui::Rect::from_min_size(egui::pos2(67.0, 77.0), egui::vec2(20.0, 10.0))
+        );
+    }
+
+    #[test]
+    fn measurement_label_rect_clamps_inside_clip_after_flip() {
+        let rect = measurement_label_rect(
+            egui::pos2(20.0, 20.0),
+            egui::pos2(3.0, 50.0),
+            egui::vec2(30.0, 12.0),
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(100.0, 100.0)),
+        );
+
+        assert_eq!(
+            rect,
+            egui::Rect::from_min_size(egui::pos2(11.0, 58.0), egui::vec2(30.0, 12.0))
+        );
     }
 }

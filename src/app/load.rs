@@ -336,6 +336,7 @@ impl DicomViewerApp {
     }
 
     pub(super) fn reorder_complete_mammo_group(&mut self) {
+        self.clear_live_measurement();
         if !self.mammo_group_complete() {
             return;
         }
