@@ -52,6 +52,15 @@ const DEFAULT_CINE_FPS: f32 = 24.0;
 const VALID_GROUP_SIZES: &[usize] = &[1, 2, 3, 4, 8];
 const PERSPECTA_BRAND_BLUE: egui::Color32 = egui::Color32::from_rgb(14, 165, 233);
 const PERSPECTA_OVERLAY_ORANGE: egui::Color32 = egui::Color32::from_rgb(249, 115, 22);
+const ICON_STROKE_WIDTH: f32 = 1.25;
+const CLOSE_ICON_SIZE_FACTOR: f32 = 0.36;
+const TITLEBAR_MINIMIZE_ICON_HORIZONTAL_PADDING: f32 = 10.0;
+const TITLEBAR_MINIMIZE_ICON_VERTICAL_PADDING: f32 = 9.0;
+const TITLEBAR_MAXIMIZE_ICON_MARGIN: f32 = 15.0;
+const TITLEBAR_MAXIMIZE_ICON_MIN_SIDE: f32 = 1.0;
+const TITLEBAR_RESTORE_ICON_OFFSET_FACTOR: f32 = 0.24;
+const TITLEBAR_RESTORE_ICON_MIN_OFFSET: f32 = 1.0;
+const ERROR_OVERLAY_CLOSE_BUTTON_SIZE: f32 = 18.0;
 const CONTROL_VALUE_WIDTH: f32 = 64.0;
 const CONTROL_ACTION_BUTTON_WIDTH: f32 = 110.0;
 const FILE_DROP_OVERLAY_WIDTH: f32 = 420.0;
@@ -1302,6 +1311,127 @@ impl DicomViewerApp {
         }
     }
 
+    fn icon_stroke(ui: &egui::Ui, response: &egui::Response) -> egui::Stroke {
+        egui::Stroke::new(
+            ICON_STROKE_WIDTH,
+            ui.style().interact(response).fg_stroke.color,
+        )
+    }
+
+    fn register_icon_button_accessibility(response: &egui::Response, label: &'static str) {
+        let enabled = response.enabled();
+        response.widget_info(move || {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
+        });
+    }
+
+    fn paint_close_icon(painter: &egui::Painter, button_rect: egui::Rect, stroke: egui::Stroke) {
+        let icon_side = button_rect.width().min(button_rect.height()) * CLOSE_ICON_SIZE_FACTOR;
+        let icon_rect =
+            egui::Rect::from_center_size(button_rect.center(), egui::vec2(icon_side, icon_side));
+        painter.line_segment([icon_rect.left_top(), icon_rect.right_bottom()], stroke);
+        painter.line_segment([icon_rect.right_top(), icon_rect.left_bottom()], stroke);
+    }
+
+    fn paint_titlebar_minimize_icon(
+        painter: &egui::Painter,
+        button_rect: egui::Rect,
+        stroke: egui::Stroke,
+    ) {
+        let icon_rect = button_rect.shrink2(egui::vec2(
+            TITLEBAR_MINIMIZE_ICON_HORIZONTAL_PADDING,
+            TITLEBAR_MINIMIZE_ICON_VERTICAL_PADDING,
+        ));
+        let y = icon_rect.center().y;
+        painter.line_segment(
+            [
+                egui::pos2(icon_rect.left(), y),
+                egui::pos2(icon_rect.right(), y),
+            ],
+            stroke,
+        );
+    }
+
+    fn paint_titlebar_maximize_icon(
+        painter: &egui::Painter,
+        button_rect: egui::Rect,
+        stroke: egui::Stroke,
+        is_maximized: bool,
+    ) {
+        let icon_side = (button_rect.height() - TITLEBAR_MAXIMIZE_ICON_MARGIN)
+            .min(button_rect.width() - TITLEBAR_MAXIMIZE_ICON_MARGIN)
+            .max(TITLEBAR_MAXIMIZE_ICON_MIN_SIDE);
+        let icon_rect =
+            egui::Rect::from_center_size(button_rect.center(), egui::vec2(icon_side, icon_side));
+        let top_left = icon_rect.left_top();
+        let top_right = icon_rect.right_top();
+        let bottom_left = icon_rect.left_bottom();
+        let bottom_right = icon_rect.right_bottom();
+        if !is_maximized {
+            painter.line_segment([top_left, top_right], stroke);
+            painter.line_segment([top_right, bottom_right], stroke);
+            painter.line_segment([bottom_right, bottom_left], stroke);
+            painter.line_segment([bottom_left, top_left], stroke);
+            return;
+        }
+
+        let overlap_offset = if icon_side > TITLEBAR_MAXIMIZE_ICON_MIN_SIDE {
+            (icon_side * TITLEBAR_RESTORE_ICON_OFFSET_FACTOR).clamp(
+                TITLEBAR_RESTORE_ICON_MIN_OFFSET,
+                icon_side - TITLEBAR_MAXIMIZE_ICON_MIN_SIDE,
+            )
+        } else {
+            0.0
+        };
+
+        if overlap_offset <= 0.0 {
+            painter.line_segment([top_left, top_right], stroke);
+            painter.line_segment([top_right, bottom_right], stroke);
+            painter.line_segment([bottom_right, bottom_left], stroke);
+            painter.line_segment([bottom_left, top_left], stroke);
+            return;
+        }
+
+        let back_rect = egui::Rect::from_min_max(
+            egui::pos2(top_left.x + overlap_offset, top_left.y),
+            egui::pos2(top_right.x, bottom_right.y - overlap_offset),
+        );
+        let front_rect = egui::Rect::from_min_max(
+            egui::pos2(bottom_left.x, top_left.y + overlap_offset),
+            egui::pos2(top_right.x - overlap_offset, bottom_right.y),
+        );
+
+        let back_top_left = back_rect.left_top();
+        let back_top_right = back_rect.right_top();
+        let back_bottom_right = back_rect.right_bottom();
+        let back_bottom_left = back_rect.left_bottom();
+        painter.line_segment([back_top_left, back_top_right], stroke);
+        painter.line_segment([back_top_right, back_bottom_right], stroke);
+        painter.line_segment(
+            [
+                back_top_left,
+                egui::pos2(back_bottom_left.x, front_rect.top()),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(front_rect.right(), back_bottom_right.y),
+                back_bottom_right,
+            ],
+            stroke,
+        );
+
+        let front_top_left = front_rect.left_top();
+        let front_top_right = front_rect.right_top();
+        let front_bottom_left = front_rect.left_bottom();
+        let front_bottom_right = front_rect.right_bottom();
+        painter.line_segment([front_top_left, front_top_right], stroke);
+        painter.line_segment([front_top_right, front_bottom_right], stroke);
+        painter.line_segment([front_bottom_right, front_bottom_left], stroke);
+        painter.line_segment([front_bottom_left, front_top_left], stroke);
+    }
+
     fn show_structured_report_view(&self, ui: &mut egui::Ui, report: &StructuredReportDocument) {
         ui.add_space(8.0);
         ui.vertical_centered(|ui| {
@@ -2008,11 +2138,14 @@ impl eframe::App for DicomViewerApp {
                                         self.show_metadata_field_options_menu(ui);
                                     });
                                 });
+                            Self::register_icon_button_accessibility(
+                                &menu_response.response,
+                                "Titlebar menu",
+                            );
 
                             let icon_rect =
                                 menu_response.response.rect.shrink2(egui::vec2(5.0, 5.0));
-                            let line_color = ui.visuals().widgets.inactive.fg_stroke.color;
-                            let line_stroke = egui::Stroke::new(1.0, line_color);
+                            let line_stroke = Self::icon_stroke(ui, &menu_response.response);
                             let y_top = icon_rect.top() + 1.0;
                             let y_mid = icon_rect.center().y;
                             let y_bottom = icon_rect.bottom() - 1.0;
@@ -2053,41 +2186,60 @@ impl eframe::App for DicomViewerApp {
                         egui::vec2(ui.available_width(), button_size.y),
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            if ui
-                                .add_sized(
-                                    button_size,
-                                    egui::Button::new("X")
-                                        .fill(bar_fill)
-                                        .stroke(egui::Stroke::NONE),
-                                )
-                                .clicked()
-                            {
+                            let close_response = ui.add_sized(
+                                button_size,
+                                egui::Button::new("")
+                                    .fill(bar_fill)
+                                    .stroke(egui::Stroke::NONE),
+                            );
+                            Self::paint_close_icon(
+                                ui.painter(),
+                                close_response.rect,
+                                Self::icon_stroke(ui, &close_response),
+                            );
+                            if close_response.clicked() {
                                 ctx.send_viewport_cmd(ViewportCommand::Close);
                             }
+                            Self::register_icon_button_accessibility(&close_response, "Close");
 
-                            if ui
-                                .add_sized(
-                                    button_size,
-                                    egui::Button::new("□")
-                                        .fill(bar_fill)
-                                        .stroke(egui::Stroke::NONE),
-                                )
-                                .clicked()
-                            {
+                            let maximize_response = ui.add_sized(
+                                button_size,
+                                egui::Button::new("")
+                                    .fill(bar_fill)
+                                    .stroke(egui::Stroke::NONE),
+                            );
+                            Self::paint_titlebar_maximize_icon(
+                                ui.painter(),
+                                maximize_response.rect,
+                                Self::icon_stroke(ui, &maximize_response),
+                                is_maximized,
+                            );
+                            if maximize_response.clicked() {
                                 ctx.send_viewport_cmd(ViewportCommand::Maximized(!is_maximized));
                             }
+                            Self::register_icon_button_accessibility(
+                                &maximize_response,
+                                if is_maximized { "Restore" } else { "Maximize" },
+                            );
 
-                            if ui
-                                .add_sized(
-                                    button_size,
-                                    egui::Button::new("_")
-                                        .fill(bar_fill)
-                                        .stroke(egui::Stroke::NONE),
-                                )
-                                .clicked()
-                            {
+                            let minimize_response = ui.add_sized(
+                                button_size,
+                                egui::Button::new("")
+                                    .fill(bar_fill)
+                                    .stroke(egui::Stroke::NONE),
+                            );
+                            Self::paint_titlebar_minimize_icon(
+                                ui.painter(),
+                                minimize_response.rect,
+                                Self::icon_stroke(ui, &minimize_response),
+                            );
+                            if minimize_response.clicked() {
                                 ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
                             }
+                            Self::register_icon_button_accessibility(
+                                &minimize_response,
+                                "Minimize",
+                            );
                         },
                     );
                 });
@@ -2670,20 +2822,27 @@ impl eframe::App for DicomViewerApp {
                                     egui::RichText::new(message)
                                         .color(egui::Color32::from_rgb(224, 96, 96)),
                                 );
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            egui::RichText::new("×")
-                                                .color(egui::Color32::from_gray(190)),
-                                        )
-                                        .small()
+                                let dismiss_response = ui.add_sized(
+                                    egui::vec2(
+                                        ERROR_OVERLAY_CLOSE_BUTTON_SIZE,
+                                        ERROR_OVERLAY_CLOSE_BUTTON_SIZE,
+                                    ),
+                                    egui::Button::new("")
                                         .fill(egui::Color32::TRANSPARENT)
                                         .stroke(egui::Stroke::NONE),
-                                    )
-                                    .clicked()
-                                {
+                                );
+                                Self::paint_close_icon(
+                                    ui.painter(),
+                                    dismiss_response.rect,
+                                    Self::icon_stroke(ui, &dismiss_response),
+                                );
+                                if dismiss_response.clicked() {
                                     dismiss_error = true;
                                 }
+                                Self::register_icon_button_accessibility(
+                                    &dismiss_response,
+                                    "Dismiss",
+                                );
                             });
                         });
                 });
