@@ -264,6 +264,7 @@ fn measurement_label_text(measurement: LiveMeasurement, geometry: MeasurementGeo
     }
 }
 
+#[cfg(test)]
 fn measurement_label_layout(start: egui::Pos2, end: egui::Pos2) -> (egui::Vec2, Align2) {
     let delta = end - start;
     let place_right = delta.x >= 0.0;
@@ -330,18 +331,14 @@ fn measurement_label_rect_for_quadrant(
 }
 
 fn clamp_rect_to_clip(rect: egui::Rect, clip_rect: egui::Rect) -> egui::Rect {
-    let translation_x = if rect.width() >= clip_rect.width() {
-        clip_rect.left() - rect.left()
-    } else if rect.left() < clip_rect.left() {
+    let translation_x = if rect.width() >= clip_rect.width() || rect.left() < clip_rect.left() {
         clip_rect.left() - rect.left()
     } else if rect.right() > clip_rect.right() {
         clip_rect.right() - rect.right()
     } else {
         0.0
     };
-    let translation_y = if rect.height() >= clip_rect.height() {
-        clip_rect.top() - rect.top()
-    } else if rect.top() < clip_rect.top() {
+    let translation_y = if rect.height() >= clip_rect.height() || rect.top() < clip_rect.top() {
         clip_rect.top() - rect.top()
     } else if rect.bottom() > clip_rect.bottom() {
         clip_rect.bottom() - rect.bottom()
