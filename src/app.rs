@@ -58,6 +58,8 @@ const TITLEBAR_MINIMIZE_ICON_HORIZONTAL_PADDING: f32 = 10.0;
 const TITLEBAR_MINIMIZE_ICON_VERTICAL_PADDING: f32 = 9.0;
 const TITLEBAR_MAXIMIZE_ICON_MARGIN: f32 = 15.0;
 const TITLEBAR_MAXIMIZE_ICON_MIN_SIDE: f32 = 1.0;
+const TITLEBAR_RESTORE_ICON_OFFSET_FACTOR: f32 = 0.24;
+const TITLEBAR_RESTORE_ICON_MIN_OFFSET: f32 = 1.0;
 const ERROR_OVERLAY_CLOSE_BUTTON_SIZE: f32 = 18.0;
 const CONTROL_VALUE_WIDTH: f32 = 64.0;
 const CONTROL_ACTION_BUTTON_WIDTH: f32 = 110.0;
@@ -1354,6 +1356,7 @@ impl DicomViewerApp {
         painter: &egui::Painter,
         button_rect: egui::Rect,
         stroke: egui::Stroke,
+        is_maximized: bool,
     ) {
         let icon_side = (button_rect.height() - TITLEBAR_MAXIMIZE_ICON_MARGIN)
             .min(button_rect.width() - TITLEBAR_MAXIMIZE_ICON_MARGIN)
@@ -1364,10 +1367,69 @@ impl DicomViewerApp {
         let top_right = icon_rect.right_top();
         let bottom_left = icon_rect.left_bottom();
         let bottom_right = icon_rect.right_bottom();
-        painter.line_segment([top_left, top_right], stroke);
-        painter.line_segment([top_right, bottom_right], stroke);
-        painter.line_segment([bottom_right, bottom_left], stroke);
-        painter.line_segment([bottom_left, top_left], stroke);
+        if !is_maximized {
+            painter.line_segment([top_left, top_right], stroke);
+            painter.line_segment([top_right, bottom_right], stroke);
+            painter.line_segment([bottom_right, bottom_left], stroke);
+            painter.line_segment([bottom_left, top_left], stroke);
+            return;
+        }
+
+        let overlap_offset = if icon_side > TITLEBAR_MAXIMIZE_ICON_MIN_SIDE {
+            (icon_side * TITLEBAR_RESTORE_ICON_OFFSET_FACTOR).clamp(
+                TITLEBAR_RESTORE_ICON_MIN_OFFSET,
+                icon_side - TITLEBAR_MAXIMIZE_ICON_MIN_SIDE,
+            )
+        } else {
+            0.0
+        };
+
+        if overlap_offset <= 0.0 {
+            painter.line_segment([top_left, top_right], stroke);
+            painter.line_segment([top_right, bottom_right], stroke);
+            painter.line_segment([bottom_right, bottom_left], stroke);
+            painter.line_segment([bottom_left, top_left], stroke);
+            return;
+        }
+
+        let back_rect = egui::Rect::from_min_max(
+            egui::pos2(top_left.x + overlap_offset, top_left.y),
+            egui::pos2(top_right.x, bottom_right.y - overlap_offset),
+        );
+        let front_rect = egui::Rect::from_min_max(
+            egui::pos2(bottom_left.x, top_left.y + overlap_offset),
+            egui::pos2(top_right.x - overlap_offset, bottom_right.y),
+        );
+
+        let back_top_left = back_rect.left_top();
+        let back_top_right = back_rect.right_top();
+        let back_bottom_right = back_rect.right_bottom();
+        let back_bottom_left = back_rect.left_bottom();
+        painter.line_segment([back_top_left, back_top_right], stroke);
+        painter.line_segment([back_top_right, back_bottom_right], stroke);
+        painter.line_segment(
+            [
+                back_top_left,
+                egui::pos2(back_bottom_left.x, front_rect.top()),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(front_rect.right(), back_bottom_right.y),
+                back_bottom_right,
+            ],
+            stroke,
+        );
+
+        let front_top_left = front_rect.left_top();
+        let front_top_right = front_rect.right_top();
+        let front_bottom_left = front_rect.left_bottom();
+        let front_bottom_right = front_rect.right_bottom();
+        painter.line_segment([front_top_left, front_top_right], stroke);
+        painter.line_segment([front_top_right, front_bottom_right], stroke);
+        painter.line_segment([front_bottom_right, front_bottom_left], stroke);
+        painter.line_segment([front_bottom_left, front_top_left], stroke);
     }
 
     fn show_structured_report_view(&self, ui: &mut egui::Ui, report: &StructuredReportDocument) {
@@ -2150,6 +2212,7 @@ impl eframe::App for DicomViewerApp {
                                 ui.painter(),
                                 maximize_response.rect,
                                 Self::icon_stroke(ui, &maximize_response),
+                                is_maximized,
                             );
                             if maximize_response.clicked() {
                                 ctx.send_viewport_cmd(ViewportCommand::Maximized(!is_maximized));
