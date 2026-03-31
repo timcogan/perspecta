@@ -7,9 +7,9 @@ use dicom_pixeldata::PixelDecoder;
 
 use super::{
     classify_dicom_object, collect_metadata, open_dicom_object, read_int_first,
-    read_item_multi_int, read_item_string, read_laterality, read_string, read_view_position,
-    sequence_items_from_item, sequence_items_from_object, DicomImage, DicomPathKind, DicomSource,
-    ImageColorMode, MonoFrames, RgbFrames,
+    read_item_multi_int, read_item_string, read_laterality, read_pixel_spacing_mm, read_string,
+    read_view_position, sequence_items_from_item, sequence_items_from_object, DicomImage,
+    DicomPathKind, DicomSource, ImageColorMode, MonoFrames, RgbFrames,
 };
 
 const FLOAT_PIXEL_DATA: Tag = Tag(0x7FE0, 0x0008);
@@ -264,6 +264,7 @@ fn parse_parametric_map(
         min_value: 0,
         max_value: 255,
         recommended_cine_fps: None,
+        pixel_spacing_mm: read_pixel_spacing_mm(obj),
         view_position: read_view_position(obj),
         image_laterality: read_laterality(obj),
         instance_number: read_int_first(obj, "InstanceNumber"),

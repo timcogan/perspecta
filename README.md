@@ -33,6 +33,7 @@ Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`efra
 - Mammography CAD SR overlay support on matching images, with the same manual overlay workflow as GSPS.
 - DICOM Parametric Map support for local files, including heatmap overlay on matching source images and standalone opening when no explicit source match is present.
 - Structured Report (SR) DICOM support with a dedicated text/document view.
+- Live distance measurement with DICOM pixel spacing support when available (`mm`, fallback to `px`).
 - Mouse-wheel zoom + drag pan in single-image and multi-view (`1x2` / `1x3` / `2x2` / `2x4`) mammo views.
 - Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation and `Shift + drag` for window/level in multi-view layouts.
 - Metadata side panel for quick inspection, with a full-field popup for the active object (`V`).
@@ -152,6 +153,7 @@ This writes a desktop entry under `~/.local/share/applications`.
 - `G`: toggle image overlay (GSPS, Mammography CAD SR, or a matching Parametric Map, when available)
 - `N`: jump to the next image/frame with an overlay
 - `V`: open or close the full metadata field popup for the active object
+- `Esc`: exit live measurement mode; if no measurement is active, close the full metadata popup
 - `Tab`: next history item
 - `Shift+Tab`: previous history item
 - `Cmd/Ctrl+W`: close the active study/group; if the window is already empty, close the window
@@ -163,6 +165,9 @@ This writes a desktop entry under `~/.local/share/applications`.
 - `Shift` + mouse wheel: previous/next frame (multi-frame images)
 - `Shift` + drag (monochrome images): adjust window/level
 - Click + drag: pan when zoomed in
+- Right click inside the image: start or reset a live distance measurement anchor
+- Move the mouse: update the live measurement endpoint without holding a button
+- Left click: clear the live measurement
 - Double click: reset zoom/pan for the active viewport
 
 ## Development
@@ -199,14 +204,14 @@ make dev
 - Some compressed transfer syntaxes still depend on codec availability at build time.
 - DICOMweb launch does not currently attach or open Parametric Map objects; Parametric Map support is for local files.
 - No full study/series stack browser yet.
-- No MPR, measurement tools, or advanced annotation workflow yet.
+- No MPR or advanced annotation workflow yet.
 
 ## Roadmap
 
 1. Broader transfer syntax and codec coverage.
 2. Stronger study/series navigation and indexing.
 3. Background decode + smarter cache strategy for large studies.
-4. Expanded clinical tools (VOI LUT workflows, overlays, measurements).
+4. Expanded clinical tools (VOI LUT workflows, richer measurements, annotations).
 5. More reader productivity controls and presets.
 
 ## License

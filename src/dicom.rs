@@ -38,6 +38,12 @@ pub enum ImageColorMode {
     Rgb,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PixelSpacingMm {
+    pub row_mm: f32,
+    pub col_mm: f32,
+}
+
 pub const METADATA_FIELD_NAMES: &[&str] = &[
     "PatientName",
     "PatientID",
@@ -357,6 +363,7 @@ pub struct DicomImage {
     pub min_value: i32,
     pub max_value: i32,
     pub recommended_cine_fps: Option<f32>,
+    pub pixel_spacing_mm: Option<PixelSpacingMm>,
     pub view_position: Option<String>,
     pub image_laterality: Option<String>,
     pub instance_number: Option<i32>,
@@ -775,6 +782,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
         .filter(|value| *value > 0.0)
         .map(|frame_time_ms| 1000.0 / frame_time_ms)
         .or_else(|| read_float_first(&obj, "CineRate").filter(|value| *value > 0.0));
+    let pixel_spacing_mm = read_pixel_spacing_mm(&obj);
     let view_position = read_view_position(&obj);
     let image_laterality = read_laterality(&obj);
     let instance_number = read_int_first(&obj, "InstanceNumber");
@@ -872,6 +880,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 min_value,
                 max_value,
                 recommended_cine_fps,
+                pixel_spacing_mm,
                 view_position,
                 image_laterality,
                 instance_number,
@@ -994,6 +1003,7 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 min_value: 0,
                 max_value: 255,
                 recommended_cine_fps,
+                pixel_spacing_mm,
                 view_position,
                 image_laterality,
                 instance_number,
@@ -2147,6 +2157,13 @@ fn read_float_first(obj: &DefaultDicomObject, name: &str) -> Option<f32> {
         .and_then(|s| parse_multi_valued_number(&s))
 }
 
+fn read_float_pair(obj: &DefaultDicomObject, name: &str) -> Option<[f32; 2]> {
+    obj.element_by_name(name)
+        .ok()
+        .and_then(|el| el.to_str().ok())
+        .and_then(|value| parse_multi_valued_pair(&value))
+}
+
 fn read_int_first(obj: &DefaultDicomObject, name: &str) -> Option<i32> {
     obj.element_by_name(name)
         .ok()
@@ -2161,6 +2178,36 @@ fn read_int_first(obj: &DefaultDicomObject, name: &str) -> Option<i32> {
 
 fn parse_multi_valued_number(value: &str) -> Option<f32> {
     value.split('\\').next()?.trim().parse::<f32>().ok()
+}
+
+fn parse_multi_valued_pair(value: &str) -> Option<[f32; 2]> {
+    let values = value
+        .split('\\')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let [first, second] = values.as_slice() else {
+        return None;
+    };
+    let first = first.parse::<f32>().ok()?;
+    let second = second.parse::<f32>().ok()?;
+    Some([first, second])
+}
+
+fn read_pixel_spacing_mm(obj: &DefaultDicomObject) -> Option<PixelSpacingMm> {
+    [
+        "PixelSpacing",
+        "ImagerPixelSpacing",
+        "NominalScannedPixelSpacing",
+    ]
+    .into_iter()
+    .find_map(|name| {
+        let [row_mm, col_mm] = read_float_pair(obj, name)?;
+        if !row_mm.is_finite() || !col_mm.is_finite() || row_mm <= 0.0 || col_mm <= 0.0 {
+            return None;
+        }
+        Some(PixelSpacingMm { row_mm, col_mm })
+    })
 }
 
 fn min_max(values: &[i32]) -> Option<(i32, i32)> {
@@ -2220,6 +2267,7 @@ impl DicomImage {
             min_value: 0,
             max_value: 0,
             recommended_cine_fps: None,
+            pixel_spacing_mm: None,
             view_position: None,
             image_laterality: None,
             instance_number: None,
@@ -2841,6 +2889,70 @@ mod tests {
             .iter()
             .any(|field| field.keyword == "PatientName"));
         assert!(image.full_metadata_source.is_none());
+    }
+
+    #[test]
+    fn load_dicom_reads_pixel_spacing_before_imager_pixel_spacing() {
+        let bytes = basic_image_test_bytes(vec![
+            DataElement::new(Tag(0x0028, 0x0030), VR::DS, "0.50\\0.25"),
+            DataElement::new(Tag(0x0018, 0x1164), VR::DS, "1.25\\1.50"),
+        ]);
+
+        let image = load_dicom(DicomSource::from_memory("pixel-spacing-priority", bytes)).unwrap();
+
+        assert_eq!(
+            image.pixel_spacing_mm,
+            Some(PixelSpacingMm {
+                row_mm: 0.5,
+                col_mm: 0.25,
+            })
+        );
+    }
+
+    #[test]
+    fn load_dicom_falls_back_to_imager_pixel_spacing_when_pixel_spacing_is_missing() {
+        let bytes = basic_image_test_bytes(vec![DataElement::new(
+            Tag(0x0018, 0x1164),
+            VR::DS,
+            "0.80\\0.60",
+        )]);
+
+        let image = load_dicom(DicomSource::from_memory(
+            "pixel-spacing-imager-fallback",
+            bytes,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            image.pixel_spacing_mm,
+            Some(PixelSpacingMm {
+                row_mm: 0.8,
+                col_mm: 0.6,
+            })
+        );
+    }
+
+    #[test]
+    fn load_dicom_skips_invalid_spacing_values_and_uses_nominal_scanned_spacing() {
+        let bytes = basic_image_test_bytes(vec![
+            DataElement::new(Tag(0x0028, 0x0030), VR::DS, "0\\0.25"),
+            DataElement::new(Tag(0x0018, 0x1164), VR::DS, "bad\\1.0"),
+            DataElement::new(Tag(0x0018, 0x2010), VR::DS, "0.12\\0.34"),
+        ]);
+
+        let image = load_dicom(DicomSource::from_memory(
+            "pixel-spacing-nominal-fallback",
+            bytes,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            image.pixel_spacing_mm,
+            Some(PixelSpacingMm {
+                row_mm: 0.12,
+                col_mm: 0.34,
+            })
+        );
     }
 
     #[test]

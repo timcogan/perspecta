@@ -14,11 +14,12 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/main.rs`: app bootstrap and initial launch request wiring only.
 - `src/launch.rs`: parse/validate CLI and `perspecta://` launch inputs.
 - `src/dicomweb.rs`: DICOMweb metadata selection and instance download.
-- `src/dicom.rs`, `src/dicom/*`: DICOM facade, shared object open/classify/decode helpers, and format-specific parsers.
+- `src/dicom.rs`, `src/dicom/*`: DICOM facade, shared object open/classify/decode helpers, pixel spacing extraction, and format-specific parsers.
 - `src/mammo.rs`: mammography ordering/alignment helpers.
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
 - `src/logging.rs`: logging setup and log-level configuration.
 - `src/app.rs`: UI, application state, interactions, and worker orchestration.
+- `src/app/measurement.rs`: live measurement state, coordinate transforms, and distance formatting.
 - `src/app/metadata.rs`: metadata overlay, metadata popup, and active-object metadata presentation.
 - `src/app/overlay.rs`: overlay reconciliation, authoritative overlay snapshots, and overlay availability/navigation.
 - `src/app/load.rs`: launch/open/load orchestration and DICOMweb/local load pipelines.
@@ -49,6 +50,8 @@ Its primary purpose is consistency during development, not full architecture cov
 20. Multi-frame images with per-frame `ImagePositionPatient` MUST expose frames in logical patient-position order; if the dominant per-frame patient-position progression increases across stored frames, display and cine MUST reverse with it, and GSPS/SR frame lookups MUST translate the displayed frame back to the referenced stored DICOM frame.
 21. DICOM content inside the viewer MUST use explicit `DicomSource` ownership; DICOMweb bytes MUST be represented as `DicomSource::Memory`, not temp files or a global backing store.
 22. Visible metadata field settings MUST apply only to the summary overlay; the full metadata popup MUST ignore that filter and show all extracted fields for the active object.
+23. Live measurements MUST be stored in image coordinates, not screen coordinates, so zoom and pan do not change their geometry.
+24. Live measurements are transient UI state only; they MUST NOT persist into history entries and MUST clear on frame or study/context changes.
 
 ## Change Rules
 
