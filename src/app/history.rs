@@ -727,6 +727,7 @@ impl DicomViewerApp {
         self.single_load_receiver = None;
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
+        self.reset_live_measurement();
 
         let Some(kind) = self
             .history_entries

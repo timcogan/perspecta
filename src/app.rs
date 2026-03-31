@@ -28,6 +28,7 @@ use crate::renderer::{blend_rgba_overlay, render_rgb, render_window_level};
 
 mod history;
 mod load;
+mod measurement;
 mod metadata;
 mod overlay;
 
@@ -41,6 +42,7 @@ use self::history::{
     HistorySingleData,
 };
 use self::load::{PendingLoad, PendingSingleLoad, PreparedLoadPaths};
+use self::measurement::{LiveMeasurement, MeasurementGeometry, MeasurementTarget};
 
 const APP_TITLE: &str = "Perspecta Viewer";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -170,6 +172,8 @@ pub struct DicomViewerApp {
     single_view_zoom: f32,
     single_view_pan: egui::Vec2,
     single_view_frame_scroll_accum: f32,
+    live_measurement: Option<LiveMeasurement>,
+    block_primary_interactions_until_release: bool,
     frame_wait_pending: bool,
     load_error_message: Option<String>,
 }
@@ -237,6 +241,8 @@ impl DicomViewerApp {
             single_view_zoom: 1.0,
             single_view_pan: egui::Vec2::ZERO,
             single_view_frame_scroll_accum: 0.0,
+            live_measurement: None,
+            block_primary_interactions_until_release: false,
             frame_wait_pending: false,
             load_error_message: None,
         }
@@ -471,6 +477,17 @@ impl DicomViewerApp {
     fn set_mammo_group_frame(&mut self, frame_index: usize) -> bool {
         if self.loaded_mammo_count() == 0 {
             return false;
+        }
+
+        let frame_changed = self.loaded_mammo_viewports().any(|viewport| {
+            let frame_count = viewport.image.frame_count();
+            if frame_count == 0 {
+                return false;
+            }
+            viewport.current_frame != frame_index.min(frame_count.saturating_sub(1))
+        });
+        if frame_changed {
+            self.clear_live_measurement();
         }
 
         let overlay_visible = self.overlay_visible;
@@ -740,6 +757,7 @@ impl DicomViewerApp {
         self.mammo_selected_index = 0;
         self.reset_single_view_transform();
         self.single_view_frame_scroll_accum = 0.0;
+        self.reset_live_measurement();
         self.frame_wait_pending = false;
     }
 
@@ -813,6 +831,7 @@ impl DicomViewerApp {
                 return;
             }
             self.cine_mode = !self.cine_mode;
+            self.clear_live_measurement();
             self.last_cine_advance = Some(Instant::now());
             return;
         }
@@ -837,6 +856,7 @@ impl DicomViewerApp {
 
         let enabling = !self.cine_mode;
         self.cine_mode = enabling;
+        self.clear_live_measurement();
         self.last_cine_advance = Some(Instant::now());
         if enabling {
             let start_frame = self
@@ -871,7 +891,9 @@ impl DicomViewerApp {
         if elapsed >= frame_interval {
             let frames_to_advance = ((elapsed.as_secs_f32() * fps).floor() as usize).max(1);
             if self.image.is_some() {
-                self.current_frame = (self.current_frame + frames_to_advance) % frame_count;
+                self.set_single_current_frame(
+                    (self.current_frame + frames_to_advance) % frame_count,
+                );
             } else {
                 let next_frame =
                     (self.selected_mammo_frame_index() + frames_to_advance) % frame_count;
@@ -1098,7 +1120,7 @@ impl DicomViewerApp {
         if state.is_single {
             self.window_center = state.window_center;
             self.window_width = state.window_width.max(1.0);
-            self.current_frame = state.current_frame;
+            self.set_single_current_frame(state.current_frame);
             self.rebuild_texture(ctx);
         } else if self.cine_mode {
             let frame_index = if state.frame_count == 0 {
@@ -1108,16 +1130,26 @@ impl DicomViewerApp {
             };
             let _ = self.set_mammo_group_frame(frame_index);
             self.last_cine_advance = Some(Instant::now());
-        } else if let Some(viewport) = self.selected_mammo_viewport_mut() {
-            viewport.window_center = state.window_center;
-            viewport.window_width = state.window_width.max(1.0);
-            if state.frame_count == 0 {
-                viewport.current_frame = 0;
+        } else {
+            let next_frame = if state.frame_count == 0 {
+                0
             } else {
-                viewport.current_frame = state.current_frame.min(state.frame_count - 1);
+                state.current_frame.min(state.frame_count - 1)
+            };
+            let frame_changed = self
+                .selected_mammo_viewport()
+                .map(|viewport| viewport.current_frame != next_frame)
+                .unwrap_or(false);
+            if frame_changed {
+                self.clear_live_measurement();
             }
-            if self.rebuild_selected_mammo_texture() {
-                ctx.request_repaint_after(Duration::from_millis(16));
+            if let Some(viewport) = self.selected_mammo_viewport_mut() {
+                viewport.window_center = state.window_center;
+                viewport.window_width = state.window_width.max(1.0);
+                viewport.current_frame = next_frame;
+                if self.rebuild_selected_mammo_texture() {
+                    ctx.request_repaint_after(Duration::from_millis(16));
+                }
             }
         }
     }
@@ -1748,9 +1780,12 @@ impl DicomViewerApp {
                                     let remaining = ui.available_size();
                                     let (viewport_rect, response) =
                                         ui.allocate_exact_size(remaining, Sense::click_and_drag());
-                                    if response.clicked() {
+                                    let primary_interaction_blocked =
+                                        self.maybe_clear_live_measurement_with_primary(&response);
+                                    if !primary_interaction_blocked && response.clicked() {
                                         clicked_index = Some(index);
                                     }
+                                    let painter = ui.painter().with_clip_rect(viewport_rect);
                                     if let Some(viewport) =
                                         self.mammo_group.get_mut(index).and_then(Option::as_mut)
                                     {
@@ -1770,11 +1805,15 @@ impl DicomViewerApp {
                                                 draw_size_before.x,
                                                 index,
                                             );
-                                            if response.double_clicked() {
+                                            if !primary_interaction_blocked
+                                                && response.double_clicked()
+                                            {
                                                 viewport.zoom = 1.0;
                                                 viewport.pan = egui::Vec2::ZERO;
                                             }
-                                            if response.dragged() {
+                                            if !primary_interaction_blocked
+                                                && response.dragged_by(egui::PointerButton::Primary)
+                                            {
                                                 let (frame_drag_delta, shift_held) =
                                                     ui.input(|input| {
                                                         (
@@ -1904,31 +1943,76 @@ impl DicomViewerApp {
                                                 base_center + viewport.pan,
                                                 draw_size,
                                             );
-                                            let painter =
-                                                ui.painter().with_clip_rect(viewport_rect);
-                                            painter.image(
-                                                viewport.texture.id(),
-                                                image_rect,
-                                                egui::Rect::from_min_max(
-                                                    egui::Pos2::ZERO,
-                                                    egui::pos2(1.0, 1.0),
-                                                ),
-                                                egui::Color32::WHITE,
-                                            );
-                                            if show_overlay {
-                                                Self::draw_gsps_overlay(
-                                                    &painter,
+                                            let geometry =
+                                                MeasurementGeometry::from_image(&viewport.image);
+                                            let pointer_pos = ui.ctx().pointer_latest_pos();
+                                            let secondary_pointer_pos = if response
+                                                .contains_pointer()
+                                                && ui.input(|input| {
+                                                    input.pointer.button_pressed(
+                                                        egui::PointerButton::Secondary,
+                                                    )
+                                                }) {
+                                                pointer_pos
+                                            } else {
+                                                None
+                                            };
+                                            let target = MeasurementTarget::Mammo { index };
+                                            let texture_id = viewport.texture.id();
+                                            let _ = viewport;
+
+                                            if let Some(pointer_pos) = secondary_pointer_pos {
+                                                clicked_index = Some(index);
+                                                self.begin_live_measurement(
+                                                    target,
+                                                    geometry,
                                                     image_rect,
-                                                    &viewport.image,
-                                                    viewport.current_frame,
-                                                );
-                                                Self::draw_sr_overlay(
-                                                    &painter,
-                                                    image_rect,
-                                                    &viewport.image,
-                                                    viewport.current_frame,
+                                                    pointer_pos,
                                                 );
                                             }
+                                            self.update_live_measurement_for_target(
+                                                target,
+                                                geometry,
+                                                image_rect,
+                                                pointer_pos,
+                                            );
+                                            self.update_measurement_cursor(
+                                                ui.ctx(),
+                                                target,
+                                                image_rect,
+                                                pointer_pos,
+                                            );
+
+                                            if let Some(viewport) =
+                                                self.mammo_group.get(index).and_then(Option::as_ref)
+                                            {
+                                                painter.image(
+                                                    texture_id,
+                                                    image_rect,
+                                                    egui::Rect::from_min_max(
+                                                        egui::Pos2::ZERO,
+                                                        egui::pos2(1.0, 1.0),
+                                                    ),
+                                                    egui::Color32::WHITE,
+                                                );
+                                                if show_overlay {
+                                                    Self::draw_gsps_overlay(
+                                                        &painter,
+                                                        image_rect,
+                                                        &viewport.image,
+                                                        viewport.current_frame,
+                                                    );
+                                                    Self::draw_sr_overlay(
+                                                        &painter,
+                                                        image_rect,
+                                                        &viewport.image,
+                                                        viewport.current_frame,
+                                                    );
+                                                }
+                                            }
+                                            self.draw_live_measurement(
+                                                &painter, target, geometry, image_rect,
+                                            );
                                         }
                                     } else {
                                         ui.allocate_ui_with_layout(
@@ -2031,6 +2115,7 @@ impl eframe::App for DicomViewerApp {
             }
         }
         self.advance_cine_if_needed(ctx);
+        self.sync_measurement_primary_interaction_block(ctx);
 
         let mut history_cycle_direction = None;
         let mut close_app_requested = false;
@@ -2059,7 +2144,7 @@ impl eframe::App for DicomViewerApp {
             if self.can_toggle_full_metadata_popup() {
                 v_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::V);
             }
-            if self.full_metadata_popup_open {
+            if self.has_live_measurement() || self.full_metadata_popup_open {
                 escape_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
             }
         });
@@ -2091,7 +2176,7 @@ impl eframe::App for DicomViewerApp {
             self.toggle_full_metadata_popup();
         }
         if escape_pressed {
-            self.close_full_metadata_popup();
+            self.handle_escape_action();
         }
 
         let mut open_dicoms_clicked = false;
@@ -2650,12 +2735,16 @@ impl eframe::App for DicomViewerApp {
                 let (canvas_rect, response) =
                     ui.allocate_exact_size(available, Sense::click_and_drag());
                 let image_size = texture.size_vec2();
+                let primary_interaction_blocked =
+                    self.maybe_clear_live_measurement_with_primary(&response);
                 if image_size.x > 0.0 && image_size.y > 0.0 && canvas_rect.is_positive() {
-                    if response.double_clicked() {
+                    if !primary_interaction_blocked && response.double_clicked() {
                         self.reset_single_view_transform();
                     }
 
-                    if response.dragged() {
+                    if !primary_interaction_blocked
+                        && response.dragged_by(egui::PointerButton::Primary)
+                    {
                         let (frame_drag_delta, shift_held) =
                             ui.input(|input| (input.pointer.delta(), input.modifiers.shift));
                         let wl_meta = self
@@ -2704,9 +2793,11 @@ impl eframe::App for DicomViewerApp {
                                         scroll,
                                     );
                                     if step != 0 {
-                                        self.current_frame = (self.current_frame as i32 + step)
-                                            .clamp(0, frame_count as i32 - 1)
-                                            as usize;
+                                        self.set_single_current_frame(
+                                            (self.current_frame as i32 + step)
+                                                .clamp(0, frame_count as i32 - 1)
+                                                as usize,
+                                        );
                                         self.last_cine_advance = Some(Instant::now());
                                         self.rebuild_texture(ctx);
                                     }
@@ -2752,22 +2843,66 @@ impl eframe::App for DicomViewerApp {
                         draw_size,
                     );
                     let painter = ui.painter().with_clip_rect(canvas_rect);
-                    painter.image(
-                        texture.id(),
-                        image_rect,
-                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                    if self.overlay_visible {
-                        if let Some(image) = self.image.as_ref() {
-                            Self::draw_gsps_overlay(
-                                &painter,
+                    if let Some(geometry) = self.image.as_ref().map(MeasurementGeometry::from_image)
+                    {
+                        let pointer_pos = ui.ctx().pointer_latest_pos();
+                        let secondary_pointer_pos = if response.contains_pointer()
+                            && ui.input(|input| {
+                                input.pointer.button_pressed(egui::PointerButton::Secondary)
+                            }) {
+                            pointer_pos
+                        } else {
+                            None
+                        };
+                        if let Some(pointer_pos) = secondary_pointer_pos {
+                            self.begin_live_measurement(
+                                MeasurementTarget::Single,
+                                geometry,
                                 image_rect,
-                                image,
-                                self.current_frame,
+                                pointer_pos,
                             );
-                            Self::draw_sr_overlay(&painter, image_rect, image, self.current_frame);
                         }
+                        self.update_live_measurement_for_target(
+                            MeasurementTarget::Single,
+                            geometry,
+                            image_rect,
+                            pointer_pos,
+                        );
+                        self.update_measurement_cursor(
+                            ui.ctx(),
+                            MeasurementTarget::Single,
+                            image_rect,
+                            pointer_pos,
+                        );
+
+                        painter.image(
+                            texture.id(),
+                            image_rect,
+                            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                        if self.overlay_visible {
+                            if let Some(image) = self.image.as_ref() {
+                                Self::draw_gsps_overlay(
+                                    &painter,
+                                    image_rect,
+                                    image,
+                                    self.current_frame,
+                                );
+                                Self::draw_sr_overlay(
+                                    &painter,
+                                    image_rect,
+                                    image,
+                                    self.current_frame,
+                                );
+                            }
+                        }
+                        self.draw_live_measurement(
+                            &painter,
+                            MeasurementTarget::Single,
+                            geometry,
+                            image_rect,
+                        );
                     }
                 }
             } else if let Some(report) = self.report.as_ref() {

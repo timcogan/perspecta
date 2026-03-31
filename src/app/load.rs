@@ -336,6 +336,7 @@ impl DicomViewerApp {
     }
 
     pub(super) fn reorder_complete_mammo_group(&mut self) {
+        self.clear_live_measurement();
         if !self.mammo_group_complete() {
             return;
         }
@@ -1137,6 +1138,7 @@ impl DicomViewerApp {
         Self::attach_matching_pm_overlay(&mut image, &self.pending_pm_overlays);
         self.overlay_visible = false;
         self.clear_load_error();
+        self.reset_live_measurement();
 
         self.window_center = image.window_center;
         self.window_width = image.window_width;
