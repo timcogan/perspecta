@@ -2076,6 +2076,10 @@ impl eframe::App for DicomViewerApp {
                                         self.show_metadata_field_options_menu(ui);
                                     });
                                 });
+                            Self::register_icon_button_accessibility(
+                                &menu_response.response,
+                                "Titlebar menu",
+                            );
 
                             let icon_rect =
                                 menu_response.response.rect.shrink2(egui::vec2(5.0, 5.0));
@@ -2152,7 +2156,7 @@ impl eframe::App for DicomViewerApp {
                             }
                             Self::register_icon_button_accessibility(
                                 &maximize_response,
-                                "Maximize",
+                                if is_maximized { "Restore" } else { "Maximize" },
                             );
 
                             let minimize_response = ui.add_sized(
