@@ -2,6 +2,8 @@
 
 Thanks for your interest in contributing to Perspecta. Bug reports, documentation
 improvements, and focused code changes are all welcome.
+For security vulnerabilities, do not open a public issue; follow
+[SECURITY.md](SECURITY.md) instead.
 
 ## Before You Start
 
