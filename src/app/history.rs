@@ -247,10 +247,7 @@ impl DicomViewerApp {
         let texture_name = self.next_history_texture_name(texture_key_prefix);
         ctx.load_texture(
             texture_name,
-            ColorImage {
-                size: [OUTER_WIDTH, OUTER_HEIGHT],
-                pixels,
-            },
+            ColorImage::new([OUTER_WIDTH, OUTER_HEIGHT], pixels),
             TextureOptions::LINEAR,
         )
     }
@@ -994,10 +991,10 @@ impl DicomViewerApp {
                             egui::Color32::from_gray(35)
                         };
 
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(egui::Color32::TRANSPARENT)
                             .stroke(egui::Stroke::new(1.0, stroke_color))
-                            .inner_margin(egui::Margin::same(6.0))
+                            .inner_margin(egui::Margin::same(6))
                             .show(ui, |ui| {
                                 ui.horizontal_wrapped(|ui| {
                                     for thumb in &entry.thumbs {
@@ -1067,18 +1064,12 @@ fn downsample_color_image(source: &ColorImage, max_dim: usize) -> ColorImage {
         }
     }
 
-    ColorImage {
-        size: [target_width, target_height],
-        pixels,
-    }
+    ColorImage::new([target_width, target_height], pixels)
 }
 
 fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
     if images.is_empty() || max_dim == 0 {
-        return ColorImage {
-            size: [1, 1],
-            pixels: vec![egui::Color32::BLACK],
-        };
+        return ColorImage::new([1, 1], vec![egui::Color32::BLACK]);
     }
     if images.len() == 1 {
         return downsample_color_image(&images[0], max_dim);
@@ -1127,10 +1118,7 @@ fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
         }
     }
 
-    ColorImage {
-        size: [target_width, target_height],
-        pixels,
-    }
+    ColorImage::new([target_width, target_height], pixels)
 }
 
 pub(super) fn history_id_from_paths<T>(paths: &[T]) -> String

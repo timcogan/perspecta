@@ -188,7 +188,7 @@ impl DicomViewerApp {
         visible_metadata_fields: &HashSet<String>,
         toggle_enabled: bool,
     ) -> bool {
-        let overlay_height = (ctx.screen_rect().height() * 0.62).max(180.0);
+        let overlay_height = (ctx.content_rect().height() * 0.62).max(180.0);
         let mut open_requested = false;
         egui::Area::new(egui::Id::new("metadata-overlay-left"))
             .order(egui::Order::Foreground)
@@ -293,7 +293,7 @@ impl DicomViewerApp {
         add_contents: impl FnOnce(&mut egui::Ui),
     ) {
         let popup_id = egui::Id::new("full-metadata-popup");
-        let screen_rect = ctx.screen_rect();
+        let screen_rect = ctx.content_rect();
         let default_size = egui::vec2(
             (screen_rect.width() * 0.74).clamp(520.0, 980.0),
             (screen_rect.height() * 0.76).clamp(360.0, 760.0),
