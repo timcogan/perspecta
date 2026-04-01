@@ -181,6 +181,9 @@ make fmt-check
 make clippy
 ```
 
+For contribution expectations and pull request guidance, see
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 Optional live-reload workflow:
 
 ```bash
