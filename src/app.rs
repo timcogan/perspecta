@@ -791,7 +791,7 @@ impl DicomViewerApp {
             return;
         }
 
-        let overlay_rect = ctx.screen_rect();
+        let overlay_rect = ctx.content_rect();
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("file-drop-backdrop"),
@@ -803,11 +803,11 @@ impl DicomViewerApp {
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(egui::Color32::from_black_alpha(228))
                     .stroke(egui::Stroke::NONE)
-                    .rounding(egui::Rounding::same(12.0))
-                    .inner_margin(egui::Margin::symmetric(24.0, 20.0))
+                    .corner_radius(12)
+                    .inner_margin(egui::Margin::symmetric(24, 20))
                     .show(ui, |ui| {
                         ui.set_min_width(FILE_DROP_OVERLAY_WIDTH);
                         ui.set_max_width(FILE_DROP_OVERLAY_WIDTH);
@@ -1730,7 +1730,7 @@ impl DicomViewerApp {
 
     fn show_mammo_grid(&mut self, ui: &mut egui::Ui) {
         const MAMMO_GRID_GAP: f32 = 2.0;
-        const MAMMO_VIEW_INNER_MARGIN: f32 = 3.0;
+        const MAMMO_VIEW_INNER_MARGIN: i8 = 3;
         let show_overlay = self.overlay_visible;
 
         ui.scope(|ui| {
@@ -1773,7 +1773,7 @@ impl DicomViewerApp {
                                     } else {
                                         egui::Color32::BLACK
                                     };
-                                let frame = egui::Frame::none()
+                                let frame = egui::Frame::NONE
                                     .stroke(egui::Stroke::new(1.0, stroke_color))
                                     .inner_margin(egui::Margin::same(MAMMO_VIEW_INNER_MARGIN));
                                 frame.show(ui, |ui| {
@@ -2187,7 +2187,7 @@ impl eframe::App for DicomViewerApp {
         let bar_fill = ctx.style().visuals.panel_fill;
         egui::TopBottomPanel::top("titlebar")
             .show_separator_line(false)
-            .frame(egui::Frame::none().fill(bar_fill))
+            .frame(egui::Frame::NONE.fill(bar_fill))
             .exact_height(30.0)
             .show(ctx, |ui| {
                 let button_size = egui::vec2(28.0, 22.0);
@@ -2213,24 +2213,26 @@ impl eframe::App for DicomViewerApp {
                                 .fill(bar_fill)
                                 .stroke(egui::Stroke::NONE)
                                 .min_size(egui::vec2(20.0, 18.0));
-                            let menu_response =
-                                egui::menu::menu_custom_button(ui, menu_button, |ui| {
-                                    if ui.button("Open DICOM(s)").clicked() {
-                                        open_dicoms_clicked = true;
-                                        ui.close_menu();
-                                    }
-                                    ui.menu_button("Select Metadata Fields", |ui| {
-                                        self.show_metadata_field_options_menu(ui);
-                                    });
-                                });
+                            let (menu_response, _) =
+                                egui::containers::menu::MenuButton::from_button(menu_button).ui(
+                                    ui,
+                                    |ui| {
+                                        if ui.button("Open DICOM(s)").clicked() {
+                                            open_dicoms_clicked = true;
+                                            ui.close();
+                                        }
+                                        ui.menu_button("Select Metadata Fields", |ui| {
+                                            self.show_metadata_field_options_menu(ui);
+                                        });
+                                    },
+                                );
                             Self::register_icon_button_accessibility(
-                                &menu_response.response,
+                                &menu_response,
                                 "Titlebar menu",
                             );
 
-                            let icon_rect =
-                                menu_response.response.rect.shrink2(egui::vec2(5.0, 5.0));
-                            let line_stroke = Self::icon_stroke(ui, &menu_response.response);
+                            let icon_rect = menu_response.rect.shrink2(egui::vec2(5.0, 5.0));
+                            let line_stroke = Self::icon_stroke(ui, &menu_response);
                             let y_top = icon_rect.top() + 1.0;
                             let y_mid = icon_rect.center().y;
                             let y_bottom = icon_rect.bottom() - 1.0;
@@ -2353,7 +2355,7 @@ impl eframe::App for DicomViewerApp {
             let has_slider_rows = state.is_monochrome || state.frame_count > 1;
             let has_action_rows = state.frame_count > 1 || has_active_overlay;
             let wl_layout = Self::wl_overlay_layout(
-                ctx.screen_rect().width(),
+                ctx.content_rect().width(),
                 spacing.interact_size.y,
                 spacing.item_spacing.x,
                 has_slider_rows,
@@ -2926,7 +2928,7 @@ impl eframe::App for DicomViewerApp {
         self.show_metadata_ui(ctx);
 
         if has_history {
-            let overlay_height = (ctx.screen_rect().height() * 0.62).max(160.0);
+            let overlay_height = (ctx.content_rect().height() * 0.62).max(160.0);
             egui::Area::new(egui::Id::new("history-overlay-right"))
                 .order(egui::Order::Foreground)
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 36.0))
@@ -2946,11 +2948,11 @@ impl eframe::App for DicomViewerApp {
                 .order(egui::Order::Foreground)
                 .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 36.0))
                 .show(ctx, |ui| {
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(egui::Color32::from_black_alpha(220))
                         .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(72)))
-                        .rounding(egui::Rounding::same(6.0))
-                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                        .corner_radius(6)
+                        .inner_margin(egui::Margin::symmetric(10, 8))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
@@ -3139,10 +3141,7 @@ mod tests {
     fn test_texture(ctx: &egui::Context, name: &str) -> TextureHandle {
         ctx.load_texture(
             name,
-            ColorImage {
-                size: [1, 1],
-                pixels: vec![egui::Color32::BLACK],
-            },
+            ColorImage::new([1, 1], vec![egui::Color32::BLACK]),
             TextureOptions::LINEAR,
         )
     }
@@ -4385,10 +4384,7 @@ mod tests {
     #[test]
     fn has_available_overlay_ignores_group_overlay_outside_common_frame_count() {
         let ctx = egui::Context::default();
-        let texture_image = ColorImage {
-            size: [1, 1],
-            pixels: vec![egui::Color32::BLACK],
-        };
+        let texture_image = ColorImage::new([1, 1], vec![egui::Color32::BLACK]);
         let overlay = GspsOverlay {
             graphics: vec![crate::dicom::GspsOverlayGraphic {
                 graphic: GspsGraphic::Point {
@@ -4449,10 +4445,7 @@ mod tests {
             y: 1.0,
             units: GspsUnits::Pixel,
         }]);
-        let texture_image = ColorImage {
-            size: [1, 1],
-            pixels: vec![egui::Color32::BLACK],
-        };
+        let texture_image = ColorImage::new([1, 1], vec![egui::Color32::BLACK]);
         let ctx = egui::Context::default();
         let texture_a = ctx.load_texture(
             "test-gsps-toggle-a",
@@ -4636,10 +4629,7 @@ mod tests {
                 referenced_frames: Some(vec![1]),
             }],
         };
-        let texture_image = ColorImage {
-            size: [1, 1],
-            pixels: vec![egui::Color32::BLACK],
-        };
+        let texture_image = ColorImage::new([1, 1], vec![egui::Color32::BLACK]);
         let ctx = egui::Context::default();
         let texture_a = ctx.load_texture(
             "test-gsps-next-a",
@@ -4697,10 +4687,7 @@ mod tests {
         let ctx = egui::Context::default();
         let texture = ctx.load_texture(
             "history-single-error-clear",
-            ColorImage {
-                size: [1, 1],
-                pixels: vec![egui::Color32::BLACK],
-            },
+            ColorImage::new([1, 1], vec![egui::Color32::BLACK]),
             TextureOptions::LINEAR,
         );
         let mut app = DicomViewerApp {
@@ -4809,10 +4796,7 @@ mod tests {
             y: 2.0,
             units: GspsUnits::Pixel,
         }]);
-        let texture_image = ColorImage {
-            size: [1, 1],
-            pixels: vec![egui::Color32::BLACK],
-        };
+        let texture_image = ColorImage::new([1, 1], vec![egui::Color32::BLACK]);
         let texture_a = ctx.load_texture(
             "group-history-gsps-removal-a",
             texture_image.clone(),
@@ -4902,10 +4886,7 @@ mod tests {
     #[test]
     fn open_history_entry_group_clears_load_error() {
         let ctx = egui::Context::default();
-        let texture_image = ColorImage {
-            size: [1, 1],
-            pixels: vec![egui::Color32::BLACK],
-        };
+        let texture_image = ColorImage::new([1, 1], vec![egui::Color32::BLACK]);
         let texture_a = ctx.load_texture(
             "history-group-error-clear-a",
             texture_image.clone(),
@@ -4961,10 +4942,7 @@ mod tests {
             y: 1.0,
             units: GspsUnits::Pixel,
         }]);
-        let texture_image = ColorImage {
-            size: [1, 1],
-            pixels: vec![egui::Color32::BLACK],
-        };
+        let texture_image = ColorImage::new([1, 1], vec![egui::Color32::BLACK]);
         let texture_a = ctx.load_texture(
             "history-group-gsps-keep-a",
             texture_image.clone(),

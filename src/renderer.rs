@@ -23,10 +23,7 @@ pub fn render_window_level(
         pixels.push(Color32::from_gray(gray));
     }
 
-    ColorImage {
-        size: [width_px, height_px],
-        pixels,
-    }
+    ColorImage::new([width_px, height_px], pixels)
 }
 
 pub fn render_rgb(
@@ -50,10 +47,7 @@ pub fn render_rgb(
         pixels.resize(pixel_count, Color32::BLACK);
     }
 
-    ColorImage {
-        size: [width_px, height_px],
-        pixels,
-    }
+    ColorImage::new([width_px, height_px], pixels)
 }
 
 pub fn blend_rgba_overlay(base: &mut ColorImage, overlay_rgba: &[u8]) {
@@ -79,10 +73,7 @@ mod tests {
 
     #[test]
     fn blend_rgba_overlay_blends_on_top_of_base_pixels() {
-        let mut base = ColorImage {
-            size: [1, 1],
-            pixels: vec![Color32::from_rgb(100, 100, 100)],
-        };
+        let mut base = ColorImage::new([1, 1], vec![Color32::from_rgb(100, 100, 100)]);
 
         blend_rgba_overlay(&mut base, &[200, 0, 0, 128]);
 
