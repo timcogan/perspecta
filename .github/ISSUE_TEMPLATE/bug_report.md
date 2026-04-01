@@ -3,7 +3,7 @@ name: Bug report
 about: Report a reproducible problem in Perspecta
 title: "[Bug] "
 labels: bug
-assignees: ""
+assignees: []
 ---
 
 ## Summary

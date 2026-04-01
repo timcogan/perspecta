@@ -3,7 +3,7 @@ name: Feature request
 about: Suggest an improvement or new capability for Perspecta
 title: "[Feature] "
 labels: enhancement
-assignees: ""
+assignees: []
 ---
 
 ## Problem or Need
