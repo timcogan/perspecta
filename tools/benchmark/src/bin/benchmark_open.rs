@@ -71,6 +71,7 @@ impl BenchmarkMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BenchmarkConfig {
     app_path: Option<PathBuf>,
+    mode: BenchmarkMode,
     runs: usize,
     warmup: usize,
     rows: usize,
@@ -83,6 +84,7 @@ impl Default for BenchmarkConfig {
     fn default() -> Self {
         Self {
             app_path: None,
+            mode: BenchmarkMode::Single,
             runs: 5,
             warmup: 1,
             rows: 1024,
@@ -258,7 +260,7 @@ fn parse_config() -> Result<BenchmarkConfig> {
         }
     }
 
-    BenchmarkMode::from_images(config.images)?;
+    config.mode = BenchmarkMode::from_images(config.images)?;
     Ok(config)
 }
 
@@ -737,19 +739,24 @@ fn summary_table_rows(runs: &[FullAppRun]) -> Vec<Vec<String>> {
     .collect()
 }
 
-fn print_report(
-    config: &BenchmarkConfig,
-    mode: BenchmarkMode,
-    launch_mode: &LaunchMode,
-    runs: &[FullAppRun],
-) {
-    println!("{}", mode.title());
-    println!("scenario: {}", mode.scenario_label());
+fn print_report(config: &BenchmarkConfig, launch_mode: &LaunchMode, runs: &[FullAppRun]) {
+    println!("{}", config.mode.title());
+    println!("scenario: {}", config.mode.scenario_label());
     println!("mode: {}", launch_mode_label(launch_mode));
     println!("synthetic viewport image: {}x{}", config.rows, config.cols);
     println!("synthetic image count: {}", config.images);
     println!("measured runs: {}", runs.len());
     println!("warmup runs: {}", config.warmup);
+    println!();
+    println!(
+        "BENCH_CONFIG {{\"runs\":{},\"warmup\":{},\"timeout_secs\":{},\"images\":{},\"rows\":{},\"cols\":{}}}",
+        runs.len(),
+        config.warmup,
+        config.timeout_secs,
+        config.images,
+        config.rows,
+        config.cols
+    );
     println!();
 
     println!("Runs");
@@ -814,23 +821,22 @@ fn write_synthetic_inputs(
 
 fn run() -> Result<()> {
     let config = parse_config()?;
-    let mode = BenchmarkMode::from_images(config.images)?;
     let app_path = resolve_app_path(config.app_path.clone())?;
     let launch_mode = resolve_launch_mode()?;
     let temp_dir = TempBenchmarkDir::new("benchmark-full-open")?;
-    let dicom_paths = write_synthetic_inputs(&temp_dir, &config, mode)?;
+    let dicom_paths = write_synthetic_inputs(&temp_dir, &config, config.mode)?;
     let timeout = Duration::from_secs(config.timeout_secs);
 
     for _ in 0..config.warmup {
-        let _ = run_once(mode, &launch_mode, &app_path, &dicom_paths, timeout)?;
+        let _ = run_once(config.mode, &launch_mode, &app_path, &dicom_paths, timeout)?;
     }
 
     let mut runs = Vec::with_capacity(config.runs);
     for _ in 0..config.runs {
-        let run = run_once(mode, &launch_mode, &app_path, &dicom_paths, timeout)?;
+        let run = run_once(config.mode, &launch_mode, &app_path, &dicom_paths, timeout)?;
         runs.push(run);
     }
-    print_report(&config, mode, &launch_mode, &runs);
+    print_report(&config, &launch_mode, &runs);
     Ok(())
 }
 
