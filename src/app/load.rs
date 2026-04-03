@@ -1,5 +1,9 @@
 use super::*;
 
+const OPEN_STARTED_EVENT: &str = "open started";
+const OPEN_DICOM_LOADED_EVENT: &str = "open dicom-loaded";
+const OPEN_COMPLETED_EVENT: &str = "open completed";
+
 pub(super) struct PendingLoad {
     pub(super) path: DicomSource,
     pub(super) image: DicomImage,
@@ -813,6 +817,9 @@ impl DicomViewerApp {
                     .collect::<Vec<_>>();
                 self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
             }
+            if self.mammo_group.len() == 8 {
+                log::info!(target: "perf", "{OPEN_COMPLETED_EVENT}");
+            }
         } else {
             self.set_load_error(
                 "Multi-view group load incomplete: worker exited before all images were received.",
@@ -1063,12 +1070,12 @@ impl DicomViewerApp {
         self.history_pushed_for_active_group = false;
         self.clear_load_error();
         log::info!("Loading selected DICOM...");
-        log::info!(target: "perf", "single-open started");
+        log::info!(target: "perf", "{OPEN_STARTED_EVENT}");
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         thread::spawn(move || {
             let result = match load_dicom(&path) {
                 Ok(image) => {
-                    log::info!(target: "perf", "single-open dicom-load completed");
+                    log::info!(target: "perf", "{OPEN_DICOM_LOADED_EVENT}");
                     Ok(PendingSingleLoad::Image(Box::new(PendingLoad {
                         path,
                         image,
@@ -1160,7 +1167,7 @@ impl DicomViewerApp {
         self.reset_single_view_transform();
         self.single_view_frame_scroll_accum = 0.0;
         self.rebuild_texture(ctx);
-        log::info!(target: "perf", "single-open completed");
+        log::info!(target: "perf", "{OPEN_COMPLETED_EVENT}");
         let history_texture = self.texture.clone();
         if let Some(texture) = history_texture.as_ref() {
             self.push_single_history_entry(
@@ -1221,10 +1228,16 @@ impl DicomViewerApp {
         );
 
         let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        if group_len == 8 {
+            log::info!(target: "perf", "{OPEN_STARTED_EVENT}");
+        }
         thread::spawn(move || {
             for path in paths {
                 match load_dicom(&path) {
                     Ok(image) => {
+                        if group_len == 8 {
+                            log::info!(target: "perf", "{OPEN_DICOM_LOADED_EVENT}");
+                        }
                         let _ = tx.send(Ok(PendingLoad { path, image }));
                     }
                     Err(err) => {

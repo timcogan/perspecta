@@ -9,7 +9,8 @@ use dicom_core::value::PrimitiveValue;
 use dicom_core::{dicom_value, DataElement, Tag, VR};
 use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 
-const SECONDARY_CAPTURE_IMAGE_STORAGE_UID: &str = "1.2.840.10008.5.1.4.1.1.7";
+const DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID: &str =
+    "1.2.840.10008.5.1.4.1.1.1.2";
 const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
 const SYNTHETIC_PIXEL_BYTES: u64 = std::mem::size_of::<u16>() as u64;
 const MAX_SYNTHETIC_DICOM_BYTES: u64 = 256 * 1024 * 1024;
@@ -66,31 +67,57 @@ impl Drop for TempBenchmarkDir {
     }
 }
 
-pub fn write_synthetic_dicom(path: &Path, rows: usize, cols: usize) -> Result<()> {
-    let sop_instance_uid = format!(
-        "2.25.{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
+pub fn write_synthetic_dicom(
+    path: &Path,
+    rows: usize,
+    cols: usize,
+    study_date: &str,
+    laterality: &str,
+    view_position: &str,
+    instance_number: i32,
+) -> Result<()> {
+    let sop_instance_uid = synthetic_uid(instance_number.max(0) as u64 + 1);
     let pixel_count = checked_synthetic_pixel_count(rows, cols)?;
     let rows_u16 = u16::try_from(rows).context("rows exceed u16 range")?;
     let cols_u16 = u16::try_from(cols).context("cols exceed u16 range")?;
     let pixels = generate_pixels(cols, pixel_count);
+    let instance_number = instance_number.to_string();
 
     let obj = InMemDicomObject::from_element_iter([
         DataElement::new(
             Tag(0x0008, 0x0016),
             VR::UI,
-            dicom_value!(Strs, [SECONDARY_CAPTURE_IMAGE_STORAGE_UID]),
+            dicom_value!(
+                Strs,
+                [DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID]
+            ),
         ),
         DataElement::new(
             Tag(0x0008, 0x0018),
             VR::UI,
             dicom_value!(Strs, [sop_instance_uid.as_str()]),
         ),
-        DataElement::new(Tag(0x0008, 0x0060), VR::CS, dicom_value!(Strs, ["OT"])),
+        DataElement::new(
+            Tag(0x0008, 0x0020),
+            VR::DA,
+            dicom_value!(Strs, [study_date]),
+        ),
+        DataElement::new(Tag(0x0008, 0x0060), VR::CS, dicom_value!(Strs, ["MG"])),
+        DataElement::new(
+            Tag(0x0018, 0x5101),
+            VR::CS,
+            dicom_value!(Strs, [view_position]),
+        ),
+        DataElement::new(
+            Tag(0x0020, 0x0013),
+            VR::IS,
+            dicom_value!(Strs, [instance_number.as_str()]),
+        ),
+        DataElement::new(
+            Tag(0x0020, 0x0062),
+            VR::CS,
+            dicom_value!(Strs, [laterality]),
+        ),
         DataElement::new(Tag(0x0028, 0x0002), VR::US, dicom_value!(U16, [1])),
         DataElement::new(
             Tag(0x0028, 0x0004),
@@ -114,10 +141,12 @@ pub fn write_synthetic_dicom(path: &Path, rows: usize, cols: usize) -> Result<()
         .with_meta(
             FileMetaTableBuilder::new()
                 .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
-                .media_storage_sop_class_uid(SECONDARY_CAPTURE_IMAGE_STORAGE_UID)
+                .media_storage_sop_class_uid(
+                    DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID,
+                )
                 .media_storage_sop_instance_uid(sop_instance_uid),
         )
-        .context("could not build DICOM file meta table")?;
+        .context("could not build synthetic DICOM file meta table")?;
     file_obj
         .write_to_file(path)
         .with_context(|| format!("could not write synthetic DICOM {}", path.display()))?;
@@ -129,6 +158,13 @@ fn current_timestamp_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn synthetic_uid(offset: u64) -> String {
+    format!(
+        "2.25.{}",
+        current_timestamp_nanos().saturating_add(u128::from(offset))
+    )
 }
 
 fn temp_benchmark_dir_path(prefix: &str, timestamp: u128, attempt: usize) -> PathBuf {
@@ -175,6 +211,7 @@ fn generate_pixels(cols: usize, pixel_count: usize) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dicom_object::open_file;
 
     #[test]
     fn checked_synthetic_pixel_count_rejects_overflow() {
@@ -225,5 +262,45 @@ mod tests {
 
         drop(temp_dir);
         fs::remove_dir(&colliding_path).expect("colliding temp dir should be removed");
+    }
+
+    #[test]
+    fn write_synthetic_mammo_dicom_sets_mammo_metadata() {
+        let temp_dir = TempBenchmarkDir::new("synthetic-mammo")
+            .expect("temp dir should be created for mammography benchmark");
+        let path = temp_dir.path().join("mammo.dcm");
+
+        write_synthetic_dicom(&path, 8, 6, "20260102", "R", "CC", 7)
+            .expect("synthetic mammography DICOM should be written");
+
+        let obj = open_file(&path).expect("synthetic mammography DICOM should open");
+        assert_eq!(
+            obj.element_by_name("Modality")
+                .expect("Modality should exist")
+                .to_str()
+                .expect("Modality should be text"),
+            "MG"
+        );
+        assert_eq!(
+            obj.element_by_name("ImageLaterality")
+                .expect("ImageLaterality should exist")
+                .to_str()
+                .expect("ImageLaterality should be text"),
+            "R"
+        );
+        assert_eq!(
+            obj.element_by_name("ViewPosition")
+                .expect("ViewPosition should exist")
+                .to_str()
+                .expect("ViewPosition should be text"),
+            "CC"
+        );
+        assert_eq!(
+            obj.element_by_name("StudyDate")
+                .expect("StudyDate should exist")
+                .to_str()
+                .expect("StudyDate should be text"),
+            "20260102"
+        );
     }
 }

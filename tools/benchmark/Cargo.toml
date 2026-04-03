@@ -15,9 +15,5 @@ dicom-object = "0.9.1"
 libc = "0.2"
 
 [[bin]]
-name = "benchmark_full_single_open"
-path = "src/bin/benchmark_full_single_open.rs"
-
-[[bin]]
-name = "measure_single_open"
-path = "src/bin/measure_single_open.rs"
+name = "benchmark_open"
+path = "src/bin/benchmark_open.rs"
