@@ -10,6 +10,7 @@ BENCH_WARMUP ?= 1
 BENCH_ROWS ?= 1024
 BENCH_COLS ?= 1024
 BENCH_TIMEOUT_SECS ?= 15
+BENCH_IMAGES ?= 8
 
 help:
 	@echo "Perspecta DICOM Viewer - Make targets"
@@ -24,7 +25,7 @@ help:
 	@echo "  make fmt-check      cargo fmt --check"
 	@echo "  make clippy         cargo clippy -- -D warnings"
 	@echo "  make clean          cargo clean"
-	@echo "  make benchmark      Run full single-image benchmark (release)"
+	@echo "  make benchmark      Run full open benchmark (release); set BENCH_IMAGES=1 or 8"
 	@echo ""
 	@echo "  make install-watch  Install cargo-watch"
 	@echo "  make watch-check    Re-run cargo check on file changes"
@@ -98,5 +99,5 @@ install-protocol-linux:
 
 benchmark:
 	@cargo build --quiet --release -p perspecta --bin perspecta
-	@cargo build --quiet --release -p benchmark-tools --bin benchmark_full_single_open
-	@./target/release/benchmark_full_single_open --app ./target/release/perspecta --runs $(BENCH_RUNS) --warmup $(BENCH_WARMUP) --rows $(BENCH_ROWS) --cols $(BENCH_COLS) --timeout-secs $(BENCH_TIMEOUT_SECS)
+	@cargo build --quiet --release -p benchmark-tools --bin benchmark_open
+	@./target/release/benchmark_open --app ./target/release/perspecta --runs $(BENCH_RUNS) --warmup $(BENCH_WARMUP) --rows $(BENCH_ROWS) --cols $(BENCH_COLS) --timeout-secs $(BENCH_TIMEOUT_SECS) --images $(BENCH_IMAGES)
