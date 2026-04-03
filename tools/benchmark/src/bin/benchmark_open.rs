@@ -36,8 +36,8 @@ impl BenchmarkMode {
 
     fn title(self) -> &'static str {
         match self {
-            Self::Single => "Full Open Benchmark",
-            Self::EightUp => "Full Open Benchmark",
+            Self::Single => "Full Open Benchmark (Single)",
+            Self::EightUp => "Full Open Benchmark (8-Up)",
         }
     }
 
@@ -866,6 +866,15 @@ mod tests {
     fn metric_stats_returns_median_min_and_max() {
         let stats = metric_stats(&[9.0, 3.0, 5.0, 7.0]).expect("stats should exist");
         assert_eq!(stats, (6.0, 3.0, 9.0));
+    }
+
+    #[test]
+    fn benchmark_mode_titles_are_distinct() {
+        assert_eq!(
+            BenchmarkMode::Single.title(),
+            "Full Open Benchmark (Single)"
+        );
+        assert_eq!(BenchmarkMode::EightUp.title(), "Full Open Benchmark (8-Up)");
     }
 
     #[test]
