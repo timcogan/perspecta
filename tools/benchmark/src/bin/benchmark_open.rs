@@ -911,6 +911,31 @@ mod tests {
     }
 
     #[test]
+    fn observe_perf_event_marks_dicom_done_after_one_loaded_event_for_single_mode() {
+        let mut progress = RunProgress::default();
+
+        observe_perf_event(
+            &mut progress,
+            BenchmarkMode::Single,
+            1.0,
+            OPEN_STARTED_EVENT,
+        );
+
+        assert_eq!(progress.started_ms, Some(1000.0));
+        assert_eq!(progress.dicom_done_ms, None);
+
+        observe_perf_event(
+            &mut progress,
+            BenchmarkMode::Single,
+            2.0,
+            OPEN_DICOM_LOADED_EVENT,
+        );
+
+        assert_eq!(progress.loaded_events, 1);
+        assert_eq!(progress.dicom_done_ms, Some(2000.0));
+    }
+
+    #[test]
     fn parse_log_line_extracts_timestamp_and_event() {
         let line = "[1762361234.101] [INFO ] perf: open started";
         let parsed = parse_log_line(line);
