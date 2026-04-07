@@ -721,17 +721,38 @@ impl DicomViewerApp {
 
         let mut had_error = false;
         let mut should_continue = true;
-        match receiver.try_recv() {
-            Ok(result) => match result {
-                Ok(pending) => {
-                    if let Err(err) = self.insert_loaded_mammo(pending, ctx) {
+        let mut loaded_any = false;
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => match result {
+                    Ok(pending) => {
+                        if let Err(err) = self.insert_loaded_mammo(pending, ctx) {
+                            self.set_load_error("Failed to load multi-view DICOM group.");
+                            log::error!("{err}");
+                            self.mammo_group.clear();
+                            self.mammo_load_receiver = None;
+                            self.mammo_load_sender = None;
+                            self.history_pushed_for_active_group = false;
+                            self.cine_mode = false;
+                            if self.dicomweb_active_group_expected.is_some()
+                                || self.dicomweb_active_path_receiver.is_some()
+                                || !self.dicomweb_active_pending_paths.is_empty()
+                            {
+                                self.dicomweb_active_group_expected = None;
+                                self.dicomweb_active_group_paths.clear();
+                                self.dicomweb_completed_background_groups.clear();
+                                self.dicomweb_active_pending_paths.clear();
+                                self.dicomweb_active_path_receiver = None;
+                            }
+                            return;
+                        }
+                        loaded_any = true;
+                    }
+                    Err(err) => {
                         self.set_load_error("Failed to load multi-view DICOM group.");
                         log::error!("{err}");
                         self.mammo_group.clear();
-                        self.mammo_load_receiver = None;
-                        self.mammo_load_sender = None;
                         self.history_pushed_for_active_group = false;
-                        self.cine_mode = false;
                         if self.dicomweb_active_group_expected.is_some()
                             || self.dicomweb_active_path_receiver.is_some()
                             || !self.dicomweb_active_pending_paths.is_empty()
@@ -742,52 +763,40 @@ impl DicomViewerApp {
                             self.dicomweb_active_pending_paths.clear();
                             self.dicomweb_active_path_receiver = None;
                         }
-                        return;
+                        had_error = true;
+                        should_continue = false;
+                        break;
                     }
-                    self.reorder_complete_mammo_group();
-                    self.clear_load_error();
-                    if self.mammo_group_complete()
-                        && (self
-                            .dicomweb_active_group_expected
-                            .is_some_and(Self::is_supported_multi_view_group_size)
-                            || self.dicomweb_active_path_receiver.is_some())
-                        && !self.history_pushed_for_active_group
-                    {
-                        let loaded = self
-                            .mammo_group
-                            .iter()
-                            .filter_map(Option::as_ref)
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
-                        self.move_current_history_to_front();
-                        self.history_pushed_for_active_group = true;
-                    }
-                    ctx.request_repaint();
-                }
-                Err(err) => {
-                    self.set_load_error("Failed to load multi-view DICOM group.");
-                    log::error!("{err}");
-                    self.mammo_group.clear();
-                    self.history_pushed_for_active_group = false;
-                    if self.dicomweb_active_group_expected.is_some()
-                        || self.dicomweb_active_path_receiver.is_some()
-                        || !self.dicomweb_active_pending_paths.is_empty()
-                    {
-                        self.dicomweb_active_group_expected = None;
-                        self.dicomweb_active_group_paths.clear();
-                        self.dicomweb_completed_background_groups.clear();
-                        self.dicomweb_active_pending_paths.clear();
-                        self.dicomweb_active_path_receiver = None;
-                    }
-                    had_error = true;
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
                     should_continue = false;
+                    break;
                 }
-            },
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                should_continue = false;
             }
+        }
+
+        if loaded_any && !had_error {
+            self.reorder_complete_mammo_group();
+            self.clear_load_error();
+            if self.mammo_group_complete()
+                && (self
+                    .dicomweb_active_group_expected
+                    .is_some_and(Self::is_supported_multi_view_group_size)
+                    || self.dicomweb_active_path_receiver.is_some())
+                && !self.history_pushed_for_active_group
+            {
+                let loaded = self
+                    .mammo_group
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.push_group_history_entry(&loaded, self.mammo_selected_index, ctx);
+                self.move_current_history_to_front();
+                self.history_pushed_for_active_group = true;
+            }
+            ctx.request_repaint();
         }
 
         if had_error {
