@@ -339,6 +339,24 @@ impl DicomViewerApp {
         Ok(())
     }
 
+    fn handle_mammo_load_failure(&mut self, err: &impl std::fmt::Display, clear_senders: bool) {
+        self.set_load_error("Failed to load multi-view DICOM group.");
+        log::error!("{err}");
+        self.mammo_group.clear();
+        self.history_pushed_for_active_group = false;
+        self.dicomweb_active_group_expected = None;
+        self.dicomweb_active_group_paths.clear();
+        self.dicomweb_completed_background_groups.clear();
+        self.dicomweb_active_pending_paths.clear();
+        self.dicomweb_active_path_receiver = None;
+
+        if clear_senders {
+            self.mammo_load_receiver = None;
+            self.mammo_load_sender = None;
+            self.cine_mode = false;
+        }
+    }
+
     pub(super) fn reorder_complete_mammo_group(&mut self) {
         self.clear_live_measurement();
         if !self.mammo_group_complete() {
@@ -727,42 +745,13 @@ impl DicomViewerApp {
                 Ok(result) => match result {
                     Ok(pending) => {
                         if let Err(err) = self.insert_loaded_mammo(pending, ctx) {
-                            self.set_load_error("Failed to load multi-view DICOM group.");
-                            log::error!("{err}");
-                            self.mammo_group.clear();
-                            self.mammo_load_receiver = None;
-                            self.mammo_load_sender = None;
-                            self.history_pushed_for_active_group = false;
-                            self.cine_mode = false;
-                            if self.dicomweb_active_group_expected.is_some()
-                                || self.dicomweb_active_path_receiver.is_some()
-                                || !self.dicomweb_active_pending_paths.is_empty()
-                            {
-                                self.dicomweb_active_group_expected = None;
-                                self.dicomweb_active_group_paths.clear();
-                                self.dicomweb_completed_background_groups.clear();
-                                self.dicomweb_active_pending_paths.clear();
-                                self.dicomweb_active_path_receiver = None;
-                            }
+                            self.handle_mammo_load_failure(&err, true);
                             return;
                         }
                         loaded_any = true;
                     }
                     Err(err) => {
-                        self.set_load_error("Failed to load multi-view DICOM group.");
-                        log::error!("{err}");
-                        self.mammo_group.clear();
-                        self.history_pushed_for_active_group = false;
-                        if self.dicomweb_active_group_expected.is_some()
-                            || self.dicomweb_active_path_receiver.is_some()
-                            || !self.dicomweb_active_pending_paths.is_empty()
-                        {
-                            self.dicomweb_active_group_expected = None;
-                            self.dicomweb_active_group_paths.clear();
-                            self.dicomweb_completed_background_groups.clear();
-                            self.dicomweb_active_pending_paths.clear();
-                            self.dicomweb_active_path_receiver = None;
-                        }
+                        self.handle_mammo_load_failure(&err, false);
                         had_error = true;
                         should_continue = false;
                         break;
