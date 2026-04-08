@@ -6130,6 +6130,64 @@ mod tests {
     }
 
     #[test]
+    fn poll_mammo_group_load_drains_all_available_images_in_one_repaint() {
+        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        for path in ["one.dcm", "two.dcm", "three.dcm"] {
+            tx.send(Ok(PendingLoad {
+                path: test_source(path),
+                image: DicomImage::test_stub_with_mono_frames(None, 1),
+            }))
+            .expect("pending mammo image should send");
+        }
+        drop(tx);
+
+        let mut app = DicomViewerApp {
+            mammo_group: vec![None, None, None],
+            mammo_load_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_mammo_group_load(&ctx);
+
+        assert!(app.mammo_load_receiver.is_none());
+        assert_eq!(app.loaded_mammo_count(), 3);
+        assert!(app.mammo_group_complete());
+        assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn poll_mammo_group_load_keeps_error_when_batch_contains_failure() {
+        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        tx.send(Ok(PendingLoad {
+            path: test_source("one.dcm"),
+            image: DicomImage::test_stub_with_mono_frames(None, 1),
+        }))
+        .expect("pending mammo image should send");
+        tx.send(Err("decode failed".to_string()))
+            .expect("pending mammo failure should send");
+        drop(tx);
+
+        let mut app = DicomViewerApp {
+            mammo_group: vec![None, None],
+            mammo_load_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_mammo_group_load(&ctx);
+
+        assert!(app.mammo_load_receiver.is_none());
+        assert!(app.mammo_load_sender.is_none());
+        assert!(app.mammo_group.is_empty());
+        assert_eq!(app.loaded_mammo_count(), 0);
+        assert_eq!(
+            app.load_error_message.as_deref(),
+            Some("Failed to load multi-view DICOM group.")
+        );
+    }
+
+    #[test]
     fn poll_single_load_can_activate_structured_report() {
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         tx.send(Ok(PendingSingleLoad::StructuredReport {
