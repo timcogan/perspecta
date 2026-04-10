@@ -1708,11 +1708,19 @@ impl DicomViewerApp {
         -raw_steps
     }
 
-    fn dominant_scroll_axis(scroll: egui::Vec2) -> f32 {
-        if scroll.y.abs() >= scroll.x.abs() {
-            scroll.y
+    fn dominant_scroll_axis(raw_scroll: egui::Vec2, smooth_scroll: egui::Vec2) -> f32 {
+        let pick = |delta: egui::Vec2| {
+            if delta.y.abs() >= delta.x.abs() {
+                delta.y
+            } else {
+                delta.x
+            }
+        };
+
+        if smooth_scroll != egui::Vec2::ZERO {
+            pick(smooth_scroll)
         } else {
-            scroll.x
+            pick(raw_scroll)
         }
     }
 
@@ -1841,21 +1849,25 @@ impl DicomViewerApp {
                                                 }
                                             }
                                             if response.hovered() {
-                                                let (modifiers, smooth_scroll, zoom_delta): (
-                                                    egui::Modifiers,
-                                                    egui::Vec2,
-                                                    f32,
+                                                let (
+                                                    modifiers,
+                                                    raw_scroll,
+                                                    smooth_scroll,
+                                                    zoom_delta,
                                                 ) = ui.input(|input| {
                                                     (
                                                         input.modifiers,
-                                                        input.smooth_scroll_delta(),
+                                                        input.raw_scroll_delta,
+                                                        input.smooth_scroll_delta,
                                                         input.zoom_delta(),
                                                     )
                                                 });
                                                 let frame_scroll_mode =
                                                     Self::is_frame_scroll_input(modifiers);
-                                                let scroll =
-                                                    Self::dominant_scroll_axis(smooth_scroll);
+                                                let scroll = Self::dominant_scroll_axis(
+                                                    raw_scroll,
+                                                    smooth_scroll,
+                                                );
 
                                                 if frame_scroll_mode {
                                                     let frame_count = common_frame_count;
@@ -2067,9 +2079,7 @@ impl DicomViewerApp {
 }
 
 impl eframe::App for DicomViewerApp {
-    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = root_ui.ctx().clone();
-        let ctx = &ctx;
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         Self::apply_black_background(ctx);
         if self.is_loading() || self.frame_wait_pending {
             ctx.set_cursor_icon(egui::CursorIcon::Progress);
@@ -2174,12 +2184,12 @@ impl eframe::App for DicomViewerApp {
 
         let is_maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
         let title_text = format!("{APP_TITLE} v{APP_VERSION}");
-        let bar_fill = ctx.global_style().visuals.panel_fill;
-        egui::Panel::top("titlebar")
+        let bar_fill = ctx.style().visuals.panel_fill;
+        egui::TopBottomPanel::top("titlebar")
             .show_separator_line(false)
             .frame(egui::Frame::NONE.fill(bar_fill))
-            .exact_size(30.0)
-            .show_inside(root_ui, |ui| {
+            .exact_height(30.0)
+            .show(ctx, |ui| {
                 let button_size = egui::vec2(28.0, 22.0);
                 let right_controls_min_width =
                     button_size.x * 3.0 + ui.spacing().item_spacing.x * 2.0;
@@ -2341,7 +2351,7 @@ impl eframe::App for DicomViewerApp {
         let has_overlay_navigation_target = self.next_overlay_navigation_target().is_some();
 
         if let Some(state) = active_state.as_mut() {
-            let spacing = ctx.global_style().spacing.clone();
+            let spacing = ctx.style().spacing.clone();
             let has_slider_rows = state.is_monochrome || state.frame_count > 1;
             let has_action_rows = state.frame_count > 1 || has_active_overlay;
             let wl_layout = Self::wl_overlay_layout(
@@ -2719,7 +2729,7 @@ impl eframe::App for DicomViewerApp {
             }
         }
 
-        egui::CentralPanel::default().show_inside(root_ui, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| {
             if has_mammo_group {
                 self.show_mammo_grid(ui);
             } else if let Some(texture) = self.texture.clone() {
@@ -2764,19 +2774,17 @@ impl eframe::App for DicomViewerApp {
                     }
 
                     if response.hovered() {
-                        let (modifiers, zoom_delta, smooth_scroll): (
-                            egui::Modifiers,
-                            f32,
-                            egui::Vec2,
-                        ) = ui.input(|input| {
-                            (
-                                input.modifiers,
-                                input.zoom_delta(),
-                                input.smooth_scroll_delta(),
-                            )
-                        });
+                        let (modifiers, zoom_delta, raw_scroll, smooth_scroll) =
+                            ui.input(|input| {
+                                (
+                                    input.modifiers,
+                                    input.zoom_delta(),
+                                    input.raw_scroll_delta,
+                                    input.smooth_scroll_delta,
+                                )
+                            });
                         let frame_scroll_mode = Self::is_frame_scroll_input(modifiers);
-                        let scroll = Self::dominant_scroll_axis(smooth_scroll);
+                        let scroll = Self::dominant_scroll_axis(raw_scroll, smooth_scroll);
 
                         if frame_scroll_mode {
                             if let Some(image) = self.image.as_ref() {
