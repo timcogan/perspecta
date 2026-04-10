@@ -216,14 +216,15 @@ impl SrIndexedNode {
     fn selected_image_target<'a>(
         &'a self,
         image_index: &'a HashMap<Vec<usize>, ReferencedImageTarget>,
-    ) -> Option<&'a ReferencedImageTarget> {
+    ) -> Option<ReferencedImageTarget> {
         for child in &self.children {
-            if let Some(reference) = child.image_reference.as_ref() {
+            if let Some(mut reference) = child.image_reference.clone() {
+                hydrate_image_context(&mut reference, child);
                 return Some(reference);
             }
             if let Some(reference_path) = child.referenced_content_item_identifier.as_ref() {
                 if let Some(reference) = image_index.get(reference_path) {
-                    return Some(reference);
+                    return Some(reference.clone());
                 }
             }
         }
@@ -450,12 +451,16 @@ fn collect_image_references(
 ) {
     for node in nodes {
         if let Some(mut reference) = node.image_reference.clone() {
-            reference.laterality = node.acquisition_context_value("Image Laterality");
-            reference.view = node.acquisition_context_value("Image View");
+            hydrate_image_context(&mut reference, node);
             image_index.insert(node.path.clone(), reference);
         }
         collect_image_references(&node.children, image_index);
     }
+}
+
+fn hydrate_image_context(target: &mut ReferencedImageTarget, node: &SrIndexedNode) {
+    target.laterality = node.acquisition_context_value("Image Laterality");
+    target.view = node.acquisition_context_value("Image View");
 }
 
 fn collect_mammography_cad_overlays(
@@ -503,16 +508,16 @@ fn collect_mammography_cad_overlays(
                         cad_operating_point,
                     }));
 
-                if labeled_targets.contains(reference) {
+                if labeled_targets.contains(&reference) {
                     continue;
                 }
 
                 let Some((anchor, units)) =
-                    preferred_sr_overlay_label_anchor(&geometry_nodes, image_index, reference)
+                    preferred_sr_overlay_label_anchor(&geometry_nodes, image_index, &reference)
                 else {
                     continue;
                 };
-                let lines = sr_overlay_label_lines(node, reference);
+                let lines = sr_overlay_label_lines(node, &reference);
                 if lines.is_empty() {
                     continue;
                 }
@@ -524,7 +529,7 @@ fn collect_mammography_cad_overlays(
                     referenced_frames: reference.referenced_frames.clone(),
                     rendering_intent,
                 });
-                labeled_targets.push(reference.clone());
+                labeled_targets.push(reference);
             }
         }
 
@@ -764,14 +769,20 @@ fn preferred_sr_overlay_label_anchor(
     geometry_nodes
         .iter()
         .copied()
-        .filter(|node| node.selected_image_target(image_index) == Some(reference))
+        .filter(|node| {
+            node.selected_image_target(image_index)
+                .is_some_and(|target| target == *reference)
+        })
         .find(|node| node.concept_name.matches_meaning("Center"))
         .and_then(sr_overlay_label_anchor)
         .or_else(|| {
             geometry_nodes
                 .iter()
                 .copied()
-                .filter(|node| node.selected_image_target(image_index) == Some(reference))
+                .filter(|node| {
+                    node.selected_image_target(image_index)
+                        .is_some_and(|target| target == *reference)
+                })
                 .find_map(sr_overlay_label_anchor)
         })
 }
@@ -1172,6 +1183,29 @@ mod tests {
         )
     }
 
+    fn inline_scoord_content_item(
+        relationship_type: Option<&str>,
+        concept_name: &str,
+        graphic_type: &str,
+        graphic_data: &[f32],
+        image_reference: InMemDicomObject,
+    ) -> InMemDicomObject {
+        content_item(
+            "SCOORD",
+            relationship_type,
+            Some(concept_name),
+            vec![
+                DataElement::new(Tag(0x0070, 0x0023), VR::CS, graphic_type),
+                DataElement::new(
+                    Tag(0x0070, 0x0022),
+                    VR::FL,
+                    PrimitiveValue::F32(graphic_data.iter().copied().collect()),
+                ),
+            ],
+            vec![image_reference],
+        )
+    }
+
     fn mammography_cad_sr_object(
         rendering_intent: &str,
         referenced_frames: Option<&[i32]>,
@@ -1261,6 +1295,65 @@ mod tests {
         .expect("mammography CAD SR test object should build file meta")
     }
 
+    fn mammography_cad_sr_object_with_inline_image_context(
+        rendering_intent: &str,
+        referenced_frames: Option<&[i32]>,
+        sop_class_uid: &str,
+        laterality: &str,
+        view: &str,
+    ) -> DefaultDicomObject {
+        let finding = content_item(
+            "CODE",
+            Some("CONTAINS"),
+            Some("Single Image Finding"),
+            vec![DataElement::new(
+                Tag(0x0040, 0xA168),
+                VR::SQ,
+                DataSetSequence::from(vec![code_item("TEST-FINDING-ALPHA")]),
+            )],
+            vec![
+                code_content_item(
+                    Some("HAS CONCEPT MOD"),
+                    "Rendering Intent",
+                    rendering_intent,
+                ),
+                numeric_content_item(Some("HAS CONCEPT MOD"), "CAD Operating Point", "2"),
+                numeric_content_item(Some("HAS PROPERTIES"), "Certainty of Finding", "1234.5"),
+                inline_scoord_content_item(
+                    Some("HAS PROPERTIES"),
+                    "Center",
+                    "POINT",
+                    &[16.0, 24.0],
+                    image_library_reference_item("1.2.3.4", referenced_frames, laterality, view),
+                ),
+                inline_scoord_content_item(
+                    Some("HAS PROPERTIES"),
+                    "Outline",
+                    "POLYLINE",
+                    &[10.0, 20.0, 20.0, 30.0, 30.0, 20.0],
+                    image_library_reference_item("1.2.3.4", referenced_frames, laterality, view),
+                ),
+            ],
+        );
+
+        InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, sop_class_uid),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+            DataElement::new(
+                Tag(0x0040, 0xA730),
+                VR::SQ,
+                DataSetSequence::from(vec![finding]),
+            ),
+        ])
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                .media_storage_sop_class_uid(sop_class_uid)
+                .media_storage_sop_instance_uid("9.8.7.10"),
+        )
+        .expect("inline-image mammography CAD SR test object should build file meta")
+    }
+
     fn simple_structured_report_object() -> DefaultDicomObject {
         InMemDicomObject::from_element_iter([
             DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
@@ -1348,6 +1441,30 @@ mod tests {
         let overlay = overlays
             .get("1.2.3.4")
             .expect("overlay should resolve image library reference");
+
+        assert_eq!(
+            overlay.labels[0].lines,
+            vec![
+                "TEST-FINDING-ALPHA".to_string(),
+                "L CC | 1234.5%".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_hydrates_inline_image_context() {
+        let sr_obj = mammography_cad_sr_object_with_inline_image_context(
+            "Presentation Required",
+            None,
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+            "Left Breast",
+            "Cranio-caudal",
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve inline image reference");
 
         assert_eq!(
             overlay.labels[0].lines,
