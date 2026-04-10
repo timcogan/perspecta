@@ -463,6 +463,10 @@ fn hydrate_image_context(target: &mut ReferencedImageTarget, node: &SrIndexedNod
     target.view = node.acquisition_context_value("Image View");
 }
 
+fn same_image_frame(a: &ReferencedImageTarget, b: &ReferencedImageTarget) -> bool {
+    a.sop_instance_uid == b.sop_instance_uid && a.referenced_frames == b.referenced_frames
+}
+
 fn collect_mammography_cad_overlays(
     nodes: &[SrIndexedNode],
     image_index: &HashMap<Vec<usize>, ReferencedImageTarget>,
@@ -508,7 +512,10 @@ fn collect_mammography_cad_overlays(
                         cad_operating_point,
                     }));
 
-                if labeled_targets.contains(&reference) {
+                if labeled_targets
+                    .iter()
+                    .any(|target| same_image_frame(target, &reference))
+                {
                     continue;
                 }
 
@@ -771,7 +778,7 @@ fn preferred_sr_overlay_label_anchor(
         .copied()
         .filter(|node| {
             node.selected_image_target(image_index)
-                .is_some_and(|target| target == *reference)
+                .is_some_and(|target| same_image_frame(&target, reference))
         })
         .find(|node| node.concept_name.matches_meaning("Center"))
         .and_then(sr_overlay_label_anchor)
@@ -781,7 +788,7 @@ fn preferred_sr_overlay_label_anchor(
                 .copied()
                 .filter(|node| {
                     node.selected_image_target(image_index)
-                        .is_some_and(|target| target == *reference)
+                        .is_some_and(|target| same_image_frame(&target, reference))
                 })
                 .find_map(sr_overlay_label_anchor)
         })
@@ -1354,6 +1361,81 @@ mod tests {
         .expect("inline-image mammography CAD SR test object should build file meta")
     }
 
+    fn mammography_cad_sr_object_with_mixed_target_contexts(
+        rendering_intent: &str,
+        referenced_frames: Option<&[i32]>,
+        sop_class_uid: &str,
+    ) -> DefaultDicomObject {
+        let image_library = content_item(
+            "CONTAINER",
+            None,
+            Some("Image Library"),
+            Vec::new(),
+            vec![image_library_reference_item(
+                "1.2.3.4",
+                referenced_frames,
+                "Right Breast",
+                "Mediolateral-oblique",
+            )],
+        );
+        let finding = content_item(
+            "CODE",
+            Some("CONTAINS"),
+            Some("Single Image Finding"),
+            vec![DataElement::new(
+                Tag(0x0040, 0xA168),
+                VR::SQ,
+                DataSetSequence::from(vec![code_item("TEST-FINDING-ALPHA")]),
+            )],
+            vec![
+                code_content_item(
+                    Some("HAS CONCEPT MOD"),
+                    "Rendering Intent",
+                    rendering_intent,
+                ),
+                numeric_content_item(Some("HAS CONCEPT MOD"), "CAD Operating Point", "2"),
+                numeric_content_item(Some("HAS PROPERTIES"), "Certainty of Finding", "1234.5"),
+                scoord_content_item_with_units(
+                    Some("HAS PROPERTIES"),
+                    "Outline",
+                    "POLYLINE",
+                    &[10.0, 20.0, 20.0, 30.0, 30.0, 20.0],
+                    &[1, 1, 1],
+                    None,
+                ),
+                inline_scoord_content_item(
+                    Some("HAS PROPERTIES"),
+                    "Center",
+                    "POINT",
+                    &[16.0, 24.0],
+                    image_library_reference_item(
+                        "1.2.3.4",
+                        referenced_frames,
+                        "Left Breast",
+                        "Cranio-caudal",
+                    ),
+                ),
+            ],
+        );
+
+        InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, sop_class_uid),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+            DataElement::new(
+                Tag(0x0040, 0xA730),
+                VR::SQ,
+                DataSetSequence::from(vec![image_library, finding]),
+            ),
+        ])
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                .media_storage_sop_class_uid(sop_class_uid)
+                .media_storage_sop_instance_uid("9.8.7.11"),
+        )
+        .expect("mixed-context mammography CAD SR test object should build file meta")
+    }
+
     fn simple_structured_report_object() -> DefaultDicomObject {
         InMemDicomObject::from_element_iter([
             DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
@@ -1473,6 +1555,24 @@ mod tests {
                 "L CC | 1234.5%".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_matches_targets_by_image_and_frame_identity() {
+        let sr_obj = mammography_cad_sr_object_with_mixed_target_contexts(
+            "Presentation Required",
+            None,
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve mixed-context image references");
+
+        assert_eq!(overlay.graphics.len(), 2);
+        assert_eq!(overlay.labels.len(), 1);
+        assert_eq!(overlay.labels[0].anchor, (16.0, 24.0));
     }
 
     #[test]
