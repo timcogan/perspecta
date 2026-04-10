@@ -2,7 +2,7 @@
 title = "Viewer Basics"
 description = "Learn the main viewer layouts, controls, and overlay behavior in Perspecta."
 weight = 15
-last_updated = "2026-03-31"
+last_updated = "2026-04-10"
 +++
 
 Use this page after a study or report is already open. It covers the main viewer layouts, navigation, zoom and pan behavior, cine, and overlays.
@@ -41,10 +41,10 @@ Use this page after a study or report is already open. It covers the main viewer
 
 ## Overlay behavior
 
-- `G`: toggle the active image overlay when a matching GSPS or Mammography CAD SR object is available
+- `G`: toggle the active image overlay when a matching GSPS or Mammography CAD SR object with vector marks is available
 - `N`: jump to the next image or frame that contains an overlay
 - Overlay visibility is off by default when a study first opens
-- Supplementary GSPS and Mammography CAD SR objects augment the active image view and do not count as display slots
+- Supplementary GSPS and Mammography CAD SR objects augment the active image view and do not count as display slots; CAD SR overlays render only when the report provides vector marks, and supported SR findings can add a short text label next to the geometry
 
 ## Related Guides
 

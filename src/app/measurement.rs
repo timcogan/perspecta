@@ -9,6 +9,8 @@ const MEASUREMENT_STROKE_WIDTH: f32 = 2.0;
 const MEASUREMENT_HANDLE_RADIUS: f32 = 4.0;
 const MEASUREMENT_LABEL_OFFSET_X: f32 = 8.0;
 const MEASUREMENT_LABEL_OFFSET_Y: f32 = 8.0;
+const MEASUREMENT_LABEL_PADDING_X: f32 = 4.0;
+const MEASUREMENT_LABEL_PADDING_Y: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MeasurementTarget {
@@ -178,10 +180,15 @@ impl DicomViewerApp {
         let font_id = FontId::monospace(12.0);
         let galley = painter.layout_no_wrap(label, font_id, MEASUREMENT_COLOR);
         let label_rect = measurement_label_rect(start, end, galley.size(), painter.clip_rect());
-        painter.galley(
-            label_rect.min + egui::vec2(1.0, 1.0),
-            galley.clone(),
-            egui::Color32::BLACK,
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                label_rect.min
+                    - egui::vec2(MEASUREMENT_LABEL_PADDING_X, MEASUREMENT_LABEL_PADDING_Y),
+                label_rect.max
+                    + egui::vec2(MEASUREMENT_LABEL_PADDING_X, MEASUREMENT_LABEL_PADDING_Y),
+            ),
+            4.0,
+            egui::Color32::from_black_alpha(176),
         );
         painter.galley(label_rect.min, galley, MEASUREMENT_COLOR);
     }

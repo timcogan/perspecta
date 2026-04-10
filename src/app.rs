@@ -16,7 +16,7 @@ use crate::dicom::{
     load_parametric_map, load_parametric_map_overlays, load_structured_report,
     read_sop_instance_uid, DicomImage, DicomPathKind, DicomSource, DicomSourceMeta,
     FullMetadataField, GspsGraphic, GspsOverlay, GspsUnits, ParametricMapOverlay, SrOverlay,
-    StructuredReportDocument, StructuredReportNode, METADATA_FIELD_NAMES,
+    SrOverlayLabel, StructuredReportDocument, StructuredReportNode, METADATA_FIELD_NAMES,
 };
 use crate::dicomweb::{
     download_dicomweb_group_request, download_dicomweb_request, DicomWebDownloadResult,
@@ -53,7 +53,6 @@ const HISTORY_LIST_THUMB_MAX_DIM: f32 = 56.0;
 const DEFAULT_CINE_FPS: f32 = 24.0;
 const VALID_GROUP_SIZES: &[usize] = &[1, 2, 3, 4, 8];
 const PERSPECTA_BRAND_BLUE: egui::Color32 = egui::Color32::from_rgb(14, 165, 233);
-const PERSPECTA_OVERLAY_ORANGE: egui::Color32 = egui::Color32::from_rgb(249, 115, 22);
 const ICON_STROKE_WIDTH: f32 = 1.25;
 const CLOSE_ICON_SIZE_FACTOR: f32 = 0.36;
 const TITLEBAR_MINIMIZE_ICON_HORIZONTAL_PADDING: f32 = 10.0;
@@ -67,6 +66,12 @@ const CONTROL_VALUE_WIDTH: f32 = 64.0;
 const CONTROL_ACTION_BUTTON_WIDTH: f32 = 110.0;
 const FILE_DROP_OVERLAY_WIDTH: f32 = 420.0;
 const DICOMWEB_ACTIVE_PENDING_BATCH_SIZE: usize = 8;
+const SR_OVERLAY_LABEL_FONT_SIZE: f32 = 11.0;
+const SR_OVERLAY_LABEL_OFFSET_X: f32 = 8.0;
+const SR_OVERLAY_LABEL_OFFSET_Y: f32 = 8.0;
+const SR_OVERLAY_LABEL_PADDING_X: f32 = 6.0;
+const SR_OVERLAY_LABEL_PADDING_Y: f32 = 4.0;
+const SR_OVERLAY_LABEL_LINE_GAP: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WlOverlayLayout {
@@ -1268,11 +1273,14 @@ impl DicomViewerApp {
             return;
         };
 
-        let stroke = egui::Stroke::new(1.6, PERSPECTA_OVERLAY_ORANGE);
+        let stroke = egui::Stroke::new(1.6, PERSPECTA_BRAND_BLUE);
         let marker_half = (image_rect.width().min(image_rect.height()) * 0.008).clamp(2.0, 5.0);
 
         for graphic in overlay.visible_graphics_for_frame(stored_frame_index) {
             Self::draw_overlay_graphic(painter, image_rect, image, graphic, stroke, marker_half);
+        }
+        for label in overlay.visible_labels_for_frame(stored_frame_index) {
+            Self::draw_sr_overlay_label(painter, image_rect, image, label);
         }
     }
 
@@ -1340,6 +1348,65 @@ impl DicomViewerApp {
                     }
                 }
             }
+        }
+    }
+
+    fn draw_sr_overlay_label(
+        painter: &egui::Painter,
+        image_rect: egui::Rect,
+        image: &DicomImage,
+        label: &SrOverlayLabel,
+    ) {
+        if label.lines.is_empty() {
+            return;
+        }
+
+        let anchor = Self::gsps_point_to_screen(
+            label.anchor,
+            GspsUnits::Pixel,
+            image_rect,
+            image.width,
+            image.height,
+        );
+        let font_id = egui::FontId::monospace(SR_OVERLAY_LABEL_FONT_SIZE);
+        let galleys = label
+            .lines
+            .iter()
+            .map(|line| painter.layout_no_wrap(line.clone(), font_id.clone(), PERSPECTA_BRAND_BLUE))
+            .collect::<Vec<_>>();
+        let max_width = galleys
+            .iter()
+            .map(|galley| galley.size().x)
+            .fold(0.0_f32, f32::max);
+        let text_height = galleys.iter().map(|galley| galley.size().y).sum::<f32>()
+            + SR_OVERLAY_LABEL_LINE_GAP * galleys.len().saturating_sub(1) as f32;
+        let label_size = egui::vec2(
+            max_width + SR_OVERLAY_LABEL_PADDING_X * 2.0,
+            text_height + SR_OVERLAY_LABEL_PADDING_Y * 2.0,
+        );
+
+        let preferred = egui::pos2(
+            anchor.x + SR_OVERLAY_LABEL_OFFSET_X,
+            anchor.y - label_size.y - SR_OVERLAY_LABEL_OFFSET_Y,
+        );
+        let max_x = (image_rect.right() - label_size.x).max(image_rect.left());
+        let max_y = (image_rect.bottom() - label_size.y).max(image_rect.top());
+        let label_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                preferred.x.clamp(image_rect.left(), max_x),
+                preferred.y.clamp(image_rect.top(), max_y),
+            ),
+            label_size,
+        );
+
+        painter.rect_filled(label_rect, 4.0, egui::Color32::from_black_alpha(176));
+
+        let mut text_pos =
+            label_rect.min + egui::vec2(SR_OVERLAY_LABEL_PADDING_X, SR_OVERLAY_LABEL_PADDING_Y);
+        for galley in galleys {
+            let galley_height = galley.size().y;
+            painter.galley(text_pos, galley, PERSPECTA_BRAND_BLUE);
+            text_pos.y += SR_OVERLAY_LABEL_LINE_GAP + galley_height;
         }
     }
 
@@ -3133,9 +3200,10 @@ mod tests {
     use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 
     use crate::dicom::{
-        load_parametric_map_overlays, SrOverlay, SrOverlayGraphic, SrRenderingIntent,
-        BASIC_TEXT_SR_SOP_CLASS_UID, DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID,
-        EXPLICIT_VR_LITTLE_ENDIAN_UID, GSPS_SOP_CLASS_UID, PARAMETRIC_MAP_SOP_CLASS_UID,
+        load_parametric_map_overlays, SrOverlay, SrOverlayGraphic, SrOverlayLabel,
+        SrRenderingIntent, BASIC_TEXT_SR_SOP_CLASS_UID,
+        DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID, EXPLICIT_VR_LITTLE_ENDIAN_UID,
+        GSPS_SOP_CLASS_UID, PARAMETRIC_MAP_SOP_CLASS_UID,
     };
 
     fn test_texture(ctx: &egui::Context, name: &str) -> TextureHandle {
@@ -3151,6 +3219,20 @@ mod tests {
             (actual - expected).abs() < 0.001,
             "expected {expected}, got {actual}"
         );
+    }
+
+    fn test_sr_overlay_with_graphics(graphics: Vec<SrOverlayGraphic>) -> SrOverlay {
+        SrOverlay {
+            graphics,
+            labels: Vec::new(),
+        }
+    }
+
+    fn test_sr_overlay_with_graphics_and_labels(
+        graphics: Vec<SrOverlayGraphic>,
+        labels: Vec<SrOverlayLabel>,
+    ) -> SrOverlay {
+        SrOverlay { graphics, labels }
     }
 
     fn unique_test_file_path(prefix: &str) -> PathBuf {
@@ -3876,6 +3958,98 @@ mod tests {
     }
 
     #[test]
+    fn merge_sr_overlays_appends_graphics_to_existing_uid() {
+        let mut destination = HashMap::from([(
+            "1.2.3".to_string(),
+            test_sr_overlay_with_graphics_and_labels(
+                vec![SrOverlayGraphic {
+                    graphic: GspsGraphic::Point {
+                        x: 1.0,
+                        y: 2.0,
+                        units: GspsUnits::Pixel,
+                    },
+                    referenced_frames: None,
+                    rendering_intent: SrRenderingIntent::PresentationRequired,
+                    cad_operating_point: Some(1.0),
+                }],
+                vec![SrOverlayLabel {
+                    anchor: (1.0, 2.0),
+                    lines: vec!["stub-finding-a".to_string()],
+                    referenced_frames: None,
+                    rendering_intent: SrRenderingIntent::PresentationRequired,
+                }],
+            ),
+        )]);
+        let source = HashMap::from([
+            (
+                "1.2.3".to_string(),
+                test_sr_overlay_with_graphics_and_labels(
+                    vec![SrOverlayGraphic {
+                        graphic: GspsGraphic::Point {
+                            x: 3.0,
+                            y: 4.0,
+                            units: GspsUnits::Pixel,
+                        },
+                        referenced_frames: None,
+                        rendering_intent: SrRenderingIntent::PresentationRequired,
+                        cad_operating_point: Some(1.0),
+                    }],
+                    vec![SrOverlayLabel {
+                        anchor: (3.0, 4.0),
+                        lines: vec!["stub-finding-b".to_string(), "stub-meta-b".to_string()],
+                        referenced_frames: None,
+                        rendering_intent: SrRenderingIntent::PresentationRequired,
+                    }],
+                ),
+            ),
+            (
+                "9.9.9".to_string(),
+                test_sr_overlay_with_graphics_and_labels(
+                    vec![SrOverlayGraphic {
+                        graphic: GspsGraphic::Point {
+                            x: 5.0,
+                            y: 6.0,
+                            units: GspsUnits::Pixel,
+                        },
+                        referenced_frames: Some(vec![1]),
+                        rendering_intent: SrRenderingIntent::PresentationRequired,
+                        cad_operating_point: Some(2.0),
+                    }],
+                    vec![SrOverlayLabel {
+                        anchor: (5.0, 6.0),
+                        lines: vec!["stub-finding-c".to_string(), "stub-meta-c".to_string()],
+                        referenced_frames: Some(vec![1]),
+                        rendering_intent: SrRenderingIntent::PresentationRequired,
+                    }],
+                ),
+            ),
+        ]);
+
+        DicomViewerApp::merge_sr_overlays(&mut destination, &source);
+
+        assert_eq!(
+            destination
+                .get("1.2.3")
+                .map(|overlay| overlay.graphics.len()),
+            Some(2)
+        );
+        assert_eq!(
+            destination.get("1.2.3").map(|overlay| overlay.labels.len()),
+            Some(2)
+        );
+        assert_eq!(
+            destination
+                .get("9.9.9")
+                .map(|overlay| overlay.graphics.len()),
+            Some(1)
+        );
+        assert_eq!(
+            destination.get("9.9.9").map(|overlay| overlay.labels.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn authoritative_pending_gsps_snapshot_replaces_and_locks_streamed_keys() {
         let mut app = DicomViewerApp::default();
         app.merge_pending_gsps_overlays(HashMap::from([(
@@ -4131,18 +4305,16 @@ mod tests {
         let path = test_meta("current-single-sr.dcm");
         let mut live_image = DicomImage::test_stub(None);
         live_image.sop_instance_uid = Some("1.2.3".to_string());
-        let sr_overlay = SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 4.0,
-                    y: 5.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: None,
-                rendering_intent: SrRenderingIntent::PresentationRequired,
-                cad_operating_point: Some(1.0),
-            }],
-        };
+        let sr_overlay = test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 4.0,
+                y: 5.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: None,
+            rendering_intent: SrRenderingIntent::PresentationRequired,
+            cad_operating_point: Some(1.0),
+        }]);
 
         let mut app = DicomViewerApp {
             image: Some(live_image),
@@ -4188,30 +4360,26 @@ mod tests {
     #[test]
     fn authoritative_pending_sr_snapshot_detaches_removed_cached_history_overlays() {
         let ctx = egui::Context::default();
-        let stale_overlay = SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 7.0,
-                    y: 8.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: None,
-                rendering_intent: SrRenderingIntent::PresentationRequired,
-                cad_operating_point: Some(1.0),
-            }],
-        };
-        let unaffected_overlay = SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 9.0,
-                    y: 10.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: None,
-                rendering_intent: SrRenderingIntent::PresentationRequired,
-                cad_operating_point: Some(2.0),
-            }],
-        };
+        let stale_overlay = test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 7.0,
+                y: 8.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: None,
+            rendering_intent: SrRenderingIntent::PresentationRequired,
+            cad_operating_point: Some(1.0),
+        }]);
+        let unaffected_overlay = test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 9.0,
+                y: 10.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: None,
+            rendering_intent: SrRenderingIntent::PresentationRequired,
+            cad_operating_point: Some(2.0),
+        }]);
 
         let mut single_image = DicomImage::test_stub(None);
         single_image.sop_instance_uid = Some("1.2.3".to_string());
@@ -4318,18 +4486,16 @@ mod tests {
     #[test]
     fn has_available_overlay_counts_required_sr_overlay() {
         let mut image = DicomImage::test_stub_with_mono_frames(None, 1);
-        image.sr_overlay = Some(SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 2.0,
-                    y: 3.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: None,
-                rendering_intent: SrRenderingIntent::PresentationRequired,
-                cad_operating_point: Some(2.0),
-            }],
-        });
+        image.sr_overlay = Some(test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 2.0,
+                y: 3.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: None,
+            rendering_intent: SrRenderingIntent::PresentationRequired,
+            cad_operating_point: Some(2.0),
+        }]));
         let app = DicomViewerApp {
             image: Some(image),
             ..Default::default()
@@ -4341,18 +4507,16 @@ mod tests {
     #[test]
     fn has_available_overlay_ignores_optional_sr_overlay() {
         let mut image = DicomImage::test_stub(None);
-        image.sr_overlay = Some(SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 2.0,
-                    y: 3.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: None,
-                rendering_intent: SrRenderingIntent::PresentationOptional,
-                cad_operating_point: Some(2.0),
-            }],
-        });
+        image.sr_overlay = Some(test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 2.0,
+                y: 3.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: None,
+            rendering_intent: SrRenderingIntent::PresentationOptional,
+            cad_operating_point: Some(2.0),
+        }]));
         let app = DicomViewerApp {
             image: Some(image),
             ..Default::default()
@@ -4564,18 +4728,16 @@ mod tests {
     #[test]
     fn overlay_target_frames_include_required_sr_overlay_and_follow_reverse_order() {
         let mut image = DicomImage::test_stub_with_mono_frames_and_reverse(None, 4, true);
-        image.sr_overlay = Some(SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 1.0,
-                    y: 1.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: Some(vec![1, 4]),
-                rendering_intent: SrRenderingIntent::PresentationRequired,
-                cad_operating_point: Some(1.0),
-            }],
-        });
+        image.sr_overlay = Some(test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 1.0,
+                y: 1.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: Some(vec![1, 4]),
+            rendering_intent: SrRenderingIntent::PresentationRequired,
+            cad_operating_point: Some(1.0),
+        }]));
 
         assert_eq!(DicomViewerApp::overlay_target_frames(&image, 4), vec![0, 3]);
     }
@@ -6255,18 +6417,16 @@ mod tests {
         let ctx = egui::Context::default();
         let mut cached_image = DicomImage::test_stub_with_mono_frames(None, 1);
         cached_image.sop_instance_uid = Some("1.2.3".to_string());
-        let sr_overlay = SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 6.0,
-                    y: 7.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: None,
-                rendering_intent: SrRenderingIntent::PresentationRequired,
-                cad_operating_point: Some(1.0),
-            }],
-        };
+        let sr_overlay = test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 6.0,
+                y: 7.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: None,
+            rendering_intent: SrRenderingIntent::PresentationRequired,
+            cad_operating_point: Some(1.0),
+        }]);
         let image_path = test_meta("cached-image.dcm");
         let mut app = DicomViewerApp {
             pending_sr_overlays: HashMap::from([("1.2.3".to_string(), sr_overlay)]),
@@ -6371,18 +6531,16 @@ mod tests {
             y: 2.0,
             units: GspsUnits::Pixel,
         }]);
-        let existing_sr = SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 3.0,
-                    y: 4.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: None,
-                rendering_intent: SrRenderingIntent::PresentationRequired,
-                cad_operating_point: Some(1.0),
-            }],
-        };
+        let existing_sr = test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 3.0,
+                y: 4.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: None,
+            rendering_intent: SrRenderingIntent::PresentationRequired,
+            cad_operating_point: Some(1.0),
+        }]);
         let mut app = DicomViewerApp {
             history_preload_receiver: Some(rx),
             history_preload_queue: VecDeque::from([HistoryPreloadJob::StructuredReport(
@@ -6423,35 +6581,31 @@ mod tests {
             y: 2.0,
             units: GspsUnits::Pixel,
         }]);
-        let existing_sr = SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 3.0,
-                    y: 4.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: None,
-                rendering_intent: SrRenderingIntent::PresentationRequired,
-                cad_operating_point: Some(1.0),
-            }],
-        };
+        let existing_sr = test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 3.0,
+                y: 4.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: None,
+            rendering_intent: SrRenderingIntent::PresentationRequired,
+            cad_operating_point: Some(1.0),
+        }]);
         let prepared_gsps = GspsOverlay::from_graphics(vec![GspsGraphic::Polyline {
             points: vec![(0.0, 0.0), (1.0, 1.0)],
             units: GspsUnits::Display,
             closed: false,
         }]);
-        let prepared_sr = SrOverlay {
-            graphics: vec![SrOverlayGraphic {
-                graphic: GspsGraphic::Point {
-                    x: 5.0,
-                    y: 6.0,
-                    units: GspsUnits::Pixel,
-                },
-                referenced_frames: Some(vec![1]),
-                rendering_intent: SrRenderingIntent::PresentationRequired,
-                cad_operating_point: Some(2.0),
-            }],
-        };
+        let prepared_sr = test_sr_overlay_with_graphics(vec![SrOverlayGraphic {
+            graphic: GspsGraphic::Point {
+                x: 5.0,
+                y: 6.0,
+                units: GspsUnits::Pixel,
+            },
+            referenced_frames: Some(vec![1]),
+            rendering_intent: SrRenderingIntent::PresentationRequired,
+            cad_operating_point: Some(2.0),
+        }]);
         let mut app = DicomViewerApp {
             dicomweb_active_group_expected: Some(1),
             dicomweb_active_group_paths: vec![test_meta("active-image.dcm")],
