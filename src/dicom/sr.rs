@@ -59,7 +59,9 @@ pub struct SrOverlayGraphic {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SrOverlayLabel {
+    /// Anchor position in the coordinate space described by `units`.
     pub anchor: (f32, f32),
+    pub units: GspsUnits,
     pub lines: Vec<String>,
     pub referenced_frames: Option<Vec<usize>>,
     pub rendering_intent: SrRenderingIntent,
@@ -168,6 +170,7 @@ struct ReferencedImageTarget {
 struct SrSpatialCoordinates {
     graphic_type: String,
     points: Vec<(f32, f32)>,
+    units: GspsUnits,
 }
 
 #[derive(Debug, Clone)]
@@ -504,7 +507,7 @@ fn collect_mammography_cad_overlays(
                     continue;
                 }
 
-                let Some(anchor) =
+                let Some((anchor, units)) =
                     preferred_sr_overlay_label_anchor(&geometry_nodes, image_index, reference)
                 else {
                     continue;
@@ -516,6 +519,7 @@ fn collect_mammography_cad_overlays(
 
                 overlay.labels.push(SrOverlayLabel {
                     anchor,
+                    units,
                     lines,
                     referenced_frames: reference.referenced_frames.clone(),
                     rendering_intent,
@@ -560,6 +564,18 @@ fn referenced_image_target_from_sr_item(item: &InMemDicomObject) -> Option<Refer
     })
 }
 
+fn read_graphic_annotation_units(item: &InMemDicomObject) -> GspsUnits {
+    const GRAPHIC_ANNOTATION_UNITS: Tag = Tag(0x0070, 0x0005);
+
+    match read_item_string(item, GRAPHIC_ANNOTATION_UNITS)
+        .map(|value| value.to_ascii_uppercase())
+        .as_deref()
+    {
+        Some("DISPLAY") => GspsUnits::Display,
+        _ => GspsUnits::Pixel,
+    }
+}
+
 fn parse_spatial_coordinates(item: &InMemDicomObject) -> Option<SrSpatialCoordinates> {
     const GRAPHIC_DATA: Tag = Tag(0x0070, 0x0022);
     const GRAPHIC_TYPE: Tag = Tag(0x0070, 0x0023);
@@ -576,13 +592,14 @@ fn parse_spatial_coordinates(item: &InMemDicomObject) -> Option<SrSpatialCoordin
             .unwrap_or_else(|| "POLYLINE".to_string())
             .to_ascii_uppercase(),
         points,
+        units: read_graphic_annotation_units(item),
     })
 }
 
 fn graphics_from_spatial_coordinates(
     spatial_coordinates: &SrSpatialCoordinates,
 ) -> Vec<GspsGraphic> {
-    let units = GspsUnits::Pixel;
+    let units = spatial_coordinates.units;
 
     match spatial_coordinates.graphic_type.as_str() {
         "POINT" | "MULTIPOINT" => spatial_coordinates
@@ -710,7 +727,7 @@ fn code_display(code: &SrCode) -> Option<&str> {
     code.meaning.as_deref().or(code.value.as_deref())
 }
 
-fn sr_overlay_label_anchor(node: &SrIndexedNode) -> Option<(f32, f32)> {
+fn sr_overlay_label_anchor(node: &SrIndexedNode) -> Option<((f32, f32), GspsUnits)> {
     let spatial_coordinates = node.spatial_coordinates.as_ref()?;
     if spatial_coordinates.points.is_empty() {
         return None;
@@ -719,7 +736,11 @@ fn sr_overlay_label_anchor(node: &SrIndexedNode) -> Option<(f32, f32)> {
     if spatial_coordinates.graphic_type == "POINT"
         || spatial_coordinates.graphic_type == "MULTIPOINT"
     {
-        return spatial_coordinates.points.first().copied();
+        return spatial_coordinates
+            .points
+            .first()
+            .copied()
+            .map(|anchor| (anchor, spatial_coordinates.units));
     }
 
     let min_x = spatial_coordinates
@@ -732,14 +753,14 @@ fn sr_overlay_label_anchor(node: &SrIndexedNode) -> Option<(f32, f32)> {
         .iter()
         .map(|(_, y)| *y)
         .fold(f32::INFINITY, f32::min);
-    (min_x.is_finite() && min_y.is_finite()).then_some((min_x, min_y))
+    (min_x.is_finite() && min_y.is_finite()).then_some(((min_x, min_y), spatial_coordinates.units))
 }
 
 fn preferred_sr_overlay_label_anchor(
     geometry_nodes: &[&SrIndexedNode],
     image_index: &HashMap<Vec<usize>, ReferencedImageTarget>,
     reference: &ReferencedImageTarget,
-) -> Option<(f32, f32)> {
+) -> Option<((f32, f32), GspsUnits)> {
     geometry_nodes
         .iter()
         .copied()
@@ -828,14 +849,11 @@ fn format_sr_overlay_number(value: f32) -> String {
     if (value.fract()).abs() < 0.01 {
         format!("{value:.0}")
     } else {
-        let mut output = format!("{value:.1}");
-        while output.ends_with('0') {
-            output.pop();
-        }
-        if output.ends_with('.') {
-            output.pop();
-        }
+        let output = format!("{value:.1}");
         output
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 
@@ -1125,25 +1143,31 @@ mod tests {
         )
     }
 
-    fn scoord_content_item(
+    fn scoord_content_item_with_units(
         relationship_type: Option<&str>,
         concept_name: &str,
         graphic_type: &str,
         graphic_data: &[f32],
         referenced_item_path: &[usize],
+        units: Option<&str>,
     ) -> InMemDicomObject {
+        let mut value_elements = Vec::new();
+        if let Some(units) = units {
+            value_elements.push(DataElement::new(Tag(0x0070, 0x0005), VR::CS, units));
+        }
+        value_elements.extend([
+            DataElement::new(Tag(0x0070, 0x0023), VR::CS, graphic_type),
+            DataElement::new(
+                Tag(0x0070, 0x0022),
+                VR::FL,
+                PrimitiveValue::F32(graphic_data.iter().copied().collect()),
+            ),
+        ]);
         content_item(
             "SCOORD",
             relationship_type,
             Some(concept_name),
-            vec![
-                DataElement::new(Tag(0x0070, 0x0023), VR::CS, graphic_type),
-                DataElement::new(
-                    Tag(0x0070, 0x0022),
-                    VR::FL,
-                    PrimitiveValue::F32(graphic_data.iter().copied().collect()),
-                ),
-            ],
+            value_elements,
             vec![referenced_item_identifier_item(referenced_item_path)],
         )
     }
@@ -1153,6 +1177,24 @@ mod tests {
         referenced_frames: Option<&[i32]>,
         sop_class_uid: &str,
     ) -> DefaultDicomObject {
+        mammography_cad_sr_object_with_context(
+            rendering_intent,
+            referenced_frames,
+            sop_class_uid,
+            "test-side-omega",
+            "test-view-sigma",
+            None,
+        )
+    }
+
+    fn mammography_cad_sr_object_with_context(
+        rendering_intent: &str,
+        referenced_frames: Option<&[i32]>,
+        sop_class_uid: &str,
+        laterality: &str,
+        view: &str,
+        graphic_units: Option<&str>,
+    ) -> DefaultDicomObject {
         let image_library = content_item(
             "CONTAINER",
             None,
@@ -1161,8 +1203,8 @@ mod tests {
             vec![image_library_reference_item(
                 "1.2.3.4",
                 referenced_frames,
-                "test-side-omega",
-                "test-view-sigma",
+                laterality,
+                view,
             )],
         );
         let finding = content_item(
@@ -1182,19 +1224,21 @@ mod tests {
                 ),
                 numeric_content_item(Some("HAS CONCEPT MOD"), "CAD Operating Point", "2"),
                 numeric_content_item(Some("HAS PROPERTIES"), "Certainty of Finding", "1234.5"),
-                scoord_content_item(
+                scoord_content_item_with_units(
                     Some("HAS PROPERTIES"),
                     "Center",
                     "POINT",
                     &[16.0, 24.0],
                     &[1, 1, 1],
+                    graphic_units,
                 ),
-                scoord_content_item(
+                scoord_content_item_with_units(
                     Some("HAS PROPERTIES"),
                     "Outline",
                     "POLYLINE",
                     &[10.0, 20.0, 20.0, 30.0, 30.0, 20.0],
                     &[1, 1, 1],
+                    graphic_units,
                 ),
             ],
         );
@@ -1286,6 +1330,59 @@ mod tests {
             vec!["TEST-FINDING-ALPHA".to_string(), "1234.5%".to_string()]
         );
         assert_eq!(overlay.labels[0].anchor, (16.0, 24.0));
+        assert_eq!(overlay.labels[0].units, GspsUnits::Pixel);
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_formats_full_mammography_context_label() {
+        let sr_obj = mammography_cad_sr_object_with_context(
+            "Presentation Required",
+            None,
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+            "Left Breast",
+            "Cranio-caudal",
+            None,
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve image library reference");
+
+        assert_eq!(
+            overlay.labels[0].lines,
+            vec![
+                "TEST-FINDING-ALPHA".to_string(),
+                "L CC | 1234.5%".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_preserves_display_units_for_geometry_and_labels() {
+        let sr_obj = mammography_cad_sr_object_with_context(
+            "Presentation Required",
+            None,
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+            "Left Breast",
+            "Cranio-caudal",
+            Some("DISPLAY"),
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve image library reference");
+
+        for graphic in &overlay.graphics {
+            match &graphic.graphic {
+                GspsGraphic::Point { units, .. } | GspsGraphic::Polyline { units, .. } => {
+                    assert_eq!(*units, GspsUnits::Display);
+                }
+            }
+        }
+        assert_eq!(overlay.labels[0].anchor, (16.0, 24.0));
+        assert_eq!(overlay.labels[0].units, GspsUnits::Display);
     }
 
     #[test]

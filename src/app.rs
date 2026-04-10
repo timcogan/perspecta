@@ -1351,28 +1351,63 @@ impl DicomViewerApp {
         }
     }
 
+    fn sr_overlay_label_rect(
+        anchor: egui::Pos2,
+        label_size: egui::Vec2,
+        image_rect: egui::Rect,
+    ) -> egui::Rect {
+        let clamped_size = label_size.min(image_rect.size());
+        let preferred = egui::pos2(
+            anchor.x + SR_OVERLAY_LABEL_OFFSET_X,
+            anchor.y - clamped_size.y - SR_OVERLAY_LABEL_OFFSET_Y,
+        );
+        let max_x = (image_rect.right() - clamped_size.x).max(image_rect.left());
+        let max_y = (image_rect.bottom() - clamped_size.y).max(image_rect.top());
+        let final_min = egui::pos2(
+            preferred.x.clamp(image_rect.left(), max_x),
+            preferred.y.clamp(image_rect.top(), max_y),
+        );
+        egui::Rect::from_min_size(final_min, clamped_size)
+    }
+
+    fn sr_overlay_label_padding(label_size: egui::Vec2) -> egui::Vec2 {
+        egui::vec2(
+            SR_OVERLAY_LABEL_PADDING_X.min(label_size.x * 0.5),
+            SR_OVERLAY_LABEL_PADDING_Y.min(label_size.y * 0.5),
+        )
+    }
+
     fn draw_sr_overlay_label(
         painter: &egui::Painter,
         image_rect: egui::Rect,
         image: &DicomImage,
         label: &SrOverlayLabel,
     ) {
-        if label.lines.is_empty() {
+        if label.lines.is_empty() || image_rect.width() <= 0.0 || image_rect.height() <= 0.0 {
             return;
         }
 
         let anchor = Self::gsps_point_to_screen(
             label.anchor,
-            GspsUnits::Pixel,
+            label.units,
             image_rect,
             image.width,
             image.height,
         );
+        let available_size = image_rect.size();
         let font_id = egui::FontId::monospace(SR_OVERLAY_LABEL_FONT_SIZE);
+        let wrap_width = (available_size.x - SR_OVERLAY_LABEL_PADDING_X * 2.0).max(1.0);
         let galleys = label
             .lines
             .iter()
-            .map(|line| painter.layout_no_wrap(line.clone(), font_id.clone(), PERSPECTA_BRAND_BLUE))
+            .map(|line| {
+                painter.layout(
+                    line.clone(),
+                    font_id.clone(),
+                    PERSPECTA_BRAND_BLUE,
+                    wrap_width,
+                )
+            })
             .collect::<Vec<_>>();
         let max_width = galleys
             .iter()
@@ -1384,28 +1419,16 @@ impl DicomViewerApp {
             max_width + SR_OVERLAY_LABEL_PADDING_X * 2.0,
             text_height + SR_OVERLAY_LABEL_PADDING_Y * 2.0,
         );
-
-        let preferred = egui::pos2(
-            anchor.x + SR_OVERLAY_LABEL_OFFSET_X,
-            anchor.y - label_size.y - SR_OVERLAY_LABEL_OFFSET_Y,
-        );
-        let max_x = (image_rect.right() - label_size.x).max(image_rect.left());
-        let max_y = (image_rect.bottom() - label_size.y).max(image_rect.top());
-        let label_rect = egui::Rect::from_min_size(
-            egui::pos2(
-                preferred.x.clamp(image_rect.left(), max_x),
-                preferred.y.clamp(image_rect.top(), max_y),
-            ),
-            label_size,
-        );
+        let label_rect = Self::sr_overlay_label_rect(anchor, label_size, image_rect);
+        let text_padding = Self::sr_overlay_label_padding(label_rect.size());
 
         painter.rect_filled(label_rect, 4.0, egui::Color32::from_black_alpha(176));
 
-        let mut text_pos =
-            label_rect.min + egui::vec2(SR_OVERLAY_LABEL_PADDING_X, SR_OVERLAY_LABEL_PADDING_Y);
+        let text_painter = painter.with_clip_rect(label_rect);
+        let mut text_pos = label_rect.min + text_padding;
         for galley in galleys {
             let galley_height = galley.size().y;
-            painter.galley(text_pos, galley, PERSPECTA_BRAND_BLUE);
+            text_painter.galley(text_pos, galley, PERSPECTA_BRAND_BLUE);
             text_pos.y += SR_OVERLAY_LABEL_LINE_GAP + galley_height;
         }
     }
@@ -3974,6 +3997,7 @@ mod tests {
                 }],
                 vec![SrOverlayLabel {
                     anchor: (1.0, 2.0),
+                    units: GspsUnits::Pixel,
                     lines: vec!["stub-finding-a".to_string()],
                     referenced_frames: None,
                     rendering_intent: SrRenderingIntent::PresentationRequired,
@@ -3996,6 +4020,7 @@ mod tests {
                     }],
                     vec![SrOverlayLabel {
                         anchor: (3.0, 4.0),
+                        units: GspsUnits::Pixel,
                         lines: vec!["stub-finding-b".to_string(), "stub-meta-b".to_string()],
                         referenced_frames: None,
                         rendering_intent: SrRenderingIntent::PresentationRequired,
@@ -4017,6 +4042,7 @@ mod tests {
                     }],
                     vec![SrOverlayLabel {
                         anchor: (5.0, 6.0),
+                        units: GspsUnits::Pixel,
                         lines: vec!["stub-finding-c".to_string(), "stub-meta-c".to_string()],
                         referenced_frames: Some(vec![1]),
                         rendering_intent: SrRenderingIntent::PresentationRequired,
@@ -4047,6 +4073,21 @@ mod tests {
             destination.get("9.9.9").map(|overlay| overlay.labels.len()),
             Some(1)
         );
+    }
+
+    #[test]
+    fn sr_overlay_label_rect_clamps_to_image_bounds_when_label_is_oversized() {
+        let image_rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(40.0, 30.0));
+        let rect = DicomViewerApp::sr_overlay_label_rect(
+            egui::pos2(12.0, 24.0),
+            egui::vec2(100.0, 80.0),
+            image_rect,
+        );
+
+        assert_approx_eq(rect.left(), image_rect.left());
+        assert_approx_eq(rect.top(), image_rect.top());
+        assert_approx_eq(rect.width(), image_rect.width());
+        assert_approx_eq(rect.height(), image_rect.height());
     }
 
     #[test]
