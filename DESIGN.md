@@ -36,7 +36,7 @@ Its primary purpose is consistency during development, not full architecture cov
 6. Mixed image+SR selections MUST stage SR documents as separate history entries, not image viewports.
 7. Supplemental overlay visibility MUST default to off and MUST be user-toggled (`G`).
 8. GSPS overlays MUST attach by SOP Instance UID match only.
-9. Mammography CAD SR overlays MUST attach by direct referenced-image SOP Instance UID match only, and only `Presentation Required` findings participate in render/navigation.
+9. Mammography CAD SR overlays MUST attach by direct referenced-image SOP Instance UID match only. Only `Presentation Required` vector findings participate in render/navigation. Visible SR geometry may carry a short text label derived from the same finding metadata (for example finding meaning, laterality/view, and certainty). Non-geometric descriptive SR content remains available through the document view only.
 10. Parametric Map overlays MUST attach only when they carry explicit source-image SOP Instance UID references; no geometry-only or study/series heuristics are allowed.
 11. Parametric Map overlays MUST render beneath GSPS and Mammography CAD SR vector overlays.
 12. `open_group` MUST be validated/clamped before use.

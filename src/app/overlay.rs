@@ -39,6 +39,9 @@ impl DicomViewerApp {
                 existing_overlay
                     .graphics
                     .extend(overlay.graphics.iter().cloned());
+                existing_overlay
+                    .labels
+                    .extend(overlay.labels.iter().cloned());
             } else {
                 destination.insert(sop_uid.clone(), overlay.clone());
             }
@@ -228,11 +231,9 @@ impl DicomViewerApp {
             if self.authoritative_sr_overlay_keys.contains(&sop_uid) || overlay.is_empty() {
                 continue;
             }
-            self.pending_sr_overlays
-                .entry(sop_uid)
-                .or_default()
-                .graphics
-                .append(&mut overlay.graphics);
+            let entry = self.pending_sr_overlays.entry(sop_uid).or_default();
+            entry.graphics.append(&mut overlay.graphics);
+            entry.labels.append(&mut overlay.labels);
             merged_any = true;
         }
         if !merged_any {
