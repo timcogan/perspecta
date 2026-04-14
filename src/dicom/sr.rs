@@ -459,8 +459,12 @@ fn collect_image_references(
 }
 
 fn hydrate_image_context(target: &mut ReferencedImageTarget, node: &SrIndexedNode) {
-    target.laterality = node.acquisition_context_value("Image Laterality");
-    target.view = node.acquisition_context_value("Image View");
+    if let Some(laterality) = node.acquisition_context_value("Image Laterality") {
+        target.laterality = Some(laterality);
+    }
+    if let Some(view) = node.acquisition_context_value("Image View") {
+        target.view = Some(view);
+    }
 }
 
 fn same_image_frame(a: &ReferencedImageTarget, b: &ReferencedImageTarget) -> bool {
@@ -519,12 +523,12 @@ fn collect_mammography_cad_overlays(
                     continue;
                 }
 
-                let Some((anchor, units)) =
+                let Some((selected_target, anchor, units)) =
                     preferred_sr_overlay_label_anchor(&geometry_nodes, image_index, &reference)
                 else {
                     continue;
                 };
-                let lines = sr_overlay_label_lines(node, &reference);
+                let lines = sr_overlay_label_lines(node, &selected_target);
                 if lines.is_empty() {
                     continue;
                 }
@@ -772,25 +776,29 @@ fn preferred_sr_overlay_label_anchor(
     geometry_nodes: &[&SrIndexedNode],
     image_index: &HashMap<Vec<usize>, ReferencedImageTarget>,
     reference: &ReferencedImageTarget,
-) -> Option<((f32, f32), GspsUnits)> {
-    geometry_nodes
+) -> Option<(ReferencedImageTarget, (f32, f32), GspsUnits)> {
+    let matching_targets = geometry_nodes
         .iter()
         .copied()
-        .filter(|node| {
-            node.selected_image_target(image_index)
-                .is_some_and(|target| same_image_frame(&target, reference))
+        .filter_map(|node| {
+            let target = node.selected_image_target(image_index)?;
+            same_image_frame(&target, reference).then_some((node, target))
         })
-        .find(|node| node.concept_name.matches_meaning("Center"))
-        .and_then(sr_overlay_label_anchor)
+        .collect::<Vec<_>>();
+
+    matching_targets
+        .iter()
+        .find_map(|(node, target)| {
+            if node.concept_name.matches_meaning("Center") {
+                sr_overlay_label_anchor(node).map(|(anchor, units)| (target.clone(), anchor, units))
+            } else {
+                None
+            }
+        })
         .or_else(|| {
-            geometry_nodes
-                .iter()
-                .copied()
-                .filter(|node| {
-                    node.selected_image_target(image_index)
-                        .is_some_and(|target| same_image_frame(&target, reference))
-                })
-                .find_map(sr_overlay_label_anchor)
+            matching_targets.iter().find_map(|(node, target)| {
+                sr_overlay_label_anchor(node).map(|(anchor, units)| (target.clone(), anchor, units))
+            })
         })
 }
 
@@ -1082,6 +1090,26 @@ mod tests {
             VR::UL,
             PrimitiveValue::U32(path.iter().map(|part| *part as u32).collect()),
         )])
+    }
+
+    fn indexed_acquisition_context_item(concept_name: &str, coded_value: &str) -> SrIndexedNode {
+        SrIndexedNode {
+            path: Vec::new(),
+            relationship_type: Some("HAS ACQ CONTEXT".to_string()),
+            referenced_content_item_identifier: None,
+            concept_name: SrCode {
+                value: None,
+                meaning: Some(concept_name.to_string()),
+            },
+            coded_value: SrCode {
+                value: None,
+                meaning: Some(coded_value.to_string()),
+            },
+            numeric_value: None,
+            image_reference: None,
+            spatial_coordinates: None,
+            children: Vec::new(),
+        }
     }
 
     fn content_item(
@@ -1573,6 +1601,13 @@ mod tests {
         assert_eq!(overlay.graphics.len(), 2);
         assert_eq!(overlay.labels.len(), 1);
         assert_eq!(overlay.labels[0].anchor, (16.0, 24.0));
+        assert_eq!(
+            overlay.labels[0].lines,
+            vec![
+                "TEST-FINDING-ALPHA".to_string(),
+                "L CC | 1234.5%".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -1600,6 +1635,55 @@ mod tests {
         }
         assert_eq!(overlay.labels[0].anchor, (16.0, 24.0));
         assert_eq!(overlay.labels[0].units, GspsUnits::Display);
+    }
+
+    #[test]
+    fn hydrate_image_context_preserves_existing_fields_when_node_omits_them() {
+        let mut target = ReferencedImageTarget {
+            sop_instance_uid: "1.2.3.4".to_string(),
+            referenced_frames: Some(vec![1]),
+            laterality: Some("Left Breast".to_string()),
+            view: Some("Cranio-caudal".to_string()),
+        };
+        let laterality_only = SrIndexedNode {
+            path: Vec::new(),
+            relationship_type: None,
+            referenced_content_item_identifier: None,
+            concept_name: SrCode::default(),
+            coded_value: SrCode::default(),
+            numeric_value: None,
+            image_reference: None,
+            spatial_coordinates: None,
+            children: vec![indexed_acquisition_context_item(
+                "Image Laterality",
+                "Right Breast",
+            )],
+        };
+
+        hydrate_image_context(&mut target, &laterality_only);
+
+        assert_eq!(target.laterality.as_deref(), Some("Right Breast"));
+        assert_eq!(target.view.as_deref(), Some("Cranio-caudal"));
+
+        let view_only = SrIndexedNode {
+            path: Vec::new(),
+            relationship_type: None,
+            referenced_content_item_identifier: None,
+            concept_name: SrCode::default(),
+            coded_value: SrCode::default(),
+            numeric_value: None,
+            image_reference: None,
+            spatial_coordinates: None,
+            children: vec![indexed_acquisition_context_item(
+                "Image View",
+                "Mediolateral-oblique",
+            )],
+        };
+
+        hydrate_image_context(&mut target, &view_only);
+
+        assert_eq!(target.laterality.as_deref(), Some("Right Breast"));
+        assert_eq!(target.view.as_deref(), Some("Mediolateral-oblique"));
     }
 
     #[test]
