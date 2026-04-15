@@ -224,7 +224,9 @@ impl SrIndexedNode {
             }
             if let Some(reference_path) = child.referenced_content_item_identifier.as_ref() {
                 if let Some(reference) = image_index.get(reference_path) {
-                    return Some(reference.clone());
+                    let mut reference = reference.clone();
+                    hydrate_image_context(&mut reference, child);
+                    return Some(reference);
                 }
             }
         }
@@ -1684,6 +1686,57 @@ mod tests {
 
         assert_eq!(target.laterality.as_deref(), Some("Right Breast"));
         assert_eq!(target.view.as_deref(), Some("Mediolateral-oblique"));
+    }
+
+    #[test]
+    fn selected_image_target_hydrates_referenced_content_item_context_on_clone() {
+        let geometry_node = SrIndexedNode {
+            path: Vec::new(),
+            relationship_type: Some("HAS PROPERTIES".to_string()),
+            referenced_content_item_identifier: None,
+            concept_name: SrCode::default(),
+            coded_value: SrCode::default(),
+            numeric_value: None,
+            image_reference: None,
+            spatial_coordinates: None,
+            children: vec![SrIndexedNode {
+                path: Vec::new(),
+                relationship_type: None,
+                referenced_content_item_identifier: Some(vec![1, 2, 3]),
+                concept_name: SrCode::default(),
+                coded_value: SrCode::default(),
+                numeric_value: None,
+                image_reference: None,
+                spatial_coordinates: None,
+                children: vec![
+                    indexed_acquisition_context_item("Image Laterality", "Left Breast"),
+                    indexed_acquisition_context_item("Image View", "Cranio-caudal"),
+                ],
+            }],
+        };
+        let mut image_index = HashMap::new();
+        image_index.insert(
+            vec![1, 2, 3],
+            ReferencedImageTarget {
+                sop_instance_uid: "1.2.3.4".to_string(),
+                referenced_frames: Some(vec![1]),
+                laterality: None,
+                view: None,
+            },
+        );
+
+        let target = geometry_node
+            .selected_image_target(&image_index)
+            .expect("geometry node should resolve referenced image target");
+
+        assert_eq!(target.laterality.as_deref(), Some("Left Breast"));
+        assert_eq!(target.view.as_deref(), Some("Cranio-caudal"));
+
+        let indexed_target = image_index
+            .get(&vec![1, 2, 3])
+            .expect("image index should retain referenced target");
+        assert_eq!(indexed_target.laterality, None);
+        assert_eq!(indexed_target.view, None);
     }
 
     #[test]
