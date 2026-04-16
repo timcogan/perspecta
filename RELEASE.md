@@ -1,7 +1,8 @@
 # Release Process
 
 This project uses Semantic Versioning and publishes binaries via GitHub Actions.
-The release workflow triggers only on tags that match `vX.Y.Z` (no suffixes).
+The release workflow watches for a version bump in `Cargo.toml` on `main` or
+`master`, then creates the `vX.Y.Z` tag and GitHub Release automatically.
 
 ## Versioning Rules (SemVer)
 
@@ -15,12 +16,15 @@ The release workflow triggers only on tags that match `vX.Y.Z` (no suffixes).
    - `version = "X.Y.Z"`
 2. Commit the release change:
    - Example message: `chore(release): vX.Y.Z`
-3. Create an annotated tag:
-   - `git tag -a vX.Y.Z -m "vX.Y.Z"`
-4. Push the commit and tag:
-   - `git push origin master --tags`
+3. Push the commit to `main` or `master`.
+4. GitHub Actions will:
+   - detect that the package version changed
+   - reserve `vX.Y.Z` for cargo-dist
+   - create the GitHub Release and corresponding tag automatically
 
 ## Notes
 
-- The CI release workflow only triggers on tags that match `vX.Y.Z` exactly.
+- Automatic publishing only happens when the version changes and the
+  corresponding `vX.Y.Z` tag does not already exist.
+- Release automation only supports plain `X.Y.Z` versions (no suffixes).
 - `dist-workspace.toml` does not need a version bump for application releases; it only changes when the dist tool version or release targets change.
