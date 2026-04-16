@@ -16,6 +16,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version:
+    name: Version Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate release version format
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_version="$(
+            awk '
+              /^\[package\]$/ { in_package = 1; next }
+              /^\[/ { in_package = 0 }
+              in_package && /^version = / { print $3; exit }
+            ' Cargo.toml | tr -d '"'
+          )"
+
+          [[ -n "$current_version" ]] || {
+            echo "failed to determine package version from Cargo.toml" >&2
+            exit 1
+          }
+
+          [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release automation only supports Cargo.toml versions in X.Y.Z format, found: $current_version" >&2
+            exit 1
+          }
+
   rust:
     name: Rust Checks
     runs-on: ubuntu-latest
@@ -27,7 +58,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
 

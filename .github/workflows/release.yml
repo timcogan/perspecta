@@ -8,12 +8,15 @@ permissions:
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches:
       - main
       - master
     paths:
       - Cargo.toml
+      - dist-workspace.toml
+      - .github/workflows/release.yml
 
 concurrency:
   group: dist-${{ github.ref }}
@@ -40,6 +43,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -56,36 +60,56 @@ jobs:
             exit 1
           }
 
+          [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release automation only supports Cargo.toml versions in X.Y.Z format, found: $current_version" >&2
+            exit 1
+          }
+
           tag="v$current_version"
           publishing=false
           previous_version=""
+          release_state="missing"
 
-          if [[ "$EVENT_NAME" == "push" ]]; then
-            if [[ -n "${BEFORE_SHA:-}" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
-              if previous_manifest="$(git show "$BEFORE_SHA:Cargo.toml" 2>/dev/null)"; then
-                previous_version="$(
-                  printf '%s\n' "$previous_manifest" | awk '
-                    /^\[package\]$/ { in_package = 1; next }
-                    /^\[/ { in_package = 0 }
-                    in_package && /^version = / { print $3; exit }
-                  ' | tr -d '"'
-                )"
-              fi
+          if gh release view "$tag" --json isDraft > release-state.json 2>/dev/null; then
+            if jq -e '.isDraft' release-state.json > /dev/null; then
+              release_state="draft"
+            else
+              release_state="published"
             fi
+          elif git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+            release_state="tag-only"
+          fi
 
-            if [[ "$previous_version" != "$current_version" ]]; then
-              [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-                echo "release automation only supports Cargo.toml versions in X.Y.Z format, found: $current_version" >&2
-                exit 1
-              }
+          case "$EVENT_NAME" in
+            push)
+              if [[ -n "${BEFORE_SHA:-}" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+                if previous_manifest="$(git show "$BEFORE_SHA:Cargo.toml" 2>/dev/null)"; then
+                  previous_version="$(
+                    printf '%s\n' "$previous_manifest" | awk '
+                      /^\[package\]$/ { in_package = 1; next }
+                      /^\[/ { in_package = 0 }
+                      in_package && /^version = / { print $3; exit }
+                    ' | tr -d '"'
+                  )"
+                fi
+              fi
 
-              if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-                echo "tag $tag already exists; skipping publish"
+              if [[ "$previous_version" != "$current_version" ]]; then
+                if [[ "$release_state" == "published" ]]; then
+                  echo "release $tag already exists; skipping publish"
+                else
+                  publishing=true
+                fi
+              fi
+              ;;
+            workflow_dispatch)
+              if [[ "$release_state" == "published" ]]; then
+                echo "release $tag already exists; skipping publish"
               else
                 publishing=true
               fi
-            fi
-          fi
+              ;;
+          esac
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "tag_flag=--tag=$tag" >> "$GITHUB_OUTPUT"
