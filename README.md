@@ -30,7 +30,7 @@ Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`efra
 - Real-time window/level controls for grayscale workflows.
 - Multi-frame cine playback (`C` key or UI control).
 - GSPS (Grayscale Softcopy Presentation State) overlay support with manual toggle (`G` key, off by default).
-- Mammography CAD SR overlay support on matching images, with the same manual overlay workflow as GSPS.
+- Mammography CAD SR overlay support on matching images when the SR provides vector marks, with short finding text rendered alongside visible geometry.
 - DICOM Parametric Map support for local files, including heatmap overlay on matching source images and standalone opening when no explicit source match is present.
 - Structured Report (SR) DICOM support with a dedicated text/document view.
 - Live distance measurement with DICOM pixel spacing support when available (`mm`, fallback to `px`).
@@ -150,7 +150,7 @@ This writes a desktop entry under `~/.local/share/applications`.
 ## Keyboard Shortcuts
 
 - `C`: toggle cine mode
-- `G`: toggle image overlay (GSPS, Mammography CAD SR, or a matching Parametric Map, when available)
+- `G`: toggle image overlay (GSPS, Mammography CAD SR marks, or a matching Parametric Map, when available)
 - `N`: jump to the next image/frame with an overlay
 - `V`: open or close the full metadata field popup for the active object
 - `Esc`: exit live measurement mode; if no measurement is active, close the full metadata popup

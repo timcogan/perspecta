@@ -9,6 +9,8 @@ const MEASUREMENT_STROKE_WIDTH: f32 = 2.0;
 const MEASUREMENT_HANDLE_RADIUS: f32 = 4.0;
 const MEASUREMENT_LABEL_OFFSET_X: f32 = 8.0;
 const MEASUREMENT_LABEL_OFFSET_Y: f32 = 8.0;
+const MEASUREMENT_LABEL_PADDING_X: f32 = 4.0;
+const MEASUREMENT_LABEL_PADDING_Y: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MeasurementTarget {
@@ -177,13 +179,18 @@ impl DicomViewerApp {
         let label = measurement_label_text(*measurement, geometry);
         let font_id = FontId::monospace(12.0);
         let galley = painter.layout_no_wrap(label, font_id, MEASUREMENT_COLOR);
-        let label_rect = measurement_label_rect(start, end, galley.size(), painter.clip_rect());
+        let padded_size = galley.size()
+            + egui::vec2(
+                2.0 * MEASUREMENT_LABEL_PADDING_X,
+                2.0 * MEASUREMENT_LABEL_PADDING_Y,
+            );
+        let label_rect = measurement_label_rect(start, end, padded_size, painter.clip_rect());
+        painter.rect_filled(label_rect, 4.0, egui::Color32::from_black_alpha(176));
         painter.galley(
-            label_rect.min + egui::vec2(1.0, 1.0),
-            galley.clone(),
-            egui::Color32::BLACK,
+            label_rect.min + egui::vec2(MEASUREMENT_LABEL_PADDING_X, MEASUREMENT_LABEL_PADDING_Y),
+            galley,
+            MEASUREMENT_COLOR,
         );
-        painter.galley(label_rect.min, galley, MEASUREMENT_COLOR);
     }
 
     pub(super) fn update_measurement_cursor(
@@ -479,6 +486,40 @@ mod tests {
         assert_eq!(
             rect,
             egui::Rect::from_min_size(egui::pos2(11.0, 58.0), egui::vec2(30.0, 12.0))
+        );
+    }
+
+    #[test]
+    fn measurement_label_rect_preserves_padding_inside_clip() {
+        let clip_rect = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(40.0, 60.0));
+        let text_size = egui::vec2(30.0, 12.0);
+        let padded_size = text_size
+            + egui::vec2(
+                2.0 * MEASUREMENT_LABEL_PADDING_X,
+                2.0 * MEASUREMENT_LABEL_PADDING_Y,
+            );
+        let label_rect = measurement_label_rect(
+            egui::pos2(20.0, 20.0),
+            egui::pos2(3.0, 50.0),
+            padded_size,
+            clip_rect,
+        );
+        let text_rect = egui::Rect::from_min_size(
+            label_rect.min + egui::vec2(MEASUREMENT_LABEL_PADDING_X, MEASUREMENT_LABEL_PADDING_Y),
+            text_size,
+        );
+
+        assert!(label_rect.left() >= clip_rect.left());
+        assert!(label_rect.right() <= clip_rect.right());
+        assert!(label_rect.top() >= clip_rect.top());
+        assert!(label_rect.bottom() <= clip_rect.bottom());
+        assert!(text_rect.left() >= clip_rect.left());
+        assert!(text_rect.right() <= clip_rect.right());
+        assert!(text_rect.top() >= clip_rect.top());
+        assert!(text_rect.bottom() <= clip_rect.bottom());
+        assert_eq!(
+            text_rect.min - label_rect.min,
+            egui::vec2(MEASUREMENT_LABEL_PADDING_X, MEASUREMENT_LABEL_PADDING_Y)
         );
     }
 }

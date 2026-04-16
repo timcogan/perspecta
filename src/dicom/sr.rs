@@ -57,27 +57,34 @@ pub struct SrOverlayGraphic {
     pub cad_operating_point: Option<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SrOverlayLabel {
+    /// Anchor position in the coordinate space described by `units`.
+    pub anchor: (f32, f32),
+    pub units: GspsUnits,
+    pub lines: Vec<String>,
+    pub referenced_frames: Option<Vec<usize>>,
+    pub rendering_intent: SrRenderingIntent,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SrOverlay {
     pub graphics: Vec<SrOverlayGraphic>,
+    pub labels: Vec<SrOverlayLabel>,
 }
 
 impl SrOverlay {
     pub fn is_empty(&self) -> bool {
-        self.graphics.is_empty()
+        self.graphics.is_empty() && self.labels.is_empty()
     }
 
     pub fn graphics_for_frame(
         &self,
         frame_index: usize,
     ) -> impl Iterator<Item = &SrOverlayGraphic> + '_ {
-        let dicom_frame_number = frame_index.saturating_add(1);
-        self.graphics
-            .iter()
-            .filter(move |graphic| match graphic.referenced_frames.as_ref() {
-                Some(frames) => frames.contains(&dicom_frame_number),
-                None => true,
-            })
+        self.graphics.iter().filter(move |graphic| {
+            sr_overlay_applies_to_frame(graphic.referenced_frames.as_ref(), frame_index)
+        })
     }
 
     pub fn visible_graphics_for_frame(
@@ -90,6 +97,31 @@ impl SrOverlay {
                 .is_visible_in_v1()
                 .then_some(&graphic.graphic)
         })
+    }
+
+    pub fn labels_for_frame(
+        &self,
+        frame_index: usize,
+    ) -> impl Iterator<Item = &SrOverlayLabel> + '_ {
+        self.labels.iter().filter(move |label| {
+            sr_overlay_applies_to_frame(label.referenced_frames.as_ref(), frame_index)
+        })
+    }
+
+    pub fn visible_labels_for_frame(
+        &self,
+        frame_index: usize,
+    ) -> impl Iterator<Item = &SrOverlayLabel> + '_ {
+        self.labels_for_frame(frame_index)
+            .filter(|label| label.rendering_intent.is_visible_in_v1())
+    }
+}
+
+fn sr_overlay_applies_to_frame(referenced_frames: Option<&Vec<usize>>, frame_index: usize) -> bool {
+    let dicom_frame_number = frame_index.saturating_add(1);
+    match referenced_frames {
+        Some(frames) => frames.contains(&dicom_frame_number),
+        None => true,
     }
 }
 
@@ -130,12 +162,15 @@ impl SrCode {
 struct ReferencedImageTarget {
     sop_instance_uid: String,
     referenced_frames: Option<Vec<usize>>,
+    laterality: Option<String>,
+    view: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct SrSpatialCoordinates {
     graphic_type: String,
     points: Vec<(f32, f32)>,
+    units: GspsUnits,
 }
 
 #[derive(Debug, Clone)]
@@ -158,38 +193,19 @@ impl SrIndexedNode {
     }
 
     fn rendering_intent(&self) -> Option<SrRenderingIntent> {
-        self.children
-            .iter()
-            .filter(|child| {
-                child
-                    .relationship_type
-                    .as_deref()
-                    .is_some_and(|value| value.eq_ignore_ascii_case("HAS CONCEPT MOD"))
-                    && child.concept_name.matches_meaning("Rendering Intent")
-            })
+        self.concept_modifiers()
+            .filter(|child| child.concept_name.matches_meaning("Rendering Intent"))
             .find_map(|child| SrRenderingIntent::from_code(&child.coded_value))
     }
 
     fn cad_operating_point(&self) -> Option<f32> {
-        self.children
-            .iter()
-            .filter(|child| {
-                child
-                    .relationship_type
-                    .as_deref()
-                    .is_some_and(|value| value.eq_ignore_ascii_case("HAS CONCEPT MOD"))
-                    && child.concept_name.matches_meaning("CAD Operating Point")
-            })
+        self.concept_modifiers()
+            .filter(|child| child.concept_name.matches_meaning("CAD Operating Point"))
             .find_map(|child| child.numeric_value)
     }
 
     fn property_geometry_nodes<'a>(&'a self, nodes: &mut Vec<&'a SrIndexedNode>) {
-        for child in self.children.iter().filter(|child| {
-            child
-                .relationship_type
-                .as_deref()
-                .is_some_and(|value| value.eq_ignore_ascii_case("HAS PROPERTIES"))
-        }) {
+        for child in self.property_children() {
             if child.spatial_coordinates.is_some() {
                 nodes.push(child);
             }
@@ -200,18 +216,57 @@ impl SrIndexedNode {
     fn selected_image_target<'a>(
         &'a self,
         image_index: &'a HashMap<Vec<usize>, ReferencedImageTarget>,
-    ) -> Option<&'a ReferencedImageTarget> {
+    ) -> Option<ReferencedImageTarget> {
         for child in &self.children {
-            if let Some(reference) = child.image_reference.as_ref() {
+            if let Some(mut reference) = child.image_reference.clone() {
+                hydrate_image_context(&mut reference, child);
                 return Some(reference);
             }
             if let Some(reference_path) = child.referenced_content_item_identifier.as_ref() {
                 if let Some(reference) = image_index.get(reference_path) {
+                    let mut reference = reference.clone();
+                    hydrate_image_context(&mut reference, child);
                     return Some(reference);
                 }
             }
         }
         None
+    }
+
+    fn concept_modifiers(&self) -> impl Iterator<Item = &SrIndexedNode> {
+        self.children.iter().filter(|child| {
+            relationship_type_matches(child.relationship_type.as_deref(), "HAS CONCEPT MOD")
+        })
+    }
+
+    fn property_children(&self) -> impl Iterator<Item = &SrIndexedNode> {
+        self.children.iter().filter(|child| {
+            relationship_type_matches(child.relationship_type.as_deref(), "HAS PROPERTIES")
+        })
+    }
+
+    fn acquisition_context_children(&self) -> impl Iterator<Item = &SrIndexedNode> {
+        self.children.iter().filter(|child| {
+            relationship_type_matches(child.relationship_type.as_deref(), "HAS ACQ CONTEXT")
+        })
+    }
+
+    fn certainty_of_finding(&self) -> Option<f32> {
+        self.property_children()
+            .filter(|child| child.concept_name.matches_meaning("Certainty of Finding"))
+            .find_map(|child| child.numeric_value)
+    }
+
+    fn acquisition_context_value(&self, concept_name: &str) -> Option<String> {
+        self.acquisition_context_children()
+            .find(|child| child.concept_name.matches_meaning(concept_name))
+            .and_then(|child| {
+                child
+                    .coded_value
+                    .meaning
+                    .clone()
+                    .or_else(|| child.coded_value.value.clone())
+            })
     }
 }
 
@@ -284,7 +339,9 @@ pub(crate) fn parse_mammography_cad_sr_overlays(
         return HashMap::new();
     };
 
-    let nodes = build_indexed_nodes(items, &[]);
+    // SR content item identifiers are rooted at the document container, which is
+    // encoded in the dataset itself rather than inside ContentSequence.
+    let nodes = build_indexed_nodes(items, &[1]);
     let mut image_index = HashMap::new();
     collect_image_references(&nodes, &mut image_index);
 
@@ -395,11 +452,25 @@ fn collect_image_references(
     image_index: &mut HashMap<Vec<usize>, ReferencedImageTarget>,
 ) {
     for node in nodes {
-        if let Some(reference) = node.image_reference.clone() {
+        if let Some(mut reference) = node.image_reference.clone() {
+            hydrate_image_context(&mut reference, node);
             image_index.insert(node.path.clone(), reference);
         }
         collect_image_references(&node.children, image_index);
     }
+}
+
+fn hydrate_image_context(target: &mut ReferencedImageTarget, node: &SrIndexedNode) {
+    if let Some(laterality) = node.acquisition_context_value("Image Laterality") {
+        target.laterality = Some(laterality);
+    }
+    if let Some(view) = node.acquisition_context_value("Image View") {
+        target.view = Some(view);
+    }
+}
+
+fn same_image_frame(a: &ReferencedImageTarget, b: &ReferencedImageTarget) -> bool {
+    a.sop_instance_uid == b.sop_instance_uid && a.referenced_frames == b.referenced_frames
 }
 
 fn collect_mammography_cad_overlays(
@@ -421,8 +492,9 @@ fn collect_mammography_cad_overlays(
             let cad_operating_point = node.cad_operating_point();
             let mut geometry_nodes = Vec::new();
             node.property_geometry_nodes(&mut geometry_nodes);
+            let mut labeled_targets = Vec::<ReferencedImageTarget>::new();
 
-            for geometry_node in geometry_nodes {
+            for geometry_node in geometry_nodes.iter().copied() {
                 let Some(reference) = geometry_node.selected_image_target(image_index) else {
                     continue;
                 };
@@ -445,11 +517,41 @@ fn collect_mammography_cad_overlays(
                         rendering_intent,
                         cad_operating_point,
                     }));
+
+                if labeled_targets
+                    .iter()
+                    .any(|target| same_image_frame(target, &reference))
+                {
+                    continue;
+                }
+
+                let Some((selected_target, anchor, units)) =
+                    preferred_sr_overlay_label_anchor(&geometry_nodes, image_index, &reference)
+                else {
+                    continue;
+                };
+                let lines = sr_overlay_label_lines(node, &selected_target);
+                if lines.is_empty() {
+                    continue;
+                }
+
+                overlay.labels.push(SrOverlayLabel {
+                    anchor,
+                    units,
+                    lines,
+                    referenced_frames: reference.referenced_frames.clone(),
+                    rendering_intent,
+                });
+                labeled_targets.push(reference);
             }
         }
 
         collect_mammography_cad_overlays(&node.children, image_index, overlays);
     }
+}
+
+fn relationship_type_matches(relationship_type: Option<&str>, expected: &str) -> bool {
+    relationship_type.is_some_and(|value| value.eq_ignore_ascii_case(expected))
 }
 
 fn referenced_image_target_from_sr_item(item: &InMemDicomObject) -> Option<ReferencedImageTarget> {
@@ -475,7 +577,21 @@ fn referenced_image_target_from_sr_item(item: &InMemDicomObject) -> Option<Refer
     Some(ReferencedImageTarget {
         sop_instance_uid,
         referenced_frames,
+        laterality: None,
+        view: None,
     })
+}
+
+fn read_graphic_annotation_units(item: &InMemDicomObject) -> GspsUnits {
+    const GRAPHIC_ANNOTATION_UNITS: Tag = Tag(0x0070, 0x0005);
+
+    match read_item_string(item, GRAPHIC_ANNOTATION_UNITS)
+        .map(|value| value.to_ascii_uppercase())
+        .as_deref()
+    {
+        Some("DISPLAY") => GspsUnits::Display,
+        _ => GspsUnits::Pixel,
+    }
 }
 
 fn parse_spatial_coordinates(item: &InMemDicomObject) -> Option<SrSpatialCoordinates> {
@@ -494,13 +610,14 @@ fn parse_spatial_coordinates(item: &InMemDicomObject) -> Option<SrSpatialCoordin
             .unwrap_or_else(|| "POLYLINE".to_string())
             .to_ascii_uppercase(),
         points,
+        units: read_graphic_annotation_units(item),
     })
 }
 
 fn graphics_from_spatial_coordinates(
     spatial_coordinates: &SrSpatialCoordinates,
 ) -> Vec<GspsGraphic> {
-    let units = GspsUnits::Pixel;
+    let units = spatial_coordinates.units;
 
     match spatial_coordinates.graphic_type.as_str() {
         "POINT" | "MULTIPOINT" => spatial_coordinates
@@ -621,6 +738,150 @@ fn read_code_from_item(item: &InMemDicomObject, tag: Tag) -> SrCode {
     SrCode {
         value: read_item_string(code_item, Tag(0x0008, 0x0100)),
         meaning: read_item_string(code_item, Tag(0x0008, 0x0104)),
+    }
+}
+
+fn code_display(code: &SrCode) -> Option<&str> {
+    code.meaning.as_deref().or(code.value.as_deref())
+}
+
+fn sr_overlay_label_anchor(node: &SrIndexedNode) -> Option<((f32, f32), GspsUnits)> {
+    let spatial_coordinates = node.spatial_coordinates.as_ref()?;
+    if spatial_coordinates.points.is_empty() {
+        return None;
+    }
+
+    if spatial_coordinates.graphic_type == "POINT"
+        || spatial_coordinates.graphic_type == "MULTIPOINT"
+    {
+        return spatial_coordinates
+            .points
+            .first()
+            .copied()
+            .map(|anchor| (anchor, spatial_coordinates.units));
+    }
+
+    let min_x = spatial_coordinates
+        .points
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f32::INFINITY, f32::min);
+    let min_y = spatial_coordinates
+        .points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f32::INFINITY, f32::min);
+    (min_x.is_finite() && min_y.is_finite()).then_some(((min_x, min_y), spatial_coordinates.units))
+}
+
+fn preferred_sr_overlay_label_anchor(
+    geometry_nodes: &[&SrIndexedNode],
+    image_index: &HashMap<Vec<usize>, ReferencedImageTarget>,
+    reference: &ReferencedImageTarget,
+) -> Option<(ReferencedImageTarget, (f32, f32), GspsUnits)> {
+    let matching_targets = geometry_nodes
+        .iter()
+        .copied()
+        .filter_map(|node| {
+            let target = node.selected_image_target(image_index)?;
+            same_image_frame(&target, reference).then_some((node, target))
+        })
+        .collect::<Vec<_>>();
+
+    matching_targets
+        .iter()
+        .find_map(|(node, target)| {
+            if node.concept_name.matches_meaning("Center") {
+                sr_overlay_label_anchor(node).map(|(anchor, units)| (target.clone(), anchor, units))
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            matching_targets.iter().find_map(|(node, target)| {
+                sr_overlay_label_anchor(node).map(|(anchor, units)| (target.clone(), anchor, units))
+            })
+        })
+}
+
+fn sr_overlay_label_lines(
+    finding_node: &SrIndexedNode,
+    reference: &ReferencedImageTarget,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if let Some(finding) = code_display(&finding_node.coded_value) {
+        lines.push(finding.to_string());
+    }
+
+    let mut context_parts = Vec::new();
+    if let Some(context) = sr_overlay_context_label(reference) {
+        context_parts.push(context);
+    }
+    if let Some(certainty) = finding_node.certainty_of_finding() {
+        context_parts.push(format!("{}%", format_sr_overlay_number(certainty)));
+    }
+    if !context_parts.is_empty() {
+        lines.push(context_parts.join(" | "));
+    }
+
+    lines
+}
+
+fn sr_overlay_context_label(reference: &ReferencedImageTarget) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(laterality) = reference
+        .laterality
+        .as_deref()
+        .and_then(mammography_laterality_abbreviation)
+    {
+        parts.push(laterality);
+    }
+    if let Some(view) = reference
+        .view
+        .as_deref()
+        .and_then(mammography_view_abbreviation)
+    {
+        parts.push(view);
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+fn mammography_laterality_abbreviation(value: &str) -> Option<&'static str> {
+    match normalize_code_token(value).as_str() {
+        "LEFTBREAST" => Some("L"),
+        "RIGHTBREAST" => Some("R"),
+        "BILATERALBREASTS" | "BILATERAL" => Some("B"),
+        _ => None,
+    }
+}
+
+fn mammography_view_abbreviation(value: &str) -> Option<&'static str> {
+    match normalize_code_token(value).as_str() {
+        "CRANIOCAUDAL" => Some("CC"),
+        "MEDIOLATERALOBLIQUE" => Some("MLO"),
+        "MEDIOLATERAL" => Some("ML"),
+        "LATEROMEDIAL" => Some("LM"),
+        "EXAGGERATEDCRANIOCAUDALLATERAL" => Some("XCCL"),
+        "EXAGGERATEDCRANIOCAUDALMEDIAL" => Some("XCCM"),
+        _ => None,
+    }
+}
+
+fn format_sr_overlay_number(value: f32) -> String {
+    if (value.fract()).abs() < 0.01 {
+        format!("{value:.0}")
+    } else {
+        let output = format!("{value:.1}");
+        output
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 
@@ -745,6 +1006,8 @@ fn default_sr_label(value_type: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
     use crate::dicom::{
         BASIC_TEXT_SR_SOP_CLASS_UID, DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID,
@@ -753,14 +1016,19 @@ mod tests {
     };
     use dicom_core::value::DataSetSequence;
     use dicom_core::{DataElement, PrimitiveValue, VR};
-    use dicom_object::FileMetaTableBuilder;
+    use dicom_object::{from_reader, FileMetaTableBuilder};
 
-    fn code_item(meaning: &str) -> InMemDicomObject {
+    fn custom_code_item(value: &str, scheme: &str, meaning: &str) -> InMemDicomObject {
         InMemDicomObject::from_element_iter([
-            DataElement::new(Tag(0x0008, 0x0100), VR::SH, meaning.replace(' ', "_")),
-            DataElement::new(Tag(0x0008, 0x0102), VR::SH, "99TEST"),
+            DataElement::new(Tag(0x0008, 0x0100), VR::SH, value),
+            DataElement::new(Tag(0x0008, 0x0102), VR::SH, scheme),
             DataElement::new(Tag(0x0008, 0x0104), VR::LO, meaning),
         ])
+    }
+
+    fn code_item(meaning: &str) -> InMemDicomObject {
+        let value = meaning.replace(' ', "_");
+        custom_code_item(&value, "99TEST", meaning)
     }
 
     fn image_reference_item(
@@ -800,12 +1068,50 @@ mod tests {
         ])
     }
 
+    fn image_library_reference_item(
+        sop_instance_uid: &str,
+        referenced_frames: Option<&[i32]>,
+        laterality: &str,
+        view: &str,
+    ) -> InMemDicomObject {
+        let mut item = image_reference_item(sop_instance_uid, referenced_frames);
+        item.put(DataElement::new(
+            Tag(0x0040, 0xA730),
+            VR::SQ,
+            DataSetSequence::from(vec![
+                code_content_item(Some("HAS ACQ CONTEXT"), "Image Laterality", laterality),
+                code_content_item(Some("HAS ACQ CONTEXT"), "Image View", view),
+            ]),
+        ));
+        item
+    }
+
     fn referenced_item_identifier_item(path: &[usize]) -> InMemDicomObject {
         InMemDicomObject::from_element_iter([DataElement::new(
             Tag(0x0040, 0xDB73),
             VR::UL,
             PrimitiveValue::U32(path.iter().map(|part| *part as u32).collect()),
         )])
+    }
+
+    fn indexed_acquisition_context_item(concept_name: &str, coded_value: &str) -> SrIndexedNode {
+        SrIndexedNode {
+            path: Vec::new(),
+            relationship_type: Some("HAS ACQ CONTEXT".to_string()),
+            referenced_content_item_identifier: None,
+            concept_name: SrCode {
+                value: None,
+                meaning: Some(concept_name.to_string()),
+            },
+            coded_value: SrCode {
+                value: None,
+                meaning: Some(coded_value.to_string()),
+            },
+            numeric_value: None,
+            image_reference: None,
+            spatial_coordinates: None,
+            children: Vec::new(),
+        }
     }
 
     fn content_item(
@@ -885,12 +1191,41 @@ mod tests {
         )
     }
 
-    fn scoord_content_item(
+    fn scoord_content_item_with_units(
         relationship_type: Option<&str>,
         concept_name: &str,
         graphic_type: &str,
         graphic_data: &[f32],
         referenced_item_path: &[usize],
+        units: Option<&str>,
+    ) -> InMemDicomObject {
+        let mut value_elements = Vec::new();
+        if let Some(units) = units {
+            value_elements.push(DataElement::new(Tag(0x0070, 0x0005), VR::CS, units));
+        }
+        value_elements.extend([
+            DataElement::new(Tag(0x0070, 0x0023), VR::CS, graphic_type),
+            DataElement::new(
+                Tag(0x0070, 0x0022),
+                VR::FL,
+                PrimitiveValue::F32(graphic_data.iter().copied().collect()),
+            ),
+        ]);
+        content_item(
+            "SCOORD",
+            relationship_type,
+            Some(concept_name),
+            value_elements,
+            vec![referenced_item_identifier_item(referenced_item_path)],
+        )
+    }
+
+    fn inline_scoord_content_item(
+        relationship_type: Option<&str>,
+        concept_name: &str,
+        graphic_type: &str,
+        graphic_data: &[f32],
+        image_reference: InMemDicomObject,
     ) -> InMemDicomObject {
         content_item(
             "SCOORD",
@@ -904,7 +1239,7 @@ mod tests {
                     PrimitiveValue::F32(graphic_data.iter().copied().collect()),
                 ),
             ],
-            vec![referenced_item_identifier_item(referenced_item_path)],
+            vec![image_reference],
         )
     }
 
@@ -913,12 +1248,35 @@ mod tests {
         referenced_frames: Option<&[i32]>,
         sop_class_uid: &str,
     ) -> DefaultDicomObject {
+        mammography_cad_sr_object_with_context(
+            rendering_intent,
+            referenced_frames,
+            sop_class_uid,
+            "test-side-omega",
+            "test-view-sigma",
+            None,
+        )
+    }
+
+    fn mammography_cad_sr_object_with_context(
+        rendering_intent: &str,
+        referenced_frames: Option<&[i32]>,
+        sop_class_uid: &str,
+        laterality: &str,
+        view: &str,
+        graphic_units: Option<&str>,
+    ) -> DefaultDicomObject {
         let image_library = content_item(
             "CONTAINER",
             None,
             Some("Image Library"),
             Vec::new(),
-            vec![image_reference_item("1.2.3.4", referenced_frames)],
+            vec![image_library_reference_item(
+                "1.2.3.4",
+                referenced_frames,
+                laterality,
+                view,
+            )],
         );
         let finding = content_item(
             "CODE",
@@ -927,7 +1285,7 @@ mod tests {
             vec![DataElement::new(
                 Tag(0x0040, 0xA168),
                 VR::SQ,
-                DataSetSequence::from(vec![code_item("Mass")]),
+                DataSetSequence::from(vec![code_item("TEST-FINDING-ALPHA")]),
             )],
             vec![
                 code_content_item(
@@ -936,19 +1294,22 @@ mod tests {
                     rendering_intent,
                 ),
                 numeric_content_item(Some("HAS CONCEPT MOD"), "CAD Operating Point", "2"),
-                scoord_content_item(
+                numeric_content_item(Some("HAS PROPERTIES"), "Certainty of Finding", "1234.5"),
+                scoord_content_item_with_units(
                     Some("HAS PROPERTIES"),
                     "Center",
                     "POINT",
                     &[16.0, 24.0],
-                    &[1, 1],
+                    &[1, 1, 1],
+                    graphic_units,
                 ),
-                scoord_content_item(
+                scoord_content_item_with_units(
                     Some("HAS PROPERTIES"),
                     "Outline",
                     "POLYLINE",
                     &[10.0, 20.0, 20.0, 30.0, 30.0, 20.0],
-                    &[1, 1],
+                    &[1, 1, 1],
+                    graphic_units,
                 ),
             ],
         );
@@ -971,6 +1332,140 @@ mod tests {
         .expect("mammography CAD SR test object should build file meta")
     }
 
+    fn mammography_cad_sr_object_with_inline_image_context(
+        rendering_intent: &str,
+        referenced_frames: Option<&[i32]>,
+        sop_class_uid: &str,
+        laterality: &str,
+        view: &str,
+    ) -> DefaultDicomObject {
+        let finding = content_item(
+            "CODE",
+            Some("CONTAINS"),
+            Some("Single Image Finding"),
+            vec![DataElement::new(
+                Tag(0x0040, 0xA168),
+                VR::SQ,
+                DataSetSequence::from(vec![code_item("TEST-FINDING-ALPHA")]),
+            )],
+            vec![
+                code_content_item(
+                    Some("HAS CONCEPT MOD"),
+                    "Rendering Intent",
+                    rendering_intent,
+                ),
+                numeric_content_item(Some("HAS CONCEPT MOD"), "CAD Operating Point", "2"),
+                numeric_content_item(Some("HAS PROPERTIES"), "Certainty of Finding", "1234.5"),
+                inline_scoord_content_item(
+                    Some("HAS PROPERTIES"),
+                    "Center",
+                    "POINT",
+                    &[16.0, 24.0],
+                    image_library_reference_item("1.2.3.4", referenced_frames, laterality, view),
+                ),
+                inline_scoord_content_item(
+                    Some("HAS PROPERTIES"),
+                    "Outline",
+                    "POLYLINE",
+                    &[10.0, 20.0, 20.0, 30.0, 30.0, 20.0],
+                    image_library_reference_item("1.2.3.4", referenced_frames, laterality, view),
+                ),
+            ],
+        );
+
+        InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, sop_class_uid),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+            DataElement::new(
+                Tag(0x0040, 0xA730),
+                VR::SQ,
+                DataSetSequence::from(vec![finding]),
+            ),
+        ])
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                .media_storage_sop_class_uid(sop_class_uid)
+                .media_storage_sop_instance_uid("9.8.7.10"),
+        )
+        .expect("inline-image mammography CAD SR test object should build file meta")
+    }
+
+    fn mammography_cad_sr_object_with_mixed_target_contexts(
+        rendering_intent: &str,
+        referenced_frames: Option<&[i32]>,
+        sop_class_uid: &str,
+    ) -> DefaultDicomObject {
+        let image_library = content_item(
+            "CONTAINER",
+            None,
+            Some("Image Library"),
+            Vec::new(),
+            vec![image_library_reference_item(
+                "1.2.3.4",
+                referenced_frames,
+                "Right Breast",
+                "Mediolateral-oblique",
+            )],
+        );
+        let finding = content_item(
+            "CODE",
+            Some("CONTAINS"),
+            Some("Single Image Finding"),
+            vec![DataElement::new(
+                Tag(0x0040, 0xA168),
+                VR::SQ,
+                DataSetSequence::from(vec![code_item("TEST-FINDING-ALPHA")]),
+            )],
+            vec![
+                code_content_item(
+                    Some("HAS CONCEPT MOD"),
+                    "Rendering Intent",
+                    rendering_intent,
+                ),
+                numeric_content_item(Some("HAS CONCEPT MOD"), "CAD Operating Point", "2"),
+                numeric_content_item(Some("HAS PROPERTIES"), "Certainty of Finding", "1234.5"),
+                scoord_content_item_with_units(
+                    Some("HAS PROPERTIES"),
+                    "Outline",
+                    "POLYLINE",
+                    &[10.0, 20.0, 20.0, 30.0, 30.0, 20.0],
+                    &[1, 1, 1],
+                    None,
+                ),
+                inline_scoord_content_item(
+                    Some("HAS PROPERTIES"),
+                    "Center",
+                    "POINT",
+                    &[16.0, 24.0],
+                    image_library_reference_item(
+                        "1.2.3.4",
+                        referenced_frames,
+                        "Left Breast",
+                        "Cranio-caudal",
+                    ),
+                ),
+            ],
+        );
+
+        InMemDicomObject::from_element_iter([
+            DataElement::new(Tag(0x0008, 0x0016), VR::UI, sop_class_uid),
+            DataElement::new(Tag(0x0008, 0x0060), VR::CS, "SR"),
+            DataElement::new(
+                Tag(0x0040, 0xA730),
+                VR::SQ,
+                DataSetSequence::from(vec![image_library, finding]),
+            ),
+        ])
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .transfer_syntax(EXPLICIT_VR_LITTLE_ENDIAN_UID)
+                .media_storage_sop_class_uid(sop_class_uid)
+                .media_storage_sop_instance_uid("9.8.7.11"),
+        )
+        .expect("mixed-context mammography CAD SR test object should build file meta")
+    }
+
     fn simple_structured_report_object() -> DefaultDicomObject {
         InMemDicomObject::from_element_iter([
             DataElement::new(Tag(0x0008, 0x0016), VR::UI, BASIC_TEXT_SR_SOP_CLASS_UID),
@@ -986,6 +1481,14 @@ mod tests {
                 .media_storage_sop_instance_uid("9.8.7.5"),
         )
         .expect("simple structured report test object should build file meta")
+    }
+
+    fn roundtrip_object_bytes(object: &DefaultDicomObject) -> DefaultDicomObject {
+        let mut bytes = Vec::new();
+        object
+            .write_all(&mut bytes)
+            .expect("test object should serialize");
+        from_reader(Cursor::new(bytes)).expect("serialized test object should deserialize")
     }
 
     #[test]
@@ -1018,13 +1521,241 @@ mod tests {
             .expect("overlay should resolve image library reference");
 
         assert_eq!(overlay.graphics.len(), 2);
+        assert_eq!(overlay.labels.len(), 1);
         assert_eq!(overlay.graphics[0].referenced_frames, Some(vec![2]));
         assert_eq!(overlay.visible_graphics_for_frame(1).count(), 2);
+        assert_eq!(overlay.visible_labels_for_frame(1).count(), 1);
         assert_eq!(
             overlay.graphics[0].rendering_intent,
             SrRenderingIntent::PresentationRequired
         );
         assert_eq!(overlay.graphics[0].cad_operating_point, Some(2.0));
+        assert_eq!(
+            overlay.labels[0].lines,
+            vec!["TEST-FINDING-ALPHA".to_string(), "1234.5%".to_string()]
+        );
+        assert_eq!(overlay.labels[0].anchor, (16.0, 24.0));
+        assert_eq!(overlay.labels[0].units, GspsUnits::Pixel);
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_formats_full_mammography_context_label() {
+        let sr_obj = mammography_cad_sr_object_with_context(
+            "Presentation Required",
+            None,
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+            "Left Breast",
+            "Cranio-caudal",
+            None,
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve image library reference");
+
+        assert_eq!(
+            overlay.labels[0].lines,
+            vec![
+                "TEST-FINDING-ALPHA".to_string(),
+                "L CC | 1234.5%".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_hydrates_inline_image_context() {
+        let sr_obj = mammography_cad_sr_object_with_inline_image_context(
+            "Presentation Required",
+            None,
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+            "Left Breast",
+            "Cranio-caudal",
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve inline image reference");
+
+        assert_eq!(
+            overlay.labels[0].lines,
+            vec![
+                "TEST-FINDING-ALPHA".to_string(),
+                "L CC | 1234.5%".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_matches_targets_by_image_and_frame_identity() {
+        let sr_obj = mammography_cad_sr_object_with_mixed_target_contexts(
+            "Presentation Required",
+            None,
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve mixed-context image references");
+
+        assert_eq!(overlay.graphics.len(), 2);
+        assert_eq!(overlay.labels.len(), 1);
+        assert_eq!(overlay.labels[0].anchor, (16.0, 24.0));
+        assert_eq!(
+            overlay.labels[0].lines,
+            vec![
+                "TEST-FINDING-ALPHA".to_string(),
+                "L CC | 1234.5%".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_preserves_display_units_for_geometry_and_labels() {
+        let sr_obj = mammography_cad_sr_object_with_context(
+            "Presentation Required",
+            None,
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+            "Left Breast",
+            "Cranio-caudal",
+            Some("DISPLAY"),
+        );
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve image library reference");
+
+        for graphic in &overlay.graphics {
+            match &graphic.graphic {
+                GspsGraphic::Point { units, .. } | GspsGraphic::Polyline { units, .. } => {
+                    assert_eq!(*units, GspsUnits::Display);
+                }
+            }
+        }
+        assert_eq!(overlay.labels[0].anchor, (16.0, 24.0));
+        assert_eq!(overlay.labels[0].units, GspsUnits::Display);
+    }
+
+    #[test]
+    fn hydrate_image_context_preserves_existing_fields_when_node_omits_them() {
+        let mut target = ReferencedImageTarget {
+            sop_instance_uid: "1.2.3.4".to_string(),
+            referenced_frames: Some(vec![1]),
+            laterality: Some("Left Breast".to_string()),
+            view: Some("Cranio-caudal".to_string()),
+        };
+        let laterality_only = SrIndexedNode {
+            path: Vec::new(),
+            relationship_type: None,
+            referenced_content_item_identifier: None,
+            concept_name: SrCode::default(),
+            coded_value: SrCode::default(),
+            numeric_value: None,
+            image_reference: None,
+            spatial_coordinates: None,
+            children: vec![indexed_acquisition_context_item(
+                "Image Laterality",
+                "Right Breast",
+            )],
+        };
+
+        hydrate_image_context(&mut target, &laterality_only);
+
+        assert_eq!(target.laterality.as_deref(), Some("Right Breast"));
+        assert_eq!(target.view.as_deref(), Some("Cranio-caudal"));
+
+        let view_only = SrIndexedNode {
+            path: Vec::new(),
+            relationship_type: None,
+            referenced_content_item_identifier: None,
+            concept_name: SrCode::default(),
+            coded_value: SrCode::default(),
+            numeric_value: None,
+            image_reference: None,
+            spatial_coordinates: None,
+            children: vec![indexed_acquisition_context_item(
+                "Image View",
+                "Mediolateral-oblique",
+            )],
+        };
+
+        hydrate_image_context(&mut target, &view_only);
+
+        assert_eq!(target.laterality.as_deref(), Some("Right Breast"));
+        assert_eq!(target.view.as_deref(), Some("Mediolateral-oblique"));
+    }
+
+    #[test]
+    fn selected_image_target_hydrates_referenced_content_item_context_on_clone() {
+        let geometry_node = SrIndexedNode {
+            path: Vec::new(),
+            relationship_type: Some("HAS PROPERTIES".to_string()),
+            referenced_content_item_identifier: None,
+            concept_name: SrCode::default(),
+            coded_value: SrCode::default(),
+            numeric_value: None,
+            image_reference: None,
+            spatial_coordinates: None,
+            children: vec![SrIndexedNode {
+                path: Vec::new(),
+                relationship_type: None,
+                referenced_content_item_identifier: Some(vec![1, 2, 3]),
+                concept_name: SrCode::default(),
+                coded_value: SrCode::default(),
+                numeric_value: None,
+                image_reference: None,
+                spatial_coordinates: None,
+                children: vec![
+                    indexed_acquisition_context_item("Image Laterality", "Left Breast"),
+                    indexed_acquisition_context_item("Image View", "Cranio-caudal"),
+                ],
+            }],
+        };
+        let mut image_index = HashMap::new();
+        image_index.insert(
+            vec![1, 2, 3],
+            ReferencedImageTarget {
+                sop_instance_uid: "1.2.3.4".to_string(),
+                referenced_frames: Some(vec![1]),
+                laterality: None,
+                view: None,
+            },
+        );
+
+        let target = geometry_node
+            .selected_image_target(&image_index)
+            .expect("geometry node should resolve referenced image target");
+
+        assert_eq!(target.laterality.as_deref(), Some("Left Breast"));
+        assert_eq!(target.view.as_deref(), Some("Cranio-caudal"));
+
+        let indexed_target = image_index
+            .get(&vec![1, 2, 3])
+            .expect("image index should retain referenced target");
+        assert_eq!(indexed_target.laterality, None);
+        assert_eq!(indexed_target.view, None);
+    }
+
+    #[test]
+    fn parse_mammography_cad_sr_overlays_preserves_ul_content_item_references_after_roundtrip() {
+        let sr_obj = roundtrip_object_bytes(&mammography_cad_sr_object(
+            "Presentation Required",
+            Some(&[2]),
+            MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID,
+        ));
+
+        let overlays = parse_mammography_cad_sr_overlays(&sr_obj);
+        let overlay = overlays
+            .get("1.2.3.4")
+            .expect("overlay should resolve serialized UL referenced content item path");
+
+        assert_eq!(overlay.graphics.len(), 2);
+        assert_eq!(overlay.labels.len(), 1);
+        assert_eq!(overlay.visible_graphics_for_frame(1).count(), 2);
+        assert_eq!(overlay.visible_labels_for_frame(1).count(), 1);
     }
 
     #[test]
@@ -1041,7 +1772,9 @@ mod tests {
             .expect("optional overlay should still be preserved");
 
         assert_eq!(overlay.graphics.len(), 2);
+        assert_eq!(overlay.labels.len(), 1);
         assert_eq!(overlay.visible_graphics_for_frame(0).count(), 0);
+        assert_eq!(overlay.visible_labels_for_frame(0).count(), 0);
         assert!(overlay
             .graphics
             .iter()

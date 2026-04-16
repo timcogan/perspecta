@@ -26,8 +26,8 @@ pub use gsps::GspsOverlayGraphic;
 pub use gsps::{load_gsps_overlays, GspsGraphic, GspsOverlay, GspsUnits};
 pub use parametric_map::{load_parametric_map, load_parametric_map_overlays, ParametricMapOverlay};
 pub use sr::{
-    load_mammography_cad_sr_overlays, load_structured_report, SrOverlay, StructuredReportDocument,
-    StructuredReportNode,
+    load_mammography_cad_sr_overlays, load_structured_report, SrOverlay, SrOverlayLabel,
+    StructuredReportDocument, StructuredReportNode,
 };
 #[cfg(test)]
 pub use sr::{SrOverlayGraphic, SrRenderingIntent};
@@ -685,15 +685,23 @@ fn read_item_multi_float(item: &InMemDicomObject, tag: Tag) -> Option<Vec<f32>> 
 }
 
 fn read_item_multi_int(item: &InMemDicomObject, tag: Tag) -> Option<Vec<i32>> {
-    item.element(tag)
+    let element = item.element(tag).ok()?;
+    if let Ok(value) = element.to_str() {
+        let parsed = value
+            .split(char::from(92))
+            .map(|part| part.trim().parse::<i32>())
+            .collect::<std::result::Result<Vec<_>, _>>();
+        if let Ok(values) = parsed {
+            if !values.is_empty() {
+                return Some(values);
+            }
+        }
+    }
+
+    element
+        .to_multi_int::<i32>()
         .ok()
-        .and_then(|element| element.to_str().ok())
-        .map(|value| {
-            value
-                .split('\\')
-                .filter_map(|part| part.trim().parse::<i32>().ok())
-                .collect::<Vec<_>>()
-        })
+        .filter(|values| !values.is_empty())
 }
 
 fn prime_reverse_frame_cache<T, F>(
@@ -2446,7 +2454,6 @@ mod tests {
         .expect("monochrome test object should build file meta")
     }
 
-    #[cfg(feature = "jpeg_ls")]
     fn object_bytes(object: &DefaultDicomObject) -> Vec<u8> {
         let mut bytes = Vec::new();
         object
@@ -3218,6 +3225,37 @@ mod tests {
         );
         assert_eq!(report.content[1].label, "Heart Rate");
         assert_eq!(report.content[1].value.as_deref(), Some("72 bpm"));
+    }
+
+    #[test]
+    fn read_item_multi_int_rejects_partial_string_parses() -> Result<(), String> {
+        let item = InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0008, 0x1160),
+            VR::IS,
+            r"1\two\3",
+        )]);
+
+        if read_item_multi_int(&item, Tag(0x0008, 0x1160)).is_some() {
+            Err("expected invalid multi-int strings to avoid returning partial values".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn read_item_multi_int_reads_valid_multi_value_strings() -> Result<(), String> {
+        let item = InMemDicomObject::from_element_iter([DataElement::new(
+            Tag(0x0008, 0x1160),
+            VR::IS,
+            r"1\ 2 \3",
+        )]);
+
+        let parsed = read_item_multi_int(&item, Tag(0x0008, 0x1160));
+        if parsed == Some(Vec::from([1, 2, 3])) {
+            Ok(())
+        } else {
+            Err("expected [1, 2, 3]".to_string())
+        }
     }
 
     #[test]
