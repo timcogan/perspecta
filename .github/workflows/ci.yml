@@ -31,9 +31,9 @@ jobs:
 
           current_version="$(
             awk '
-              /^\[package\]$/ { in_package = 1; next }
-              /^\[/ { in_package = 0 }
-              in_package && /^version = / { print $3; exit }
+              /^\s*\[package\]\s*$/ { in_package = 1; next }
+              /^\s*\[/ { in_package = 0 }
+              in_package && /^\s*version\s*=\s*/ { print $3; exit }
             ' Cargo.toml | tr -d '"'
           )"
 
@@ -49,6 +49,7 @@ jobs:
 
   rust:
     name: Rust Checks
+    needs: [version]
     runs-on: ubuntu-latest
 
     steps:
@@ -76,6 +77,7 @@ jobs:
 
   gitleaks:
     name: Secret Scan
+    needs: [version]
     runs-on: ubuntu-latest
 
     steps:
