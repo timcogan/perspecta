@@ -1,5 +1,6 @@
 # This file is based on the cargo-dist GitHub Actions template.
-# It publishes artifacts to GitHub Releases on version tags.
+# It publishes artifacts to GitHub Releases when a version bump lands on the
+# default branch, creating the tag as part of the release.
 name: Release
 
 permissions:
@@ -7,9 +8,15 @@ permissions:
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+    branches:
+      - main
+      - master
+    paths:
+      - Cargo.toml
+      - dist-workspace.toml
+      - .github/workflows/release.yml
 
 concurrency:
   group: dist-${{ github.ref }}
@@ -20,16 +27,93 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
-      tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
-      publishing: ${{ !github.event.pull_request }}
+      tag: ${{ steps.release_meta.outputs.tag }}
+      tag_flag: ${{ steps.release_meta.outputs.tag_flag }}
+      publishing: ${{ steps.release_meta.outputs.publishing }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
+          fetch-depth: 0
           persist-credentials: false
           submodules: recursive
+      - id: release_meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          current_version="$(
+            awk '
+              /^\[package\]$/ { in_package = 1; next }
+              /^\[/ { in_package = 0 }
+              in_package && /^version = / { print $3; exit }
+            ' Cargo.toml | tr -d '"'
+          )"
+
+          [[ -n "$current_version" ]] || {
+            echo "failed to determine package version from Cargo.toml" >&2
+            exit 1
+          }
+
+          [[ "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release automation only supports Cargo.toml versions in X.Y.Z format, found: $current_version" >&2
+            exit 1
+          }
+
+          tag="v$current_version"
+          publishing=false
+          previous_version=""
+          release_state="missing"
+
+          if gh release view "$tag" --json isDraft > release-state.json 2>/dev/null; then
+            if jq -e '.isDraft' release-state.json > /dev/null; then
+              release_state="draft"
+            else
+              release_state="published"
+            fi
+          elif git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+            release_state="tag-only"
+          fi
+
+          case "$EVENT_NAME" in
+            push)
+              if [[ -n "${BEFORE_SHA:-}" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+                if previous_manifest="$(git show "$BEFORE_SHA:Cargo.toml" 2>/dev/null)"; then
+                  previous_version="$(
+                    printf '%s\n' "$previous_manifest" | awk '
+                      /^\[package\]$/ { in_package = 1; next }
+                      /^\[/ { in_package = 0 }
+                      in_package && /^version = / { print $3; exit }
+                    ' | tr -d '"'
+                  )"
+                fi
+              fi
+
+              if [[ "$previous_version" != "$current_version" ]]; then
+                if [[ "$release_state" == "published" ]]; then
+                  echo "release $tag already exists; skipping publish"
+                else
+                  publishing=true
+                fi
+              fi
+              ;;
+            workflow_dispatch)
+              if [[ "$release_state" == "published" ]]; then
+                echo "release $tag already exists; skipping publish"
+              else
+                publishing=true
+              fi
+              ;;
+          esac
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag_flag=--tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publishing=$publishing" >> "$GITHUB_OUTPUT"
       - name: Install dist
         shell: bash
         run: |
@@ -41,13 +125,13 @@ jobs:
           path: ~/.cargo/bin/dist
       - id: plan
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.release_meta.outputs.tag }}
+          PUBLISHING: ${{ steps.release_meta.outputs.publishing }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" || "$PUBLISHING" != "true" ]]; then
             dist plan --output-format=json --target=x86_64-unknown-linux-gnu > plan-dist-manifest.json
           else
-            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
             dist host --steps=create --tag="$TAG" --output-format=json > plan-dist-manifest.json
           fi
           echo "dist ran successfully"
@@ -104,7 +188,7 @@ jobs:
       - name: Build artifacts
         shell: bash
         env:
-          TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
+          TAG_FLAG: ${{ needs.plan.outputs.tag_flag }}
         run: |
           set -euo pipefail
           dist build $TAG_FLAG --target=${{ join(matrix.targets, ',') }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
@@ -156,7 +240,7 @@ jobs:
       - id: cargo-dist
         shell: bash
         env:
-          TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
+          TAG_FLAG: ${{ needs.plan.outputs.tag_flag }}
         run: |
           set -euo pipefail
           dist build $TAG_FLAG --target=x86_64-unknown-linux-gnu --output-format=json --artifacts=global > dist-manifest.json
@@ -201,7 +285,7 @@ jobs:
       - id: host
         shell: bash
         env:
-          TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
+          TAG_FLAG: ${{ needs.plan.outputs.tag_flag }}
         run: |
           set -euo pipefail
           [[ "$TAG_FLAG" =~ ^--tag=v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1

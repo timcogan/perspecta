@@ -83,10 +83,8 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
             let key = key.trim().to_ascii_lowercase();
             let decoded_value = percent_decode(value)?;
             match key.as_str() {
-                "path" | "file" => {
-                    if !decoded_value.trim().is_empty() {
-                        raw_paths.push(decoded_value);
-                    }
+                "path" | "file" if !decoded_value.trim().is_empty() => {
+                    raw_paths.push(decoded_value);
                 }
                 "paths" | "files" => {
                     let split_paths = split_path_list(&decoded_value);
@@ -157,30 +155,30 @@ pub fn parse_perspecta_uri(uri: &str) -> Result<LaunchRequest, String> {
                         }
                     }
                 }
-                "study" | "studyuid" | "studyinstanceuid" | "study_instance_uid" => {
-                    if !decoded_value.trim().is_empty() {
-                        study_uid = Some(decoded_value.trim().to_string());
-                    }
+                "study" | "studyuid" | "studyinstanceuid" | "study_instance_uid"
+                    if !decoded_value.trim().is_empty() =>
+                {
+                    study_uid = Some(decoded_value.trim().to_string());
                 }
-                "series" | "seriesuid" | "seriesinstanceuid" | "series_instance_uid" => {
-                    if !decoded_value.trim().is_empty() {
-                        series_uid = Some(decoded_value.trim().to_string());
-                    }
+                "series" | "seriesuid" | "seriesinstanceuid" | "series_instance_uid"
+                    if !decoded_value.trim().is_empty() =>
+                {
+                    series_uid = Some(decoded_value.trim().to_string());
                 }
-                "instance" | "instanceuid" | "sopinstanceuid" | "sop_instance_uid" => {
-                    if !decoded_value.trim().is_empty() {
-                        instance_uid = Some(decoded_value.trim().to_string());
-                    }
+                "instance" | "instanceuid" | "sopinstanceuid" | "sop_instance_uid"
+                    if !decoded_value.trim().is_empty() =>
+                {
+                    instance_uid = Some(decoded_value.trim().to_string());
                 }
-                "user" | "username" | "dicomweb_user" | "dicomweb_username" => {
-                    if !decoded_value.trim().is_empty() {
-                        dicomweb_username = Some(decoded_value.trim().to_string());
-                    }
+                "user" | "username" | "dicomweb_user" | "dicomweb_username"
+                    if !decoded_value.trim().is_empty() =>
+                {
+                    dicomweb_username = Some(decoded_value.trim().to_string());
                 }
-                "pass" | "password" | "dicomweb_pass" | "dicomweb_password" => {
-                    if !decoded_value.trim().is_empty() {
-                        dicomweb_password = Some(decoded_value.trim().to_string());
-                    }
+                "pass" | "password" | "dicomweb_pass" | "dicomweb_password"
+                    if !decoded_value.trim().is_empty() =>
+                {
+                    dicomweb_password = Some(decoded_value.trim().to_string());
                 }
                 "auth" | "dicomweb_auth" => {
                     let trimmed = decoded_value.trim();
