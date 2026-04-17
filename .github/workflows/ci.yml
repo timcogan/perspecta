@@ -58,9 +58,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          toolchain="$(
+            awk -F '"' '/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"/ { print $2; exit }' rust-toolchain.toml
+          )"
+
+          [[ -n "$toolchain" ]] || {
+            echo "failed to determine Rust toolchain from rust-toolchain.toml" >&2
+            exit 1
+          }
+
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
+          toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}
           components: rustfmt, clippy
 
       - name: Cache cargo artifacts
