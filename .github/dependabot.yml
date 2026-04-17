@@ -40,6 +40,10 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    # The Rust toolchain version comes from rust-toolchain.toml and is updated
+    # by the dedicated rust-toolchain ecosystem below.
+    ignore:
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       github-actions:
         patterns:
