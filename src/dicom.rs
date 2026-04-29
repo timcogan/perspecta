@@ -1238,19 +1238,32 @@ fn open_dicom_object(source: impl Into<DicomSource>) -> Result<DefaultDicomObjec
         .ok_or_else(|| anyhow::anyhow!("Could not resolve local file path for {source}"))?;
 
     match open_file(path) {
-        Ok(obj) => Ok(obj),
+        Ok(mut obj) => {
+            sanitize_known_empty_optional_attributes(&mut obj, &path.display().to_string());
+            Ok(obj)
+        }
         Err(err) => {
             let bytes =
                 fs::read(path).with_context(|| format!("Could not read {}", path.display()))?;
-            try_open_dicom_object_with_repairs(&bytes, &path.display().to_string(), err)
+            let mut obj =
+                try_open_dicom_object_with_repairs(&bytes, &path.display().to_string(), err)?;
+            sanitize_known_empty_optional_attributes(&mut obj, &path.display().to_string());
+            Ok(obj)
         }
     }
 }
 
 fn open_dicom_object_from_bytes(bytes: &[u8], source_label: &str) -> Result<DefaultDicomObject> {
     match from_reader(Cursor::new(bytes)) {
-        Ok(obj) => Ok(obj),
-        Err(err) => try_open_dicom_object_with_repairs(bytes, source_label, err),
+        Ok(mut obj) => {
+            sanitize_known_empty_optional_attributes(&mut obj, source_label);
+            Ok(obj)
+        }
+        Err(err) => {
+            let mut obj = try_open_dicom_object_with_repairs(bytes, source_label, err)?;
+            sanitize_known_empty_optional_attributes(&mut obj, source_label);
+            Ok(obj)
+        }
     }
 }
 
@@ -1286,6 +1299,34 @@ fn try_open_dicom_object_with_repairs(
     }
 
     Err(original_error).with_context(|| format!("Could not open {source_label}"))
+}
+
+fn sanitize_known_empty_optional_attributes(obj: &mut DefaultDicomObject, source_label: &str) {
+    remove_empty_optional_string_attribute(
+        obj,
+        Tag(0x0028, 0x1056),
+        "VOILUTFunction",
+        source_label,
+    );
+}
+
+fn remove_empty_optional_string_attribute(
+    obj: &mut DefaultDicomObject,
+    tag: Tag,
+    attribute_name: &str,
+    source_label: &str,
+) {
+    let should_remove = obj.element(tag).ok().is_some_and(|element| {
+        element.header().is_empty() || element.to_str().is_ok_and(|value| value.trim().is_empty())
+    });
+
+    if should_remove && obj.remove_element(tag) {
+        log::debug!(
+            "Applying DICOM repair for {source_label}: removed empty optional attribute {attribute_name} ({:04X},{:04X})",
+            tag.group(),
+            tag.element()
+        );
+    }
 }
 
 fn sanitize_memory_source_label(value: &str) -> String {
@@ -2896,6 +2937,23 @@ mod tests {
             .iter()
             .any(|field| field.keyword == "PatientName"));
         assert!(image.full_metadata_source.is_none());
+    }
+
+    #[test]
+    fn load_dicom_treats_empty_voi_lut_function_as_absent() {
+        let bytes = basic_image_test_bytes(vec![DataElement::new(
+            Tag(0x0028, 0x1056),
+            VR::CS,
+            PrimitiveValue::Empty,
+        )]);
+
+        let image = load_dicom(DicomSource::from_memory("empty-voi-lut-function", bytes))
+            .expect("empty VOILUTFunction should not block decoding");
+
+        assert_eq!(image.width, 1);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.frame_count(), 1);
+        assert_eq!(image.frame_mono_pixels(0).as_deref(), Some([64].as_slice()));
     }
 
     #[test]

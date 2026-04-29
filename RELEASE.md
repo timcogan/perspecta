@@ -16,15 +16,17 @@ GitHub Actions `workflow_dispatch`.
 
 1. Update the version in `Cargo.toml`:
    - `version = "X.Y.Z"`
-2. Commit the release change:
+2. Sync `Cargo.lock` if the package version entry changed.
+3. Commit the release change:
    - Example message: `chore(release): vX.Y.Z`
-3. Push the commit to `main` or `master`.
-4. GitHub Actions will:
+4. Push the commit to `main` or `master`.
+5. GitHub Actions will:
    - detect that the package version changed
    - reserve `vX.Y.Z` for cargo-dist
    - create the GitHub Release and corresponding tag automatically
-5. If a release fails after the version bump landed, rerun the existing workflow
-   or start the `Release` workflow manually from the Actions tab.
+6. If a release fails after the version bump landed, rerun the existing workflow
+   or start the `Release` workflow manually from the Actions tab on `main` or
+   `master`.
 
 ## Notes
 

@@ -43,7 +43,9 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
+          REF_NAME: ${{ github.ref_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -70,7 +72,7 @@ jobs:
           previous_version=""
           release_state="missing"
 
-          if gh release view "$tag" --json isDraft > release-state.json 2>/dev/null; then
+          if gh release view "$tag" -R "$GH_REPO" --json isDraft > release-state.json 2>/dev/null; then
             if jq -e '.isDraft' release-state.json > /dev/null; then
               release_state="draft"
             else
@@ -103,7 +105,9 @@ jobs:
               fi
               ;;
             workflow_dispatch)
-              if [[ "$release_state" == "published" ]]; then
+              if [[ "${REF_NAME:-}" != "main" && "${REF_NAME:-}" != "master" ]]; then
+                echo "::notice::manual release runs only publish from main or master; selected ref: ${REF_NAME:-unknown}"
+              elif [[ "$release_state" == "published" ]]; then
                 echo "release $tag already exists; skipping publish"
               else
                 publishing=true
@@ -307,13 +311,3 @@ jobs:
       - name: Cleanup
         run: |
           rm -f artifacts/*-dist-manifest.json
-      - name: Create GitHub Release
-        env:
-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
-          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
-          RELEASE_TAG: "${{ needs.plan.outputs.tag }}"
-        run: |
-          echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
-          gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
