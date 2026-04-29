@@ -1,6 +1,7 @@
 # This file is based on the cargo-dist GitHub Actions template.
 # It publishes artifacts to GitHub Releases when a version bump lands on the
-# default branch, creating the tag as part of the release.
+# default branch, pre-creating a draft release/tag before cargo-dist uploads
+# assets and publishes it.
 name: Release
 
 permissions:
@@ -30,6 +31,8 @@ jobs:
       tag: ${{ steps.release_meta.outputs.tag }}
       tag_flag: ${{ steps.release_meta.outputs.tag_flag }}
       publishing: ${{ steps.release_meta.outputs.publishing }}
+      release_state: ${{ steps.release_meta.outputs.release_state }}
+      tag_exists: ${{ steps.release_meta.outputs.tag_exists }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -44,6 +47,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
           REF_NAME: ${{ github.ref_name }}
+          TARGET_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
@@ -71,6 +75,8 @@ jobs:
           publishing=false
           previous_version=""
           release_state="missing"
+          tag_exists=false
+          tag_commit=""
 
           if gh release view "$tag" -R "$GH_REPO" --json isDraft > release-state.json 2>/dev/null; then
             if jq -e '.isDraft' release-state.json > /dev/null; then
@@ -78,8 +84,14 @@ jobs:
             else
               release_state="published"
             fi
-          elif git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
-            release_state="tag-only"
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
+            tag_exists=true
+            tag_commit="$(git rev-list -n 1 "refs/tags/$tag")"
+            if [[ "$release_state" == "missing" ]]; then
+              release_state="tag-only"
+            fi
           fi
 
           case "$EVENT_NAME" in
@@ -99,6 +111,9 @@ jobs:
               if [[ "$previous_version" != "$current_version" ]]; then
                 if [[ "$release_state" == "published" ]]; then
                   echo "release $tag already exists; skipping publish"
+                elif [[ "$tag_exists" == "true" && "$tag_commit" != "$TARGET_SHA" ]]; then
+                  echo "tag $tag already points to $tag_commit, expected $TARGET_SHA" >&2
+                  exit 1
                 else
                   publishing=true
                 fi
@@ -109,6 +124,9 @@ jobs:
                 echo "::notice::manual release runs only publish from main or master; selected ref: ${REF_NAME:-unknown}"
               elif [[ "$release_state" == "published" ]]; then
                 echo "release $tag already exists; skipping publish"
+              elif [[ "$tag_exists" == "true" && "$tag_commit" != "$TARGET_SHA" ]]; then
+                echo "tag $tag already points to $tag_commit, expected $TARGET_SHA" >&2
+                exit 1
               else
                 publishing=true
               fi
@@ -118,6 +136,8 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "tag_flag=--tag=$tag" >> "$GITHUB_OUTPUT"
           echo "publishing=$publishing" >> "$GITHUB_OUTPUT"
+          echo "release_state=$release_state" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=$tag_exists" >> "$GITHUB_OUTPUT"
       - name: Install dist
         shell: bash
         run: |
@@ -147,10 +167,50 @@ jobs:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
+  create-release:
+    needs: [plan]
+    if: ${{ needs.plan.outputs.publishing == 'true' && needs.plan.outputs.release_state != 'draft' }}
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+    steps:
+      - name: Create draft GitHub Release
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          TAG_EXISTS: ${{ needs.plan.outputs.tag_exists }}
+          PLAN_MANIFEST: ${{ needs.plan.outputs.val }}
+        run: |
+          set -euo pipefail
+
+          printf '%s' "$PLAN_MANIFEST" > plan-dist-manifest.json
+          title="$(jq -r '.announcement_title' plan-dist-manifest.json)"
+          jq -r '.announcement_github_body' plan-dist-manifest.json > release-notes.md
+
+          args=(
+            release
+            create
+            "$RELEASE_TAG"
+            -R "$GH_REPO"
+            --draft
+            --title "$title"
+            --notes-file release-notes.md
+          )
+
+          if [[ "$TAG_EXISTS" != "true" ]]; then
+            args+=(--target "$RELEASE_COMMIT")
+          fi
+
+          gh "${args[@]}"
+
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
-    needs: [plan]
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    needs: [plan, create-release]
+    if: ${{ (needs.create-release.result == 'skipped' || needs.create-release.result == 'success') && fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
@@ -218,8 +278,8 @@ jobs:
             ${{ env.BUILD_MANIFEST_NAME }}
 
   build-global-artifacts:
-    needs: [plan, build-local-artifacts]
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.global_artifacts != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    needs: [plan, create-release, build-local-artifacts]
+    if: ${{ (needs.create-release.result == 'skipped' || needs.create-release.result == 'success') && fromJson(needs.plan.outputs.val).ci.github.global_artifacts != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -262,8 +322,8 @@ jobs:
             ${{ env.BUILD_MANIFEST_NAME }}
 
   host:
-    needs: [plan, build-local-artifacts, build-global-artifacts]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    needs: [plan, create-release, build-local-artifacts, build-global-artifacts]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.create-release.result == 'skipped' || needs.create-release.result == 'success') && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: ubuntu-22.04
