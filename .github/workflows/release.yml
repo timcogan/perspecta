@@ -106,7 +106,7 @@ jobs:
               ;;
             workflow_dispatch)
               if [[ "${REF_NAME:-}" != "main" && "${REF_NAME:-}" != "master" ]]; then
-                echo "manual release runs only publish from main or master; selected ref: ${REF_NAME:-unknown}"
+                echo "::notice::manual release runs only publish from main or master; selected ref: ${REF_NAME:-unknown}"
               elif [[ "$release_state" == "published" ]]; then
                 echo "release $tag already exists; skipping publish"
               else
