@@ -6,6 +6,9 @@ members = ["cargo:."]
 cargo-dist-version = "0.30.4"
 ci = "github"
 hosting = "github"
+# The release workflow pre-creates a draft GitHub Release and lets dist upload
+# artifacts into it before publishing.
+create-release = false
 allow-dirty = ["ci"]
 
 # Build targets

@@ -2,7 +2,8 @@
 
 This project uses Semantic Versioning and publishes binaries via GitHub Actions.
 The release workflow watches for a version bump in `Cargo.toml` on `main` or
-`master`, then creates the `vX.Y.Z` tag and GitHub Release automatically.
+`master`, then creates a draft `vX.Y.Z` GitHub Release and corresponding tag
+automatically before `cargo-dist` uploads artifacts and publishes it.
 If a release needs to be retried, the workflow can also be started manually with
 GitHub Actions `workflow_dispatch`.
 
@@ -22,11 +23,12 @@ GitHub Actions `workflow_dispatch`.
 4. Push the commit to `main` or `master`.
 5. GitHub Actions will:
    - detect that the package version changed
-   - reserve `vX.Y.Z` for cargo-dist
-   - create the GitHub Release and corresponding tag automatically
+   - create a draft `vX.Y.Z` GitHub Release and corresponding tag
+   - let `cargo-dist` upload release artifacts into that draft
+   - publish the finished GitHub Release automatically
 6. If a release fails after the version bump landed, rerun the existing workflow
    or start the `Release` workflow manually from the Actions tab on `main` or
-   `master`.
+   `master`; if the draft release already exists, the workflow will reuse it.
 
 ## Notes
 
