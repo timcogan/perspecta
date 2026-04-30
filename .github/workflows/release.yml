@@ -371,3 +371,21 @@ jobs:
       - name: Cleanup
         run: |
           rm -f artifacts/*-dist-manifest.json
+
+  publish-release:
+    needs: [plan, create-release, host]
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.create-release.result == 'skipped' || needs.create-release.result == 'success') && needs.host.result == 'success' }}
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" -R "$GH_REPO" --draft=false --latest
