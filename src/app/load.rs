@@ -44,6 +44,10 @@ pub(super) enum PendingSingleLoad {
 
 pub(super) enum LocalPrepareResult {
     Paths(PreparedLoadPaths),
+    OpenGroup {
+        prepared_group: PreparedLoadPaths,
+        open_group: usize,
+    },
     Groups {
         prepared_groups: Vec<PreparedLoadPaths>,
         open_group: usize,
@@ -271,20 +275,66 @@ impl DicomViewerApp {
 
         let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
         thread::spawn(move || {
-            let mut prepared_groups = Vec::with_capacity(groups.len());
-            for group in groups {
+            if groups.is_empty() {
+                if cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                let _ = tx.send(LocalPrepareResult::Groups {
+                    prepared_groups: Vec::new(),
+                    open_group: 0,
+                });
+                return;
+            }
+
+            let group_count = groups.len();
+            let active_group = open_group.min(group_count.saturating_sub(1));
+            let mut pending_groups = groups.into_iter().map(Some).collect::<Vec<_>>();
+            let Some(active_paths) = pending_groups.get_mut(active_group).and_then(Option::take)
+            else {
+                return;
+            };
+
+            let cancelled = || cancel.load(Ordering::Acquire);
+            let Some(active_prepared) =
+                Self::prepare_load_paths_with_cancel(active_paths, cancelled)
+            else {
+                return;
+            };
+            if cancel.load(Ordering::Acquire) {
+                return;
+            }
+            if tx
+                .send(LocalPrepareResult::OpenGroup {
+                    prepared_group: active_prepared.clone(),
+                    open_group: active_group,
+                })
+                .is_err()
+            {
+                return;
+            }
+
+            let mut prepared_groups = vec![None; group_count];
+            prepared_groups[active_group] = Some(active_prepared);
+            for (group_index, group) in pending_groups.into_iter().enumerate() {
+                let Some(group) = group else {
+                    continue;
+                };
                 let cancelled = || cancel.load(Ordering::Acquire);
                 let Some(prepared) = Self::prepare_load_paths_with_cancel(group, cancelled) else {
                     return;
                 };
-                prepared_groups.push(prepared);
+                prepared_groups[group_index] = Some(prepared);
             }
             if cancel.load(Ordering::Acquire) {
                 return;
             }
+            let prepared_groups = prepared_groups
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default();
             let _ = tx.send(LocalPrepareResult::Groups {
                 prepared_groups,
-                open_group,
+                open_group: active_group,
             });
         });
         self.local_prepare_receiver = Some(rx);
@@ -302,12 +352,21 @@ impl DicomViewerApp {
                 let _ = self.apply_prepared_load_paths(prepared, ctx);
                 ctx.request_repaint();
             }
+            Ok(LocalPrepareResult::OpenGroup {
+                prepared_group,
+                open_group,
+            }) => {
+                let _ = self.apply_prepared_open_group(prepared_group, open_group, ctx);
+                self.local_prepare_receiver = Some(receiver);
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
             Ok(LocalPrepareResult::Groups {
                 prepared_groups,
                 open_group,
             }) => {
                 self.local_prepare_cancel = None;
-                let _ = self.apply_prepared_local_groups(prepared_groups, open_group, ctx);
+                let _ =
+                    self.apply_prepared_local_group_backgrounds(prepared_groups, open_group, ctx);
                 ctx.request_repaint();
             }
             Err(TryRecvError::Empty) => {
@@ -336,17 +395,7 @@ impl DicomViewerApp {
         }
 
         for (index, prepared) in prepared_groups.iter().enumerate() {
-            let entry_count = if prepared.image_paths.is_empty() {
-                prepared.structured_report_paths.len()
-            } else {
-                prepared.image_paths.len()
-            };
-            if !Self::is_supported_prepared_group(prepared) {
-                let err = Self::format_group_size_error(index + 1, entry_count);
-                self.set_load_error(err.clone());
-                log::warn!("{err}");
-                return Err(());
-            }
+            self.validate_prepared_local_group(prepared, index)?;
         }
 
         let active_group = open_group.min(prepared_groups.len().saturating_sub(1));
@@ -354,6 +403,57 @@ impl DicomViewerApp {
         let result = self.apply_prepared_load_paths(active_prepared, ctx);
         self.preload_non_active_groups_into_history(&prepared_groups, active_group, None, ctx);
         result
+    }
+
+    fn apply_prepared_open_group(
+        &mut self,
+        prepared_group: PreparedLoadPaths,
+        open_group: usize,
+        ctx: &egui::Context,
+    ) -> Result<(), ()> {
+        self.validate_prepared_local_group(&prepared_group, open_group)?;
+        self.apply_prepared_load_paths(prepared_group, ctx)
+    }
+
+    fn apply_prepared_local_group_backgrounds(
+        &mut self,
+        prepared_groups: Vec<PreparedLoadPaths>,
+        open_group: usize,
+        ctx: &egui::Context,
+    ) -> Result<(), ()> {
+        if prepared_groups.is_empty() {
+            self.set_load_error("Launch request had no groups to open.");
+            log::warn!("Launch request had no groups to open.");
+            return Err(());
+        }
+
+        for (index, prepared) in prepared_groups.iter().enumerate() {
+            self.validate_prepared_local_group(prepared, index)?;
+        }
+
+        let active_group = open_group.min(prepared_groups.len().saturating_sub(1));
+        self.preload_non_active_groups_into_history(&prepared_groups, active_group, None, ctx);
+        Ok(())
+    }
+
+    fn validate_prepared_local_group(
+        &mut self,
+        prepared: &PreparedLoadPaths,
+        group_index: usize,
+    ) -> Result<(), ()> {
+        if Self::is_supported_prepared_group(prepared) {
+            return Ok(());
+        }
+
+        let entry_count = if prepared.image_paths.is_empty() {
+            prepared.structured_report_paths.len()
+        } else {
+            prepared.image_paths.len()
+        };
+        let err = Self::format_group_size_error(group_index + 1, entry_count);
+        self.set_load_error(err.clone());
+        log::warn!("{err}");
+        Err(())
     }
 
     pub(super) fn load_local_groups<T>(

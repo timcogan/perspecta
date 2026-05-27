@@ -683,6 +683,10 @@ impl DicomViewerApp {
             return;
         }
         self.cancel_local_prepare();
+        self.single_load_receiver = None;
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.history_pushed_for_active_group = false;
         self.pending_local_open_paths = Some(paths);
         self.pending_local_open_armed = false;
     }
@@ -3730,6 +3734,26 @@ mod tests {
     }
 
     #[test]
+    fn queue_local_paths_open_clears_active_load_receivers() {
+        let (_single_tx, single_rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        let (mammo_tx, mammo_rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        let mut app = DicomViewerApp {
+            single_load_receiver: Some(single_rx),
+            mammo_load_receiver: Some(mammo_rx),
+            mammo_load_sender: Some(mammo_tx),
+            history_pushed_for_active_group: true,
+            ..Default::default()
+        };
+
+        app.queue_local_paths_open(vec![PathBuf::from("replacement.dcm")]);
+
+        assert!(app.single_load_receiver.is_none());
+        assert!(app.mammo_load_receiver.is_none());
+        assert!(app.mammo_load_sender.is_none());
+        assert!(!app.history_pushed_for_active_group);
+    }
+
+    #[test]
     fn apply_dropped_files_without_paths_sets_user_visible_error() {
         let ctx = egui::Context::default();
         let mut app = DicomViewerApp::default();
@@ -3817,6 +3841,80 @@ mod tests {
             app.load_error_message.as_deref(),
             Some("Selected DICOM objects are not displayable images, parametric maps, or structured reports.")
         );
+    }
+
+    #[test]
+    fn poll_local_prepare_applies_open_group_and_keeps_receiver() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        tx.send(LocalPrepareResult::OpenGroup {
+            prepared_group: PreparedLoadPaths {
+                image_paths: vec![test_memory_image_source(
+                    "open-group-active.dcm",
+                    "2.25.100000000000000000000000000000000001",
+                    "2.25.100000000000000000000000000000000002",
+                    "2.25.100000000000000000000000000000000003",
+                )],
+                ..Default::default()
+            },
+            open_group: 0,
+        })
+        .expect("open group should send");
+
+        let mut app = DicomViewerApp {
+            local_prepare_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.poll_local_prepare(&ctx);
+
+        assert!(app.local_prepare_receiver.is_some());
+        assert!(app.single_load_receiver.is_some());
+        drop(tx);
+    }
+
+    #[test]
+    fn poll_local_prepare_final_groups_preload_background_without_reopening_active() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        tx.send(LocalPrepareResult::Groups {
+            prepared_groups: vec![
+                PreparedLoadPaths {
+                    image_paths: vec![test_memory_image_source(
+                        "active-final.dcm",
+                        "2.25.100000000000000000000000000000000004",
+                        "2.25.100000000000000000000000000000000005",
+                        "2.25.100000000000000000000000000000000006",
+                    )],
+                    ..Default::default()
+                },
+                PreparedLoadPaths {
+                    image_paths: vec![test_memory_image_source(
+                        "background-final.dcm",
+                        "2.25.100000000000000000000000000000000007",
+                        "2.25.100000000000000000000000000000000008",
+                        "2.25.100000000000000000000000000000000009",
+                    )],
+                    ..Default::default()
+                },
+            ],
+            open_group: 0,
+        })
+        .expect("final groups should send");
+
+        let existing_path = test_meta("already-open.dcm");
+        let mut app = DicomViewerApp {
+            local_prepare_receiver: Some(rx),
+            current_single_path: Some(existing_path.clone()),
+            ..Default::default()
+        };
+
+        app.poll_local_prepare(&ctx);
+
+        assert!(app.local_prepare_receiver.is_none());
+        assert!(app.single_load_receiver.is_none());
+        assert_eq!(app.current_single_path, Some(existing_path));
+        assert!(app.history_preload_receiver.is_some());
     }
 
     #[test]
