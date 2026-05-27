@@ -2,8 +2,9 @@ SHELL := /bin/bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build build-release run run-release check test fmt fmt-check clippy clean \
-	install-watch watch-check watch-test watch-run watch-all dev site install-protocol-linux benchmark
+.PHONY: help build build-local build-release build-release-local run run-local run-release \
+	check test fmt fmt-check clippy clean install-watch watch-check watch-test watch-run \
+	watch-all dev site install-protocol-linux benchmark local-build-env
 
 BENCH_RUNS ?= 5
 BENCH_WARMUP ?= 1
@@ -11,14 +12,21 @@ BENCH_ROWS ?= 1024
 BENCH_COLS ?= 1024
 BENCH_TIMEOUT_SECS ?= 15
 BENCH_IMAGES ?= 8
+PACKAGE_VERSION := $(shell awk '/^\[package\]$$/ { in_package = 1; next } /^\[/ { in_package = 0 } in_package && /^version = / { gsub(/"/, "", $$3); print $$3; exit }' Cargo.toml)
+LOCAL_BUILD_TIMESTAMP ?= $(shell date -u +%Y%m%d%H%M%S)
+LOCAL_VERSION_SUFFIX := -$(LOCAL_BUILD_TIMESTAMP)
+LOCAL_VERSION := $(PACKAGE_VERSION)$(LOCAL_VERSION_SUFFIX)
 
 help:
 	@echo "Perspecta DICOM Viewer - Make targets"
 	@echo ""
 	@echo "  make run            Run app (debug)"
+	@echo "  make run-local      Run app with local prerelease timestamp"
 	@echo "  make run-release    Run app (release)"
 	@echo "  make build          Build binary (debug)"
+	@echo "  make build-local    Build debug binary with local prerelease timestamp"
 	@echo "  make build-release  Build binary (release)"
+	@echo "  make build-release-local  Build release binary with local prerelease timestamp"
 	@echo "  make check          cargo check"
 	@echo "  make test           cargo test"
 	@echo "  make fmt            cargo fmt"
@@ -39,11 +47,20 @@ help:
 build:
 	cargo build
 
+build-local: local-build-env
+	PERSPECTA_VERSION_SUFFIX="$(LOCAL_VERSION_SUFFIX)" cargo build
+
 build-release:
 	cargo build --release
 
+build-release-local: local-build-env
+	PERSPECTA_VERSION_SUFFIX="$(LOCAL_VERSION_SUFFIX)" cargo build --release
+
 run:
 	cargo run
+
+run-local: local-build-env
+	PERSPECTA_VERSION_SUFFIX="$(LOCAL_VERSION_SUFFIX)" cargo run
 
 run-release:
 	cargo run --release
@@ -101,3 +118,13 @@ benchmark:
 	@cargo build --quiet --release -p perspecta --bin perspecta
 	@cargo build --quiet --release -p benchmark-tools --bin benchmark_open
 	@./target/release/benchmark_open --app ./target/release/perspecta --runs $(BENCH_RUNS) --warmup $(BENCH_WARMUP) --rows $(BENCH_ROWS) --cols $(BENCH_COLS) --timeout-secs $(BENCH_TIMEOUT_SECS) --images $(BENCH_IMAGES)
+
+local-build-env:
+	@if [[ -z "$(PACKAGE_VERSION)" ]]; then \
+		echo "Could not determine package version from Cargo.toml" >&2; \
+		exit 1; \
+	fi
+	@if [[ ! "$(LOCAL_BUILD_TIMESTAMP)" =~ ^[0-9]{14}$$ ]]; then \
+		echo "LOCAL_BUILD_TIMESTAMP must match YYYYMMDDHHMMSS, got: $(LOCAL_BUILD_TIMESTAMP)" >&2; \
+		exit 1; \
+	fi
