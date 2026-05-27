@@ -46,7 +46,7 @@ use self::load::{LocalPrepareResult, PendingLoad, PendingSingleLoad, PreparedLoa
 use self::measurement::{LiveMeasurement, MeasurementGeometry, MeasurementTarget};
 
 const APP_TITLE: &str = "Perspecta Viewer";
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const APP_VERSION: &str = env!("PERSPECTA_DISPLAY_VERSION");
 const TITLE_TEXT_SIZE: f32 = 14.0;
 const HISTORY_MAX_ENTRIES: usize = 24;
 const HISTORY_THUMB_MAX_DIM: usize = 96;

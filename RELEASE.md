@@ -30,6 +30,21 @@ GitHub Actions `workflow_dispatch`.
    or start the `Release` workflow manually from the Actions tab on `main` or
    `master`; if the draft release already exists, the workflow will reuse it.
 
+## Local Prerelease Builds
+
+For frequent local debug builds, keep `Cargo.toml` on the plain `X.Y.Z` version
+and use timestamped prerelease suffixes only in the local build environment:
+
+```sh
+make run-local
+make build-local
+make build-release-local
+```
+
+The local targets use a UTC `YYYYMMDDHHMMSS` timestamp by default, producing
+display/package versions like `vX.Y.Z-YYYYMMDDHHMMSS`. To reproduce a specific
+local build ID, set `LOCAL_BUILD_TIMESTAMP=YYYYMMDDHHMMSS`.
+
 ## Notes
 
 - Automatic publishing only happens when the version changes and the
