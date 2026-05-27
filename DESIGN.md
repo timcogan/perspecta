@@ -52,6 +52,7 @@ Its primary purpose is consistency during development, not full architecture cov
 22. Visible metadata field settings MUST apply only to the summary overlay; the full metadata popup MUST ignore that filter and show all extracted fields for the active object.
 23. Live measurements MUST be stored in image coordinates, not screen coordinates, so zoom and pan do not change their geometry.
 24. Live measurements are transient UI state only; they MUST NOT persist into history entries and MUST clear on frame or study/context changes.
+25. Expensive local DICOM preparation and initial preview rendering MUST run on workers; the main thread applies results and uploads textures.
 
 ## Change Rules
 

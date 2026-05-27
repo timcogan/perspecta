@@ -59,6 +59,7 @@ pub(super) struct HistoryGroupViewportData {
     pub(super) path: DicomSourceMeta,
     pub(super) image: DicomImage,
     pub(super) texture: TextureHandle,
+    pub(super) history_thumb: ColorImage,
     pub(super) label: String,
     pub(super) window_center: f32,
     pub(super) window_width: f32,
@@ -135,19 +136,7 @@ impl DicomViewerApp {
         let mut rendered_views = Vec::new();
         for index in ordered_indices {
             let viewport = &group[index];
-            let frame_count = viewport.image.frame_count();
-            if frame_count == 0 {
-                continue;
-            }
-            let safe_frame = viewport.current_frame.min(frame_count.saturating_sub(1));
-            let rendered = Self::render_image_frame(
-                &viewport.image,
-                safe_frame,
-                viewport.window_center,
-                viewport.window_width,
-                false,
-            )?;
-            rendered_views.push(rendered);
+            rendered_views.push(viewport.history_thumb.clone());
         }
 
         if rendered_views.is_empty() {
@@ -292,6 +281,24 @@ impl DicomViewerApp {
         });
     }
 
+    pub(super) fn push_single_history_entry_with_thumb(
+        &mut self,
+        single: HistorySingleData,
+        thumb: ColorImage,
+        ctx: &egui::Context,
+    ) {
+        let texture_name = self.next_history_texture_name("single");
+        let thumb_texture = ctx.load_texture(texture_name, thumb, TextureOptions::LINEAR);
+        let history_paths = vec![single.path.clone()];
+        self.upsert_history_entry(HistoryEntry {
+            id: history_id_from_paths(&history_paths),
+            kind: HistoryKind::Single(Box::new(single)),
+            thumbs: vec![HistoryThumb {
+                texture: thumb_texture,
+            }],
+        });
+    }
+
     pub(super) fn push_group_history_entry(
         &mut self,
         group: &[MammoViewport],
@@ -310,6 +317,7 @@ impl DicomViewerApp {
                 path: viewport.path.clone(),
                 image: viewport.image.clone(),
                 texture: viewport.texture.clone(),
+                history_thumb: viewport.history_thumb.clone(),
                 label: viewport.label.clone(),
                 window_center: viewport.window_center,
                 window_width: viewport.window_width,
@@ -371,6 +379,7 @@ impl DicomViewerApp {
             || self.report.is_some()
             || self.current_single_path.is_some()
             || self.has_mammo_group()
+            || self.local_prepare_receiver.is_some()
             || self.single_load_receiver.is_some()
             || self.dicomweb_receiver.is_some()
             || self.dicomweb_active_path_receiver.is_some()
@@ -381,6 +390,7 @@ impl DicomViewerApp {
         self.pending_launch_request = None;
         self.pending_local_open_paths = None;
         self.pending_local_open_armed = false;
+        self.local_prepare_receiver = None;
         self.pending_history_open_id = None;
         self.pending_history_open_armed = false;
         self.dicomweb_receiver = None;
@@ -784,6 +794,7 @@ impl DicomViewerApp {
                             path: viewport.path,
                             image: viewport.image,
                             texture: viewport.texture,
+                            history_thumb: viewport.history_thumb,
                             label: viewport.label,
                             window_center: viewport.window_center,
                             window_width: viewport.window_width,
@@ -910,6 +921,8 @@ impl DicomViewerApp {
                             let path_meta = DicomSourceMeta::from(&path);
                             let texture_name =
                                 Self::source_texture_name("history-preload-group", &path_meta);
+                            let history_thumb =
+                                downsample_color_image(&color_image, HISTORY_THUMB_MAX_DIM);
                             let texture =
                                 ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
                             let label = mammo_label(&image, &path_meta);
@@ -917,6 +930,7 @@ impl DicomViewerApp {
                                 path: path_meta,
                                 image,
                                 texture,
+                                history_thumb,
                                 label,
                                 window_center: center,
                                 window_width: width,
@@ -1038,7 +1052,7 @@ fn history_preload_group_id(prepared: &PreparedLoadPaths) -> String {
     history_id_from_paths(&paths)
 }
 
-fn downsample_color_image(source: &ColorImage, max_dim: usize) -> ColorImage {
+pub(super) fn downsample_color_image(source: &ColorImage, max_dim: usize) -> ColorImage {
     let source_width = source.size[0];
     let source_height = source.size[1];
     if source_width == 0 || source_height == 0 || max_dim == 0 {
@@ -1067,7 +1081,7 @@ fn downsample_color_image(source: &ColorImage, max_dim: usize) -> ColorImage {
     ColorImage::new([target_width, target_height], pixels)
 }
 
-fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
+pub(super) fn compose_grid_thumb(images: &[ColorImage], max_dim: usize) -> ColorImage {
     if images.is_empty() || max_dim == 0 {
         return ColorImage::new([1, 1], vec![egui::Color32::BLACK]);
     }
