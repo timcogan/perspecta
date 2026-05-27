@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -41,7 +42,7 @@ use self::history::{
     HistoryEntry, HistoryKind, HistoryPreloadJob, HistoryPreloadJobKey, HistoryPreloadResult,
     HistorySingleData,
 };
-use self::load::{PendingLoad, PendingSingleLoad, PreparedLoadPaths};
+use self::load::{LocalPrepareResult, PendingLoad, PendingSingleLoad, PreparedLoadPaths};
 use self::measurement::{LiveMeasurement, MeasurementGeometry, MeasurementTarget};
 
 const APP_TITLE: &str = "Perspecta Viewer";
@@ -97,6 +98,7 @@ struct MammoViewport {
     path: DicomSourceMeta,
     image: DicomImage,
     texture: TextureHandle,
+    history_thumb: ColorImage,
     label: String,
     window_center: f32,
     window_width: f32,
@@ -152,6 +154,8 @@ pub struct DicomViewerApp {
     dicomweb_active_group_paths: Vec<DicomSourceMeta>,
     dicomweb_completed_background_groups: HashSet<usize>,
     dicomweb_active_pending_paths: VecDeque<DicomSource>,
+    local_prepare_receiver: Option<Receiver<LocalPrepareResult>>,
+    local_prepare_cancel: Option<Arc<AtomicBool>>,
     full_metadata_receiver: Option<Receiver<FullMetadataLoadResult>>,
     full_metadata_sender: Option<Sender<FullMetadataLoadResult>>,
     single_load_receiver: Option<Receiver<Result<PendingSingleLoad, String>>>,
@@ -221,6 +225,8 @@ impl DicomViewerApp {
             dicomweb_active_group_paths: Vec::new(),
             dicomweb_completed_background_groups: HashSet::new(),
             dicomweb_active_pending_paths: VecDeque::new(),
+            local_prepare_receiver: None,
+            local_prepare_cancel: None,
             full_metadata_receiver: Some(full_metadata_receiver),
             full_metadata_sender: Some(full_metadata_sender),
             single_load_receiver: None,
@@ -278,6 +284,7 @@ impl DicomViewerApp {
             || !self.dicomweb_active_pending_paths.is_empty()
             || self.single_load_receiver.is_some()
             || self.mammo_load_receiver.is_some()
+            || self.local_prepare_receiver.is_some()
             || self.history_preload_receiver.is_some()
             || !self.history_preload_queue.is_empty()
             || self.pending_history_open_id.is_some()
@@ -675,6 +682,11 @@ impl DicomViewerApp {
         if paths.is_empty() {
             return;
         }
+        self.cancel_local_prepare();
+        self.single_load_receiver = None;
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.history_pushed_for_active_group = false;
         self.pending_local_open_paths = Some(paths);
         self.pending_local_open_armed = false;
     }
@@ -747,7 +759,7 @@ impl DicomViewerApp {
             return;
         };
         self.pending_local_open_armed = false;
-        let _ = self.load_selected_paths(paths, ctx);
+        self.start_local_paths_prepare(paths, ctx);
     }
 
     fn clear_single_viewer(&mut self) {
@@ -2187,6 +2199,7 @@ impl eframe::App for DicomViewerApp {
 
         self.poll_dicomweb_active_paths(ctx);
         self.poll_dicomweb_download(ctx);
+        self.poll_local_prepare(ctx);
         self.poll_history_preload(ctx);
         self.poll_full_metadata_load(ctx);
         self.poll_single_load(ctx);
@@ -3237,6 +3250,20 @@ mod tests {
         )
     }
 
+    fn test_preview() -> ColorImage {
+        ColorImage::new([1, 1], vec![egui::Color32::BLACK])
+    }
+
+    fn test_pending_load(path: &str, image: DicomImage) -> PendingLoad {
+        PendingLoad {
+            path: test_source(path),
+            image,
+            preview: test_preview(),
+            history_thumb: test_preview(),
+            initial_frame: 0,
+        }
+    }
+
     fn assert_approx_eq(actual: f32, expected: f32) {
         assert!(
             (actual - expected).abs() < 0.001,
@@ -3686,6 +3713,47 @@ mod tests {
     }
 
     #[test]
+    fn queue_local_paths_open_cancels_existing_prepare_worker() {
+        let (_tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut app = DicomViewerApp {
+            local_prepare_receiver: Some(rx),
+            local_prepare_cancel: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+
+        app.queue_local_paths_open(vec![PathBuf::from("replacement.dcm")]);
+
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(app.local_prepare_receiver.is_none());
+        assert!(app.local_prepare_cancel.is_none());
+        assert_eq!(
+            app.pending_local_open_paths,
+            Some(vec![PathBuf::from("replacement.dcm")])
+        );
+    }
+
+    #[test]
+    fn queue_local_paths_open_clears_active_load_receivers() {
+        let (_single_tx, single_rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        let (mammo_tx, mammo_rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        let mut app = DicomViewerApp {
+            single_load_receiver: Some(single_rx),
+            mammo_load_receiver: Some(mammo_rx),
+            mammo_load_sender: Some(mammo_tx),
+            history_pushed_for_active_group: true,
+            ..Default::default()
+        };
+
+        app.queue_local_paths_open(vec![PathBuf::from("replacement.dcm")]);
+
+        assert!(app.single_load_receiver.is_none());
+        assert!(app.mammo_load_receiver.is_none());
+        assert!(app.mammo_load_sender.is_none());
+        assert!(!app.history_pushed_for_active_group);
+    }
+
+    #[test]
     fn apply_dropped_files_without_paths_sets_user_visible_error() {
         let ctx = egui::Context::default();
         let mut app = DicomViewerApp::default();
@@ -3701,6 +3769,176 @@ mod tests {
             Some("Dropped items did not include readable local file paths.")
         );
         assert!(app.pending_local_open_paths.is_none());
+    }
+
+    #[test]
+    fn process_pending_local_open_starts_prepare_worker_after_arming() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp::default();
+
+        app.queue_local_paths_open(vec![PathBuf::from("large-local.dcm")]);
+        app.process_pending_local_open(&ctx);
+
+        assert!(app.pending_local_open_armed);
+        assert!(app.local_prepare_receiver.is_none());
+
+        app.process_pending_local_open(&ctx);
+
+        assert!(app.pending_local_open_paths.is_none());
+        assert!(!app.pending_local_open_armed);
+        assert!(app.local_prepare_receiver.is_some());
+        assert!(app.is_loading());
+    }
+
+    #[test]
+    fn start_local_prepare_clears_dicomweb_streaming_state() {
+        let ctx = egui::Context::default();
+        let (_download_tx, download_rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        let (_stream_tx, stream_rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        let mut app = DicomViewerApp {
+            dicomweb_receiver: Some(download_rx),
+            dicomweb_active_path_receiver: Some(stream_rx),
+            dicomweb_active_group_expected: Some(1),
+            dicomweb_active_group_paths: vec![test_meta("stale-active.dcm")],
+            dicomweb_completed_background_groups: HashSet::from([1]),
+            dicomweb_active_pending_paths: VecDeque::from([test_source("stale-pending.dcm")]),
+            history_pushed_for_active_group: true,
+            ..Default::default()
+        };
+
+        app.start_local_paths_prepare(Vec::<DicomSource>::new(), &ctx);
+
+        assert!(app.dicomweb_receiver.is_none());
+        assert!(app.dicomweb_active_path_receiver.is_none());
+        assert!(app.dicomweb_active_group_expected.is_none());
+        assert!(app.dicomweb_active_group_paths.is_empty());
+        assert!(app.dicomweb_completed_background_groups.is_empty());
+        assert!(app.dicomweb_active_pending_paths.is_empty());
+        assert!(!app.history_pushed_for_active_group);
+        assert!(app.local_prepare_receiver.is_some());
+        app.cancel_local_prepare();
+    }
+
+    #[test]
+    fn poll_local_prepare_applies_prepared_paths() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        tx.send(LocalPrepareResult::Paths(PreparedLoadPaths {
+            other_files_found: 1,
+            ..Default::default()
+        }))
+        .expect("prepared paths should send");
+
+        let mut app = DicomViewerApp {
+            local_prepare_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.poll_local_prepare(&ctx);
+
+        assert!(app.local_prepare_receiver.is_none());
+        assert_eq!(
+            app.load_error_message.as_deref(),
+            Some("Selected DICOM objects are not displayable images, parametric maps, or structured reports.")
+        );
+    }
+
+    #[test]
+    fn poll_local_prepare_applies_open_group_and_keeps_receiver() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        tx.send(LocalPrepareResult::OpenGroup {
+            prepared_group: PreparedLoadPaths {
+                image_paths: vec![test_memory_image_source(
+                    "open-group-active.dcm",
+                    "2.25.100000000000000000000000000000000001",
+                    "2.25.100000000000000000000000000000000002",
+                    "2.25.100000000000000000000000000000000003",
+                )],
+                ..Default::default()
+            },
+            open_group: 0,
+        })
+        .expect("open group should send");
+
+        let mut app = DicomViewerApp {
+            local_prepare_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.poll_local_prepare(&ctx);
+
+        assert!(app.local_prepare_receiver.is_some());
+        assert!(app.single_load_receiver.is_some());
+        drop(tx);
+    }
+
+    #[test]
+    fn poll_local_prepare_final_groups_preload_background_without_reopening_active() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        tx.send(LocalPrepareResult::Groups {
+            prepared_groups: vec![
+                PreparedLoadPaths {
+                    image_paths: vec![test_memory_image_source(
+                        "active-final.dcm",
+                        "2.25.100000000000000000000000000000000004",
+                        "2.25.100000000000000000000000000000000005",
+                        "2.25.100000000000000000000000000000000006",
+                    )],
+                    ..Default::default()
+                },
+                PreparedLoadPaths {
+                    image_paths: vec![test_memory_image_source(
+                        "background-final.dcm",
+                        "2.25.100000000000000000000000000000000007",
+                        "2.25.100000000000000000000000000000000008",
+                        "2.25.100000000000000000000000000000000009",
+                    )],
+                    ..Default::default()
+                },
+            ],
+            open_group: 0,
+        })
+        .expect("final groups should send");
+
+        let existing_path = test_meta("already-open.dcm");
+        let mut app = DicomViewerApp {
+            local_prepare_receiver: Some(rx),
+            current_single_path: Some(existing_path.clone()),
+            ..Default::default()
+        };
+
+        app.poll_local_prepare(&ctx);
+
+        assert!(app.local_prepare_receiver.is_none());
+        assert!(app.single_load_receiver.is_none());
+        assert_eq!(app.current_single_path, Some(existing_path));
+        assert!(app.history_preload_receiver.is_some());
+    }
+
+    #[test]
+    fn poll_local_prepare_applies_group_validation() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        tx.send(LocalPrepareResult::Groups {
+            prepared_groups: Vec::new(),
+            open_group: 0,
+        })
+        .expect("prepared groups should send");
+
+        let mut app = DicomViewerApp {
+            local_prepare_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        app.poll_local_prepare(&ctx);
+
+        assert!(app.local_prepare_receiver.is_none());
+        assert_eq!(
+            app.load_error_message.as_deref(),
+            Some("Launch request had no groups to open.")
+        );
     }
 
     #[test]
@@ -4291,6 +4529,7 @@ mod tests {
                                     &ctx,
                                     "authoritative-gsps-detach-history-group-a",
                                 ),
+                                history_thumb: test_preview(),
                                 label: "A".to_string(),
                                 window_center: 0.0,
                                 window_width: 1.0,
@@ -4303,6 +4542,7 @@ mod tests {
                                     &ctx,
                                     "authoritative-gsps-detach-history-group-b",
                                 ),
+                                history_thumb: test_preview(),
                                 label: "B".to_string(),
                                 window_center: 0.0,
                                 window_width: 1.0,
@@ -4465,6 +4705,7 @@ mod tests {
                                     &ctx,
                                     "authoritative-sr-detach-history-group-a",
                                 ),
+                                history_thumb: test_preview(),
                                 label: "A".to_string(),
                                 window_center: 0.0,
                                 window_width: 1.0,
@@ -4477,6 +4718,7 @@ mod tests {
                                     &ctx,
                                     "authoritative-sr-detach-history-group-b",
                                 ),
+                                history_thumb: test_preview(),
                                 label: "B".to_string(),
                                 window_center: 0.0,
                                 window_width: 1.0,
@@ -4616,6 +4858,7 @@ mod tests {
                     path: test_meta("non-renderable-a.dcm"),
                     image: DicomImage::test_stub_with_mono_frames(Some(overlay), 4),
                     texture: texture_a,
+                    history_thumb: test_preview(),
                     label: "A".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -4628,6 +4871,7 @@ mod tests {
                     path: test_meta("non-renderable-b.dcm"),
                     image: DicomImage::test_stub_with_mono_frames(None, 3),
                     texture: texture_b,
+                    history_thumb: test_preview(),
                     label: "B".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -4666,6 +4910,7 @@ mod tests {
                     path: test_meta("a.dcm"),
                     image: DicomImage::test_stub_with_mono_frames(None, 1),
                     texture: texture_a,
+                    history_thumb: test_preview(),
                     label: "A".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -4678,6 +4923,7 @@ mod tests {
                     path: test_meta("b.dcm"),
                     image: DicomImage::test_stub_with_mono_frames(Some(overlay), 1),
                     texture: texture_b,
+                    history_thumb: test_preview(),
                     label: "B".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -4846,6 +5092,7 @@ mod tests {
                     path: test_meta("a.dcm"),
                     image: DicomImage::test_stub_with_mono_frames(Some(overlay_a), 3),
                     texture: texture_a,
+                    history_thumb: test_preview(),
                     label: "A".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -4858,6 +5105,7 @@ mod tests {
                     path: test_meta("b.dcm"),
                     image: DicomImage::test_stub_with_mono_frames(Some(overlay_b), 3),
                     texture: texture_b,
+                    history_thumb: test_preview(),
                     label: "B".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5019,6 +5267,7 @@ mod tests {
                     path: path_a.clone(),
                     image: DicomImage::test_stub(None),
                     texture: texture_a.clone(),
+                    history_thumb: test_preview(),
                     label: "A".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5031,6 +5280,7 @@ mod tests {
                     path: path_b.clone(),
                     image: DicomImage::test_stub(None),
                     texture: texture_b.clone(),
+                    history_thumb: test_preview(),
                     label: "B".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5048,6 +5298,7 @@ mod tests {
                             path: path_a,
                             image: DicomImage::test_stub(None),
                             texture: texture_a,
+                            history_thumb: test_preview(),
                             label: "A".to_string(),
                             window_center: 0.0,
                             window_width: 1.0,
@@ -5057,6 +5308,7 @@ mod tests {
                             path: path_b.clone(),
                             image: DicomImage::test_stub(Some(stale_overlay)),
                             texture: texture_b,
+                            history_thumb: test_preview(),
                             label: "B".to_string(),
                             window_center: 0.0,
                             window_width: 1.0,
@@ -5110,6 +5362,7 @@ mod tests {
                             path: test_meta("cached-a.dcm"),
                             image: DicomImage::test_stub(None),
                             texture: texture_a,
+                            history_thumb: test_preview(),
                             label: "A".to_string(),
                             window_center: 0.0,
                             window_width: 1.0,
@@ -5119,6 +5372,7 @@ mod tests {
                             path: test_meta("cached-b.dcm"),
                             image: DicomImage::test_stub(None),
                             texture: texture_b,
+                            history_thumb: test_preview(),
                             label: "B".to_string(),
                             window_center: 0.0,
                             window_width: 1.0,
@@ -5168,6 +5422,7 @@ mod tests {
                             path: test_meta("cached-a.dcm"),
                             image: DicomImage::test_stub(None),
                             texture: texture_a,
+                            history_thumb: test_preview(),
                             label: "A".to_string(),
                             window_center: 0.0,
                             window_width: 1.0,
@@ -5177,6 +5432,7 @@ mod tests {
                             path: test_meta("cached-b.dcm"),
                             image: DicomImage::test_stub(Some(overlay)),
                             texture: texture_b,
+                            history_thumb: test_preview(),
                             label: "B".to_string(),
                             window_center: 0.0,
                             window_width: 1.0,
@@ -5238,6 +5494,7 @@ mod tests {
                     path: test_meta("group-a.dcm"),
                     image: DicomImage::test_stub(None),
                     texture: texture.clone(),
+                    history_thumb: test_preview(),
                     label: "A".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5250,6 +5507,7 @@ mod tests {
                     path: test_meta("group-b.dcm"),
                     image: DicomImage::test_stub(None),
                     texture,
+                    history_thumb: test_preview(),
                     label: "B".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5649,6 +5907,7 @@ mod tests {
                     path: test_meta("history-a.dcm"),
                     image: DicomImage::test_stub(None),
                     texture: test_texture(&ctx, "history-group-a"),
+                    history_thumb: test_preview(),
                     label: "A".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5661,6 +5920,7 @@ mod tests {
                     path: test_meta("history-b.dcm"),
                     image: DicomImage::test_stub(None),
                     texture: test_texture(&ctx, "history-group-b"),
+                    history_thumb: test_preview(),
                     label: "B".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5736,6 +5996,7 @@ mod tests {
                     path: test_meta("history-a.dcm"),
                     image: DicomImage::test_stub(None),
                     texture: test_texture(&ctx, "other-group-a"),
+                    history_thumb: test_preview(),
                     label: "A".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5748,6 +6009,7 @@ mod tests {
                     path: test_meta("history-b.dcm"),
                     image: DicomImage::test_stub(None),
                     texture: test_texture(&ctx, "other-group-b"),
+                    history_thumb: test_preview(),
                     label: "B".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5820,6 +6082,7 @@ mod tests {
                     path: (&image_a_source).into(),
                     image: image_a,
                     texture: test_texture(&ctx, "displayed-active-a"),
+                    history_thumb: test_preview(),
                     label: "A".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5832,6 +6095,7 @@ mod tests {
                     path: (&image_b_source).into(),
                     image: image_b,
                     texture: test_texture(&ctx, "displayed-active-b"),
+                    history_thumb: test_preview(),
                     label: "B".to_string(),
                     window_center: 0.0,
                     window_width: 1.0,
@@ -5957,6 +6221,7 @@ mod tests {
                             path: (&background_image_a_source).into(),
                             image: background_image_a,
                             texture: test_texture(&ctx, "background-history-a"),
+                            history_thumb: test_preview(),
                             label: "A".to_string(),
                             window_center: 0.0,
                             window_width: 1.0,
@@ -5966,6 +6231,7 @@ mod tests {
                             path: (&background_image_b_source).into(),
                             image: background_image_b,
                             texture: test_texture(&ctx, "background-history-b"),
+                            history_thumb: test_preview(),
                             label: "B".to_string(),
                             window_center: 0.0,
                             window_width: 1.0,
@@ -6322,10 +6588,10 @@ mod tests {
     #[test]
     fn poll_single_load_clears_user_visible_error_on_success() {
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
-        tx.send(Ok(PendingSingleLoad::Image(Box::new(PendingLoad {
-            path: test_source("selected.dcm"),
-            image: DicomImage::test_stub(None),
-        }))))
+        tx.send(Ok(PendingSingleLoad::Image(Box::new(test_pending_load(
+            "selected.dcm",
+            DicomImage::test_stub(None),
+        )))))
         .expect("success should send");
 
         let mut app = DicomViewerApp {
@@ -6338,16 +6604,49 @@ mod tests {
         app.poll_single_load(&ctx);
 
         assert!(app.load_error_message.is_none());
+        assert!(app.texture.is_some());
+    }
+
+    #[test]
+    fn pending_load_uses_first_renderable_frame() {
+        let image = DicomImage::test_stub_with_lazy_mono_cache(&[(1, 7)]);
+
+        let pending = DicomViewerApp::pending_load(test_source("lazy-frame.dcm"), image)
+            .expect("second frame should provide a preview");
+
+        assert_eq!(pending.initial_frame, 1);
+    }
+
+    #[test]
+    fn poll_single_load_uses_pending_initial_frame() {
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        let mut pending = test_pending_load(
+            "selected-frame.dcm",
+            DicomImage::test_stub_with_mono_frames(None, 3),
+        );
+        pending.initial_frame = 2;
+        tx.send(Ok(PendingSingleLoad::Image(Box::new(pending))))
+            .expect("success should send");
+
+        let mut app = DicomViewerApp {
+            single_load_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_single_load(&ctx);
+
+        assert_eq!(app.current_frame, 2);
     }
 
     #[test]
     fn poll_mammo_group_load_drains_all_available_images_in_one_repaint() {
         let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
         for path in ["one.dcm", "two.dcm", "three.dcm"] {
-            tx.send(Ok(PendingLoad {
-                path: test_source(path),
-                image: DicomImage::test_stub_with_mono_frames(None, 1),
-            }))
+            tx.send(Ok(test_pending_load(
+                path,
+                DicomImage::test_stub_with_mono_frames(None, 1),
+            )))
             .expect("pending mammo image should send");
         }
         drop(tx);
@@ -6368,12 +6667,42 @@ mod tests {
     }
 
     #[test]
+    fn poll_mammo_group_load_uses_pending_initial_frame() {
+        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        let mut pending = test_pending_load(
+            "initial-frame.dcm",
+            DicomImage::test_stub_with_mono_frames(None, 3),
+        );
+        pending.initial_frame = 2;
+        tx.send(Ok(pending))
+            .expect("pending mammo image should send");
+        drop(tx);
+
+        let mut app = DicomViewerApp {
+            mammo_group: vec![None, None],
+            mammo_load_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_mammo_group_load(&ctx);
+
+        let loaded = app
+            .mammo_group
+            .iter()
+            .filter_map(Option::as_ref)
+            .next()
+            .expect("one viewport should load");
+        assert_eq!(loaded.current_frame, 2);
+    }
+
+    #[test]
     fn poll_mammo_group_load_keeps_error_when_batch_contains_failure() {
         let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
-        tx.send(Ok(PendingLoad {
-            path: test_source("one.dcm"),
-            image: DicomImage::test_stub_with_mono_frames(None, 1),
-        }))
+        tx.send(Ok(test_pending_load(
+            "one.dcm",
+            DicomImage::test_stub_with_mono_frames(None, 1),
+        )))
         .expect("pending mammo image should send");
         tx.send(Err("decode failed".to_string()))
             .expect("pending mammo failure should send");

@@ -7,6 +7,9 @@ const OPEN_COMPLETED_EVENT: &str = "open completed";
 pub(super) struct PendingLoad {
     pub(super) path: DicomSource,
     pub(super) image: DicomImage,
+    pub(super) preview: ColorImage,
+    pub(super) history_thumb: ColorImage,
+    pub(super) initial_frame: usize,
 }
 
 struct PreparedImagePath {
@@ -36,6 +39,18 @@ pub(super) enum PendingSingleLoad {
     StructuredReport {
         path: DicomSource,
         report: Box<StructuredReportDocument>,
+    },
+}
+
+pub(super) enum LocalPrepareResult {
+    Paths(PreparedLoadPaths),
+    OpenGroup {
+        prepared_group: PreparedLoadPaths,
+        open_group: usize,
+    },
+    Groups {
+        prepared_groups: Vec<PreparedLoadPaths>,
+        open_group: usize,
     },
 }
 
@@ -76,11 +91,25 @@ impl DicomViewerApp {
     where
         T: Into<DicomSource>,
     {
+        Self::prepare_load_paths_with_cancel(paths, || false).unwrap_or_default()
+    }
+
+    fn prepare_load_paths_with_cancel<T, F>(
+        paths: Vec<T>,
+        cancelled: F,
+    ) -> Option<PreparedLoadPaths>
+    where
+        T: Into<DicomSource>,
+        F: Fn() -> bool,
+    {
         let mut prepared = PreparedLoadPaths::default();
         let mut prepared_images = Vec::<PreparedImagePath>::new();
         let mut prepared_parametric_maps = Vec::<PreparedParametricMapPath>::new();
 
         for path in paths {
+            if cancelled() {
+                return None;
+            }
             let path = path.into();
             match classify_dicom_path(&path) {
                 Ok(DicomPathKind::Gsps) => {
@@ -143,6 +172,9 @@ impl DicomViewerApp {
             .collect::<Vec<_>>();
 
         for prepared_map in prepared_parametric_maps {
+            if cancelled() {
+                return None;
+            }
             let matched_overlays = prepared_map
                 .overlays
                 .into_iter()
@@ -157,18 +189,271 @@ impl DicomViewerApp {
             }
         }
 
-        prepared
+        if cancelled() {
+            None
+        } else {
+            Some(prepared)
+        }
     }
 
     pub(super) fn handle_launch_request(&mut self, request: LaunchRequest, ctx: &egui::Context) {
         match request {
             LaunchRequest::LocalPaths(paths) => self.queue_local_paths_open(paths),
             LaunchRequest::LocalGroups { groups, open_group } => {
-                self.load_local_groups(groups, open_group, ctx)
+                self.start_local_group_prepare(groups, open_group, ctx)
             }
             LaunchRequest::DicomWebGroups(request) => self.start_dicomweb_group_download(request),
             LaunchRequest::DicomWeb(request) => self.start_dicomweb_download(request),
         }
+    }
+
+    pub(super) fn cancel_local_prepare(&mut self) {
+        if let Some(cancel) = self.local_prepare_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.local_prepare_receiver = None;
+    }
+
+    fn begin_local_prepare(&mut self) -> Arc<AtomicBool> {
+        self.cancel_local_prepare();
+        self.clear_dicomweb_state_for_local_prepare();
+        self.clear_load_error();
+        self.single_load_receiver = None;
+        self.mammo_load_receiver = None;
+        self.mammo_load_sender = None;
+        self.history_pushed_for_active_group = false;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.local_prepare_cancel = Some(Arc::clone(&cancel));
+        cancel
+    }
+
+    fn clear_dicomweb_state_for_local_prepare(&mut self) {
+        self.dicomweb_receiver = None;
+        self.dicomweb_active_path_receiver = None;
+        self.dicomweb_active_group_expected = None;
+        self.dicomweb_active_group_paths.clear();
+        self.dicomweb_completed_background_groups.clear();
+        self.dicomweb_active_pending_paths.clear();
+    }
+
+    pub(super) fn start_local_paths_prepare<T>(&mut self, paths: Vec<T>, ctx: &egui::Context)
+    where
+        T: Into<DicomSource>,
+    {
+        let paths = paths.into_iter().map(Into::into).collect::<Vec<_>>();
+        let cancel = self.begin_local_prepare();
+
+        let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        thread::spawn(move || {
+            let cancelled = || cancel.load(Ordering::Acquire);
+            let Some(prepared) = Self::prepare_load_paths_with_cancel(paths, cancelled) else {
+                return;
+            };
+            if cancel.load(Ordering::Acquire) {
+                return;
+            }
+            let _ = tx.send(LocalPrepareResult::Paths(prepared));
+        });
+        self.local_prepare_receiver = Some(rx);
+        ctx.request_repaint();
+    }
+
+    pub(super) fn start_local_group_prepare<T>(
+        &mut self,
+        groups: Vec<Vec<T>>,
+        open_group: usize,
+        ctx: &egui::Context,
+    ) where
+        T: Into<DicomSource>,
+    {
+        let groups = groups
+            .into_iter()
+            .map(|group| group.into_iter().map(Into::into).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let cancel = self.begin_local_prepare();
+
+        let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        thread::spawn(move || {
+            if groups.is_empty() {
+                if cancel.load(Ordering::Acquire) {
+                    return;
+                }
+                let _ = tx.send(LocalPrepareResult::Groups {
+                    prepared_groups: Vec::new(),
+                    open_group: 0,
+                });
+                return;
+            }
+
+            let group_count = groups.len();
+            let active_group = open_group.min(group_count.saturating_sub(1));
+            let mut pending_groups = groups.into_iter().map(Some).collect::<Vec<_>>();
+            let Some(active_paths) = pending_groups.get_mut(active_group).and_then(Option::take)
+            else {
+                return;
+            };
+
+            let cancelled = || cancel.load(Ordering::Acquire);
+            let Some(active_prepared) =
+                Self::prepare_load_paths_with_cancel(active_paths, cancelled)
+            else {
+                return;
+            };
+            if cancel.load(Ordering::Acquire) {
+                return;
+            }
+            if tx
+                .send(LocalPrepareResult::OpenGroup {
+                    prepared_group: active_prepared.clone(),
+                    open_group: active_group,
+                })
+                .is_err()
+            {
+                return;
+            }
+
+            let mut prepared_groups = vec![None; group_count];
+            prepared_groups[active_group] = Some(active_prepared);
+            for (group_index, group) in pending_groups.into_iter().enumerate() {
+                let Some(group) = group else {
+                    continue;
+                };
+                let cancelled = || cancel.load(Ordering::Acquire);
+                let Some(prepared) = Self::prepare_load_paths_with_cancel(group, cancelled) else {
+                    return;
+                };
+                prepared_groups[group_index] = Some(prepared);
+            }
+            if cancel.load(Ordering::Acquire) {
+                return;
+            }
+            let prepared_groups = prepared_groups
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default();
+            let _ = tx.send(LocalPrepareResult::Groups {
+                prepared_groups,
+                open_group: active_group,
+            });
+        });
+        self.local_prepare_receiver = Some(rx);
+        ctx.request_repaint();
+    }
+
+    pub(super) fn poll_local_prepare(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.local_prepare_receiver.take() else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(LocalPrepareResult::Paths(prepared)) => {
+                self.local_prepare_cancel = None;
+                let _ = self.apply_prepared_load_paths(prepared, ctx);
+                ctx.request_repaint();
+            }
+            Ok(LocalPrepareResult::OpenGroup {
+                prepared_group,
+                open_group,
+            }) => {
+                let _ = self.apply_prepared_open_group(prepared_group, open_group, ctx);
+                self.local_prepare_receiver = Some(receiver);
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            Ok(LocalPrepareResult::Groups {
+                prepared_groups,
+                open_group,
+            }) => {
+                self.local_prepare_cancel = None;
+                let _ =
+                    self.apply_prepared_local_group_backgrounds(prepared_groups, open_group, ctx);
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {
+                self.local_prepare_receiver = Some(receiver);
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.local_prepare_cancel = None;
+                self.set_load_error("Local DICOM preparation worker disconnected.");
+                log::error!("Local DICOM preparation worker disconnected.");
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    pub(super) fn apply_prepared_local_groups(
+        &mut self,
+        prepared_groups: Vec<PreparedLoadPaths>,
+        open_group: usize,
+        ctx: &egui::Context,
+    ) -> Result<(), ()> {
+        if prepared_groups.is_empty() {
+            self.set_load_error("Launch request had no groups to open.");
+            log::warn!("Launch request had no groups to open.");
+            return Err(());
+        }
+
+        for (index, prepared) in prepared_groups.iter().enumerate() {
+            self.validate_prepared_local_group(prepared, index)?;
+        }
+
+        let active_group = open_group.min(prepared_groups.len().saturating_sub(1));
+        let active_prepared = prepared_groups[active_group].clone();
+        let result = self.apply_prepared_load_paths(active_prepared, ctx);
+        self.preload_non_active_groups_into_history(&prepared_groups, active_group, None, ctx);
+        result
+    }
+
+    fn apply_prepared_open_group(
+        &mut self,
+        prepared_group: PreparedLoadPaths,
+        open_group: usize,
+        ctx: &egui::Context,
+    ) -> Result<(), ()> {
+        self.validate_prepared_local_group(&prepared_group, open_group)?;
+        self.apply_prepared_load_paths(prepared_group, ctx)
+    }
+
+    fn apply_prepared_local_group_backgrounds(
+        &mut self,
+        prepared_groups: Vec<PreparedLoadPaths>,
+        open_group: usize,
+        ctx: &egui::Context,
+    ) -> Result<(), ()> {
+        if prepared_groups.is_empty() {
+            self.set_load_error("Launch request had no groups to open.");
+            log::warn!("Launch request had no groups to open.");
+            return Err(());
+        }
+
+        for (index, prepared) in prepared_groups.iter().enumerate() {
+            self.validate_prepared_local_group(prepared, index)?;
+        }
+
+        let active_group = open_group.min(prepared_groups.len().saturating_sub(1));
+        self.preload_non_active_groups_into_history(&prepared_groups, active_group, None, ctx);
+        Ok(())
+    }
+
+    fn validate_prepared_local_group(
+        &mut self,
+        prepared: &PreparedLoadPaths,
+        group_index: usize,
+    ) -> Result<(), ()> {
+        if Self::is_supported_prepared_group(prepared) {
+            return Ok(());
+        }
+
+        let entry_count = if prepared.image_paths.is_empty() {
+            prepared.structured_report_paths.len()
+        } else {
+            prepared.image_paths.len()
+        };
+        let err = Self::format_group_size_error(group_index + 1, entry_count);
+        self.set_load_error(err.clone());
+        log::warn!("{err}");
+        Err(())
     }
 
     pub(super) fn load_local_groups<T>(
@@ -186,26 +471,11 @@ impl DicomViewerApp {
         }
 
         self.clear_load_error();
-        let mut preload_groups = Vec::with_capacity(groups.len());
-        for (index, group) in groups.iter().enumerate() {
-            let prepared = Self::prepare_load_paths(group.clone());
-            let entry_count = if prepared.image_paths.is_empty() {
-                prepared.structured_report_paths.len()
-            } else {
-                prepared.image_paths.len()
-            };
-            if !Self::is_supported_prepared_group(&prepared) {
-                let err = Self::format_group_size_error(index + 1, entry_count);
-                self.set_load_error(err.clone());
-                log::warn!("{err}");
-                return;
-            }
-            preload_groups.push(prepared);
-        }
-
-        let active_group = open_group.min(groups.len().saturating_sub(1));
-        let _ = self.load_selected_paths(groups[active_group].clone(), ctx);
-        self.preload_non_active_groups_into_history(&preload_groups, active_group, None, ctx);
+        let prepared_groups = groups
+            .iter()
+            .map(|group| Self::prepare_load_paths(group.clone()))
+            .collect::<Vec<_>>();
+        let _ = self.apply_prepared_local_groups(prepared_groups, open_group, ctx);
     }
 
     pub(super) fn start_dicomweb_download(&mut self, request: DicomWebLaunchRequest) {
@@ -308,24 +578,22 @@ impl DicomViewerApp {
 
         let default_center = pending.image.window_center;
         let default_width = pending.image.window_width;
-        let Some(color_image) =
-            Self::render_image_frame(&pending.image, 0, default_center, default_width, false)
-        else {
-            return Err("Could not prepare preview for image (no decodable frame).".to_string());
-        };
+        let initial_frame = pending.initial_frame;
 
         let path_meta = DicomSourceMeta::from(&pending.path);
         let texture_name = Self::source_texture_name("mammo-group", &path_meta);
-        let texture = ctx.load_texture(texture_name, color_image, TextureOptions::LINEAR);
+        let texture = ctx.load_texture(texture_name, pending.preview, TextureOptions::LINEAR);
+        let history_thumb = pending.history_thumb;
         let label = mammo_label(&pending.image, &path_meta);
         self.mammo_group[slot_index] = Some(MammoViewport {
             path: path_meta,
             image: pending.image,
             texture,
+            history_thumb,
             label,
             window_center: default_center,
             window_width: default_width,
-            current_frame: 0,
+            current_frame: initial_frame,
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
             frame_scroll_accum: 0.0,
@@ -538,7 +806,7 @@ impl DicomViewerApp {
                         if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
                             thread::spawn(move || {
                                 let result = match load_dicom(&path) {
-                                    Ok(image) => Ok(PendingLoad { path, image }),
+                                    Ok(image) => Self::pending_load(path, image),
                                     Err(err) => {
                                         Err(format!("Error opening streamed DICOM: {err:#}"))
                                     }
@@ -838,8 +1106,7 @@ impl DicomViewerApp {
             Ok(result) => {
                 match result {
                     Ok(PendingSingleLoad::Image(pending)) => {
-                        let pending = *pending;
-                        self.apply_loaded_single(pending.path, pending.image, ctx);
+                        self.apply_loaded_single(*pending, ctx);
                         self.clear_load_error();
                     }
                     Ok(PendingSingleLoad::StructuredReport { path, report }) => {
@@ -1061,6 +1328,39 @@ impl DicomViewerApp {
         }
     }
 
+    pub(super) fn pending_load(
+        path: DicomSource,
+        image: DicomImage,
+    ) -> Result<PendingLoad, String> {
+        let mut preview = None;
+        let mut initial_frame = 0;
+        for frame_index in 0..image.frame_count() {
+            if let Some(rendered) = Self::render_image_frame(
+                &image,
+                frame_index,
+                image.window_center,
+                image.window_width,
+                false,
+            ) {
+                preview = Some(rendered);
+                initial_frame = frame_index;
+                break;
+            }
+        }
+        let preview = preview.ok_or_else(|| {
+            "Could not prepare preview for image (no decodable frame).".to_string()
+        })?;
+        let history_thumb = super::history::downsample_color_image(&preview, HISTORY_THUMB_MAX_DIM);
+
+        Ok(PendingLoad {
+            path,
+            image,
+            preview,
+            history_thumb,
+            initial_frame,
+        })
+    }
+
     pub(super) fn load_path(&mut self, path: DicomSource, ctx: &egui::Context) {
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
@@ -1072,13 +1372,10 @@ impl DicomViewerApp {
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         thread::spawn(move || {
             let result = match load_dicom(&path) {
-                Ok(image) => {
+                Ok(image) => Self::pending_load(path, image).map(|pending| {
                     log::info!(target: "perf", "{OPEN_DICOM_LOADED_EVENT}");
-                    Ok(PendingSingleLoad::Image(Box::new(PendingLoad {
-                        path,
-                        image,
-                    })))
-                }
+                    PendingSingleLoad::Image(Box::new(pending))
+                }),
                 Err(err) => Err(format!("Error opening selected DICOM: {err:#}")),
             };
             let _ = tx.send(result);
@@ -1097,10 +1394,8 @@ impl DicomViewerApp {
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
         thread::spawn(move || {
             let result = match load_parametric_map(&path) {
-                Ok(image) => Ok(PendingSingleLoad::Image(Box::new(PendingLoad {
-                    path,
-                    image,
-                }))),
+                Ok(image) => Self::pending_load(path, image)
+                    .map(|pending| PendingSingleLoad::Image(Box::new(pending))),
                 Err(err) => Err(format!("Error opening selected Parametric Map: {err:#}")),
             };
             let _ = tx.send(result);
@@ -1131,13 +1426,14 @@ impl DicomViewerApp {
         ctx.request_repaint();
     }
 
-    pub(super) fn apply_loaded_single(
-        &mut self,
-        path: DicomSource,
-        image: DicomImage,
-        ctx: &egui::Context,
-    ) {
-        let mut image = image;
+    pub(super) fn apply_loaded_single(&mut self, pending: PendingLoad, ctx: &egui::Context) {
+        let PendingLoad {
+            path,
+            mut image,
+            preview,
+            history_thumb,
+            initial_frame,
+        } = pending;
         Self::attach_matching_gsps_overlay(&mut image, &self.pending_gsps_overlays);
         Self::attach_matching_sr_overlay(&mut image, &self.pending_sr_overlays);
         Self::attach_matching_pm_overlay(&mut image, &self.pending_pm_overlays);
@@ -1147,7 +1443,7 @@ impl DicomViewerApp {
 
         self.window_center = image.window_center;
         self.window_width = image.window_width;
-        self.current_frame = 0;
+        self.current_frame = initial_frame;
         self.cine_mode = false;
         self.last_cine_advance = None;
         self.cine_fps = image
@@ -1164,11 +1460,16 @@ impl DicomViewerApp {
         self.mammo_selected_index = 0;
         self.reset_single_view_transform();
         self.single_view_frame_scroll_accum = 0.0;
-        self.rebuild_texture(ctx);
+        self.frame_wait_pending = false;
+        if let Some(texture) = self.texture.as_mut() {
+            texture.set(preview, TextureOptions::LINEAR);
+        } else {
+            self.texture = Some(ctx.load_texture("dicom-image", preview, TextureOptions::LINEAR));
+        }
         log::info!(target: "perf", "{OPEN_COMPLETED_EVENT}");
         let history_texture = self.texture.clone();
         if let Some(texture) = history_texture.as_ref() {
-            self.push_single_history_entry(
+            self.push_single_history_entry_with_thumb(
                 HistorySingleData {
                     path: path_meta,
                     image: history_image,
@@ -1178,6 +1479,7 @@ impl DicomViewerApp {
                     current_frame: self.current_frame,
                     cine_fps: self.cine_fps,
                 },
+                history_thumb,
                 ctx,
             );
         }
@@ -1233,10 +1535,17 @@ impl DicomViewerApp {
             for path in paths {
                 match load_dicom(&path) {
                     Ok(image) => {
+                        let pending = match Self::pending_load(path, image) {
+                            Ok(pending) => pending,
+                            Err(err) => {
+                                let _ = tx.send(Err(err));
+                                return;
+                            }
+                        };
                         if group_len == 8 {
                             log::info!(target: "perf", "{OPEN_DICOM_LOADED_EVENT}");
                         }
-                        let _ = tx.send(Ok(PendingLoad { path, image }));
+                        let _ = tx.send(Ok(pending));
                     }
                     Err(err) => {
                         let _ = tx.send(Err(format!("Error opening DICOM in group: {err:#}")));
