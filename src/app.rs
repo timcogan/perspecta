@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -154,6 +155,7 @@ pub struct DicomViewerApp {
     dicomweb_completed_background_groups: HashSet<usize>,
     dicomweb_active_pending_paths: VecDeque<DicomSource>,
     local_prepare_receiver: Option<Receiver<LocalPrepareResult>>,
+    local_prepare_cancel: Option<Arc<AtomicBool>>,
     full_metadata_receiver: Option<Receiver<FullMetadataLoadResult>>,
     full_metadata_sender: Option<Sender<FullMetadataLoadResult>>,
     single_load_receiver: Option<Receiver<Result<PendingSingleLoad, String>>>,
@@ -224,6 +226,7 @@ impl DicomViewerApp {
             dicomweb_completed_background_groups: HashSet::new(),
             dicomweb_active_pending_paths: VecDeque::new(),
             local_prepare_receiver: None,
+            local_prepare_cancel: None,
             full_metadata_receiver: Some(full_metadata_receiver),
             full_metadata_sender: Some(full_metadata_sender),
             single_load_receiver: None,
@@ -679,7 +682,7 @@ impl DicomViewerApp {
         if paths.is_empty() {
             return;
         }
-        self.local_prepare_receiver = None;
+        self.cancel_local_prepare();
         self.pending_local_open_paths = Some(paths);
         self.pending_local_open_armed = false;
     }
@@ -3253,6 +3256,7 @@ mod tests {
             image,
             preview: test_preview(),
             history_thumb: test_preview(),
+            initial_frame: 0,
         }
     }
 
@@ -3705,6 +3709,27 @@ mod tests {
     }
 
     #[test]
+    fn queue_local_paths_open_cancels_existing_prepare_worker() {
+        let (_tx, rx) = mpsc::channel::<LocalPrepareResult>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut app = DicomViewerApp {
+            local_prepare_receiver: Some(rx),
+            local_prepare_cancel: Some(Arc::clone(&cancel)),
+            ..Default::default()
+        };
+
+        app.queue_local_paths_open(vec![PathBuf::from("replacement.dcm")]);
+
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(app.local_prepare_receiver.is_none());
+        assert!(app.local_prepare_cancel.is_none());
+        assert_eq!(
+            app.pending_local_open_paths,
+            Some(vec![PathBuf::from("replacement.dcm")])
+        );
+    }
+
+    #[test]
     fn apply_dropped_files_without_paths_sets_user_visible_error() {
         let ctx = egui::Context::default();
         let mut app = DicomViewerApp::default();
@@ -3739,6 +3764,35 @@ mod tests {
         assert!(!app.pending_local_open_armed);
         assert!(app.local_prepare_receiver.is_some());
         assert!(app.is_loading());
+    }
+
+    #[test]
+    fn start_local_prepare_clears_dicomweb_streaming_state() {
+        let ctx = egui::Context::default();
+        let (_download_tx, download_rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
+        let (_stream_tx, stream_rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
+        let mut app = DicomViewerApp {
+            dicomweb_receiver: Some(download_rx),
+            dicomweb_active_path_receiver: Some(stream_rx),
+            dicomweb_active_group_expected: Some(1),
+            dicomweb_active_group_paths: vec![test_meta("stale-active.dcm")],
+            dicomweb_completed_background_groups: HashSet::from([1]),
+            dicomweb_active_pending_paths: VecDeque::from([test_source("stale-pending.dcm")]),
+            history_pushed_for_active_group: true,
+            ..Default::default()
+        };
+
+        app.start_local_paths_prepare(Vec::<DicomSource>::new(), &ctx);
+
+        assert!(app.dicomweb_receiver.is_none());
+        assert!(app.dicomweb_active_path_receiver.is_none());
+        assert!(app.dicomweb_active_group_expected.is_none());
+        assert!(app.dicomweb_active_group_paths.is_empty());
+        assert!(app.dicomweb_completed_background_groups.is_empty());
+        assert!(app.dicomweb_active_pending_paths.is_empty());
+        assert!(!app.history_pushed_for_active_group);
+        assert!(app.local_prepare_receiver.is_some());
+        app.cancel_local_prepare();
     }
 
     #[test]
@@ -6456,6 +6510,38 @@ mod tests {
     }
 
     #[test]
+    fn pending_load_uses_first_renderable_frame() {
+        let image = DicomImage::test_stub_with_lazy_mono_cache(&[(1, 7)]);
+
+        let pending = DicomViewerApp::pending_load(test_source("lazy-frame.dcm"), image)
+            .expect("second frame should provide a preview");
+
+        assert_eq!(pending.initial_frame, 1);
+    }
+
+    #[test]
+    fn poll_single_load_uses_pending_initial_frame() {
+        let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
+        let mut pending = test_pending_load(
+            "selected-frame.dcm",
+            DicomImage::test_stub_with_mono_frames(None, 3),
+        );
+        pending.initial_frame = 2;
+        tx.send(Ok(PendingSingleLoad::Image(Box::new(pending))))
+            .expect("success should send");
+
+        let mut app = DicomViewerApp {
+            single_load_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_single_load(&ctx);
+
+        assert_eq!(app.current_frame, 2);
+    }
+
+    #[test]
     fn poll_mammo_group_load_drains_all_available_images_in_one_repaint() {
         let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
         for path in ["one.dcm", "two.dcm", "three.dcm"] {
@@ -6480,6 +6566,36 @@ mod tests {
         assert_eq!(app.loaded_mammo_count(), 3);
         assert!(app.mammo_group_complete());
         assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn poll_mammo_group_load_uses_pending_initial_frame() {
+        let (tx, rx) = mpsc::channel::<Result<PendingLoad, String>>();
+        let mut pending = test_pending_load(
+            "initial-frame.dcm",
+            DicomImage::test_stub_with_mono_frames(None, 3),
+        );
+        pending.initial_frame = 2;
+        tx.send(Ok(pending))
+            .expect("pending mammo image should send");
+        drop(tx);
+
+        let mut app = DicomViewerApp {
+            mammo_group: vec![None, None],
+            mammo_load_receiver: Some(rx),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        app.poll_mammo_group_load(&ctx);
+
+        let loaded = app
+            .mammo_group
+            .iter()
+            .filter_map(Option::as_ref)
+            .next()
+            .expect("one viewport should load");
+        assert_eq!(loaded.current_frame, 2);
     }
 
     #[test]

@@ -390,7 +390,7 @@ impl DicomViewerApp {
         self.pending_launch_request = None;
         self.pending_local_open_paths = None;
         self.pending_local_open_armed = false;
-        self.local_prepare_receiver = None;
+        self.cancel_local_prepare();
         self.pending_history_open_id = None;
         self.pending_history_open_armed = false;
         self.dicomweb_receiver = None;

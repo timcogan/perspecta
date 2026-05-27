@@ -2332,6 +2332,54 @@ impl DicomImage {
             full_metadata_loading: false,
         }
     }
+
+    pub(crate) fn test_stub_with_lazy_mono_cache(cached_frames: &[(usize, i32)]) -> Self {
+        let frame_count = cached_frames
+            .iter()
+            .map(|(frame_index, _)| frame_index.saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        let mut cache = vec![None; frame_count];
+        for &(frame_index, value) in cached_frames {
+            if let Some(slot) = cache.get_mut(frame_index) {
+                *slot = Some(Arc::<[i32]>::from([value]));
+            }
+        }
+
+        Self {
+            width: 1,
+            height: 1,
+            mono_frames: MonoFrames::Lazy(LazyMonoFrames {
+                source: DicomSource::from(PathBuf::from("lazy-cache-test.dcm")),
+                cache: Arc::new(Mutex::new(cache)),
+                preload_started: Arc::new(AtomicBool::new(true)),
+            }),
+            rgb_frames: RgbFrames::None,
+            frame_count,
+            color_mode: ImageColorMode::Monochrome,
+            samples_per_pixel: 1,
+            invert: false,
+            window_center: 0.0,
+            window_width: 1.0,
+            min_value: 0,
+            max_value: 0,
+            recommended_cine_fps: None,
+            pixel_spacing_mm: None,
+            view_position: None,
+            image_laterality: None,
+            instance_number: None,
+            sop_instance_uid: None,
+            reverse_frame_order: false,
+            gsps_overlay: None,
+            sr_overlay: None,
+            pm_overlay: None,
+            metadata: Vec::new(),
+            full_metadata: Arc::default(),
+            full_metadata_source: None,
+            full_metadata_loaded: false,
+            full_metadata_loading: false,
+        }
+    }
 }
 
 #[cfg(test)]
