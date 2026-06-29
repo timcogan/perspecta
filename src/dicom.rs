@@ -1848,7 +1848,7 @@ fn bytes_look_like_dicom_numeric_text(bytes: &[u8]) -> bool {
         })
 }
 
-fn detect_dicom_prefix_offset(bytes: &[u8]) -> Option<usize> {
+pub(crate) fn detect_dicom_prefix_offset(bytes: &[u8]) -> Option<usize> {
     if bytes.len() >= 132 && &bytes[128..132] == b"DICM" {
         return Some(132);
     }

@@ -13,6 +13,8 @@ For keyboard, mouse, layout, and overlay behavior after content opens, see [View
 
 Open one or more DICOM files from the UI menu.
 
+The UI file picker accepts `.dcm` and `.dicom` suffixes case-insensitively, plus extensionless Part 10 files with a `DICM` prefix.
+
 Supported local file counts:
 
 - `1` file: opens single-image view (`1x1`)

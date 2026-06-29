@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -13,11 +14,12 @@ use eframe::egui::{
 };
 
 use crate::dicom::{
-    classify_dicom_path, load_dicom, load_gsps_overlays, load_mammography_cad_sr_overlays,
-    load_parametric_map, load_parametric_map_overlays, load_structured_report,
-    read_sop_instance_uid, DicomImage, DicomPathKind, DicomSource, DicomSourceMeta,
-    FullMetadataField, GspsGraphic, GspsOverlay, GspsUnits, ParametricMapOverlay, SrOverlay,
-    SrOverlayLabel, StructuredReportDocument, StructuredReportNode, METADATA_FIELD_NAMES,
+    classify_dicom_path, detect_dicom_prefix_offset, load_dicom, load_gsps_overlays,
+    load_mammography_cad_sr_overlays, load_parametric_map, load_parametric_map_overlays,
+    load_structured_report, read_sop_instance_uid, DicomImage, DicomPathKind, DicomSource,
+    DicomSourceMeta, FullMetadataField, GspsGraphic, GspsOverlay, GspsUnits, ParametricMapOverlay,
+    SrOverlay, SrOverlayLabel, StructuredReportDocument, StructuredReportNode,
+    METADATA_FIELD_NAMES,
 };
 use crate::dicomweb::{
     download_dicomweb_group_request, download_dicomweb_request, DicomWebDownloadResult,
@@ -58,6 +60,9 @@ const ICON_STROKE_WIDTH: f32 = 1.25;
 const CLOSE_ICON_SIZE_FACTOR: f32 = 0.36;
 const TITLEBAR_MINIMIZE_ICON_HORIZONTAL_PADDING: f32 = 10.0;
 const TITLEBAR_MINIMIZE_ICON_VERTICAL_PADDING: f32 = 9.0;
+const PICKER_DICOM_PREFIX_READ_BYTES: usize = 132;
+const PICKER_NO_DICOM_CANDIDATES_MESSAGE: &str =
+    "Selected files did not include supported DICOM candidates.";
 const TITLEBAR_MAXIMIZE_ICON_MARGIN: f32 = 15.0;
 const TITLEBAR_MAXIMIZE_ICON_MIN_SIDE: f32 = 1.0;
 const TITLEBAR_RESTORE_ICON_OFFSET_FACTOR: f32 = 0.24;
@@ -691,6 +696,79 @@ impl DicomViewerApp {
         self.pending_local_open_armed = false;
     }
 
+    fn picker_dicom_candidates(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        paths
+            .into_iter()
+            .filter(|path| Self::is_picker_dicom_candidate(path))
+            .collect()
+    }
+
+    fn is_picker_dicom_candidate(path: &Path) -> bool {
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(Self::is_known_dicom_extension)
+        {
+            return true;
+        }
+
+        Self::path_has_dicom_prefix(path)
+    }
+
+    fn is_known_dicom_extension(extension: &str) -> bool {
+        extension.eq_ignore_ascii_case("dcm") || extension.eq_ignore_ascii_case("dicom")
+    }
+
+    fn path_has_dicom_prefix(path: &Path) -> bool {
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(err) => {
+                log::debug!("Could not read selected file {}: {err}", path.display());
+                return false;
+            }
+        };
+
+        let mut bytes = Vec::with_capacity(PICKER_DICOM_PREFIX_READ_BYTES);
+        match file
+            .by_ref()
+            .take(PICKER_DICOM_PREFIX_READ_BYTES as u64)
+            .read_to_end(&mut bytes)
+        {
+            Ok(_) => detect_dicom_prefix_offset(&bytes).is_some(),
+            Err(err) => {
+                log::debug!(
+                    "Could not read DICOM prefix from selected file {}: {err}",
+                    path.display()
+                );
+                false
+            }
+        }
+    }
+
+    fn queue_picker_paths_open(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        let selected_count = paths.len();
+        let candidates = Self::picker_dicom_candidates(paths);
+
+        if candidates.is_empty() {
+            self.pending_local_open_paths = None;
+            self.pending_local_open_armed = false;
+            self.set_load_error(PICKER_NO_DICOM_CANDIDATES_MESSAGE);
+            log::warn!("{PICKER_NO_DICOM_CANDIDATES_MESSAGE}");
+            ctx.request_repaint();
+            return;
+        }
+
+        let skipped_count = selected_count.saturating_sub(candidates.len());
+        if skipped_count > 0 {
+            log::warn!("Skipped {skipped_count} selected file(s) without a recognized DICOM suffix or DICM prefix.");
+        }
+
+        self.clear_load_error();
+        self.queue_local_paths_open(candidates);
+        ctx.set_cursor_icon(egui::CursorIcon::Progress);
+        ctx.request_repaint();
+    }
+
     fn local_paths_from_dropped_files(dropped_files: &[egui::DroppedFile]) -> Vec<PathBuf> {
         dropped_files
             .iter()
@@ -792,14 +870,10 @@ impl DicomViewerApp {
     }
 
     fn open_dicoms(&mut self, ctx: &egui::Context) {
-        let picked = rfd::FileDialog::new()
-            .add_filter("DICOM", &["dcm"])
-            .pick_files();
+        let picked = rfd::FileDialog::new().pick_files();
 
         if let Some(paths) = picked {
-            self.queue_local_paths_open(paths);
-            ctx.set_cursor_icon(egui::CursorIcon::Progress);
-            ctx.request_repaint();
+            self.queue_picker_paths_open(paths, ctx);
         }
     }
 
@@ -3130,12 +3204,12 @@ fn metadata_settings_file_path() -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        return env::var_os("HOME").map(PathBuf::from).map(|home| {
+        env::var_os("HOME").map(PathBuf::from).map(|home| {
             home.join("Library")
                 .join("Application Support")
                 .join("perspecta")
                 .join("settings.toml")
-        });
+        })
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -3286,14 +3360,28 @@ mod tests {
     }
 
     fn unique_test_file_path(prefix: &str) -> PathBuf {
+        unique_test_file_path_with_suffix(prefix, ".dcm")
+    }
+
+    fn unique_test_file_path_with_suffix(prefix: &str, suffix: &str) -> PathBuf {
+        static TEST_FILE_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time should be after UNIX_EPOCH")
             .as_nanos();
+        let counter = TEST_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "perspecta-app-{prefix}-{}-{nanos}.dcm",
+            "perspecta-app-{prefix}-{}-{nanos}-{counter}{suffix}",
             std::process::id()
         ))
+    }
+
+    fn write_dicom_prefix_test_file(path: &Path) {
+        let mut bytes = vec![0u8; 128];
+        bytes.extend_from_slice(b"DICM");
+        fs::write(path, bytes).expect("DICM prefix test file should be written");
     }
 
     fn write_test_structured_report_file(prefix: &str) -> PathBuf {
@@ -3691,6 +3779,107 @@ mod tests {
             DicomViewerApp::local_paths_from_dropped_files(&dropped_files),
             vec![PathBuf::from("first.dcm"), PathBuf::from("second.dcm")]
         );
+    }
+
+    #[test]
+    fn picker_dicom_candidates_accept_known_suffixes_case_insensitively() {
+        let paths = vec![
+            PathBuf::from("scan.dcm"),
+            PathBuf::from("scan.dicom"),
+            PathBuf::from("scan.DCM"),
+            PathBuf::from("scan.DiCoM"),
+        ];
+
+        assert_eq!(
+            DicomViewerApp::picker_dicom_candidates(paths.clone()),
+            paths
+        );
+    }
+
+    #[test]
+    fn picker_dicom_candidates_accept_extensionless_dicom_prefix_files() {
+        let path = unique_test_file_path_with_suffix("extensionless-dicm", "");
+        write_dicom_prefix_test_file(&path);
+
+        let candidates = DicomViewerApp::picker_dicom_candidates(vec![path.clone()]);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(candidates, vec![path]);
+    }
+
+    #[test]
+    fn picker_dicom_candidates_reject_extensionless_non_dicom_files() {
+        let path = unique_test_file_path_with_suffix("extensionless-non-dicom", "");
+        fs::write(&path, b"not dicom").expect("non-DICOM test file should be written");
+
+        let candidates = DicomViewerApp::picker_dicom_candidates(vec![path.clone()]);
+        let _ = fs::remove_file(&path);
+
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn queue_picker_paths_open_queues_only_valid_candidates() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp::default();
+        let valid_extensionless = unique_test_file_path_with_suffix("mixed-valid", "");
+        let invalid_extensionless = unique_test_file_path_with_suffix("mixed-invalid", "");
+        write_dicom_prefix_test_file(&valid_extensionless);
+        fs::write(&invalid_extensionless, b"not dicom")
+            .expect("non-DICOM test file should be written");
+        let named_dicom = PathBuf::from("named.DICOM");
+
+        app.queue_picker_paths_open(
+            vec![
+                invalid_extensionless.clone(),
+                named_dicom.clone(),
+                valid_extensionless.clone(),
+            ],
+            &ctx,
+        );
+        let _ = fs::remove_file(&valid_extensionless);
+        let _ = fs::remove_file(&invalid_extensionless);
+
+        assert_eq!(
+            app.pending_local_open_paths,
+            Some(vec![named_dicom, valid_extensionless])
+        );
+        assert!(app.load_error_message.is_none());
+    }
+
+    #[test]
+    fn queue_picker_paths_open_sets_error_when_no_candidates_remain() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp::default();
+        let invalid_extensionless = unique_test_file_path_with_suffix("only-invalid", "");
+        fs::write(&invalid_extensionless, b"not dicom")
+            .expect("non-DICOM test file should be written");
+
+        app.queue_picker_paths_open(vec![invalid_extensionless.clone()], &ctx);
+        let _ = fs::remove_file(&invalid_extensionless);
+
+        assert_eq!(
+            app.load_error_message.as_deref(),
+            Some("Selected files did not include supported DICOM candidates.")
+        );
+        assert!(app.pending_local_open_paths.is_none());
+    }
+
+    #[test]
+    fn queue_picker_paths_open_clears_stale_pending_selection_when_no_candidates_remain() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp::default();
+        let invalid_extensionless = unique_test_file_path_with_suffix("stale-invalid", "");
+        fs::write(&invalid_extensionless, b"not dicom")
+            .expect("non-DICOM test file should be written");
+        app.queue_local_paths_open(vec![PathBuf::from("stale.dcm")]);
+        app.pending_local_open_armed = true;
+
+        app.queue_picker_paths_open(vec![invalid_extensionless.clone()], &ctx);
+        let _ = fs::remove_file(&invalid_extensionless);
+
+        assert!(app.pending_local_open_paths.is_none());
+        assert!(!app.pending_local_open_armed);
     }
 
     #[test]
