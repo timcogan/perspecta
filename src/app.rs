@@ -750,6 +750,8 @@ impl DicomViewerApp {
         let candidates = Self::picker_dicom_candidates(paths);
 
         if candidates.is_empty() {
+            self.pending_local_open_paths = None;
+            self.pending_local_open_armed = false;
             self.set_load_error(PICKER_NO_DICOM_CANDIDATES_MESSAGE);
             log::warn!("{PICKER_NO_DICOM_CANDIDATES_MESSAGE}");
             ctx.request_repaint();
@@ -3861,6 +3863,23 @@ mod tests {
             Some("Selected files did not include supported DICOM candidates.")
         );
         assert!(app.pending_local_open_paths.is_none());
+    }
+
+    #[test]
+    fn queue_picker_paths_open_clears_stale_pending_selection_when_no_candidates_remain() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp::default();
+        let invalid_extensionless = unique_test_file_path_with_suffix("stale-invalid", "");
+        fs::write(&invalid_extensionless, b"not dicom")
+            .expect("non-DICOM test file should be written");
+        app.queue_local_paths_open(vec![PathBuf::from("stale.dcm")]);
+        app.pending_local_open_armed = true;
+
+        app.queue_picker_paths_open(vec![invalid_extensionless.clone()], &ctx);
+        let _ = fs::remove_file(&invalid_extensionless);
+
+        assert!(app.pending_local_open_paths.is_none());
+        assert!(!app.pending_local_open_armed);
     }
 
     #[test]
