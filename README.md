@@ -23,7 +23,7 @@ Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`efra
 
 ## Highlights
 
-- Open local DICOM files (`.dcm`) in single-image mode.
+- Open local DICOM files from common suffixes (`.dcm`, `.dicom`, case-insensitive) or extensionless Part 10 files.
 - Open grouped mammography layouts from 2 up to 8 images (`1x2`, `1x3`, `2x2`, `2x4`) with consistent viewport ordering.
 - Decode DICOM `PixelData` through `dicom-pixeldata` (including encapsulated data).
 - JPEG 2000 support by default via `openjp2`; optional JPEG-LS support via the `jpeg_ls` feature and `charls`.
@@ -84,6 +84,7 @@ cargo run -- "example-data/current-RCC.dcm" "example-data/current-LCC.dcm" "exam
 - `3` files: opens the mammography `1x3` layout.
 - `4` files: opens the mammography `2x2` layout.
 - `8` files: opens the mammography comparison `2x4` layout (current row + prior row).
+- The UI file picker accepts `.dcm` and `.dicom` suffixes case-insensitively, plus extensionless Part 10 files with a `DICM` prefix.
 - GSPS and matching Parametric Map DICOM files can be included in the same selection, including grouped launch inputs; they act as supplementary overlays and do not count as display slots.
 - Structured Report (SR) DICOM files can be opened directly in a single-document view.
 - If images and SR objects are selected together, Perspecta opens the images first and adds each SR as a separate history entry.
