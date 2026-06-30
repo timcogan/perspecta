@@ -299,7 +299,7 @@ impl DicomViewerApp {
             (screen_rect.height() * 0.76).clamp(360.0, 760.0),
         );
 
-        let previous_visuals = ctx.style().visuals.clone();
+        let previous_visuals = ctx.global_style().visuals.clone();
         let mut popup_visuals = previous_visuals.clone();
         popup_visuals.widgets.open.weak_bg_fill = egui::Color32::BLACK;
         popup_visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
