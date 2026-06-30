@@ -8,8 +8,8 @@ autobins = false
 
 [dependencies]
 anyhow = "1.0"
-dicom-core = "0.9.1"
-dicom-object = "0.9.1"
+dicom-core = "0.10.0"
+dicom-object = "0.10.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
