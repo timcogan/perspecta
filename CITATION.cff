@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use Perspecta in academic work, please cite the associated preprint."
+type: software
+title: "Perspecta DICOM Viewer"
+authors:
+  - family-names: "Cogan"
+    given-names: "Timothy C."
+repository-code: "https://github.com/timcogan/perspecta"
+url: "https://perspecta.cogan.dev/"
+license: "MIT"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: "Cogan"
+      given-names: "Timothy C."
+  title: "Perspecta: A Minimalist, Launch-Driven Desktop DICOM Viewer for Targeted Review"
+  year: 2026
+  doi: "10.31224/7224"
+  url: "https://engrxiv.org/preprint/view/7224"
+  status: preprint
+  publisher:
+    name: "engrXiv"

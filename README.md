@@ -21,6 +21,14 @@
 
 Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`eframe`) focused on fast loading, responsive interaction, DICOMweb launch, mammography layouts, GSPS/SR/Parametric Map overlays, and simple integration from external systems.
 
+## Citation
+
+If you use Perspecta in academic work, please cite the associated engrXiv preprint:
+
+Cogan, T. C. (2026). _Perspecta: A Minimalist, Launch-Driven Desktop DICOM Viewer for Targeted Review_. engrXiv. https://engrxiv.org/preprint/view/7224
+
+Citation metadata is available in [`CITATION.cff`](CITATION.cff).
+
 ## Highlights
 
 - Open local DICOM files from common suffixes (`.dcm`, `.dicom`, case-insensitive) or extensionless Part 10 files.
