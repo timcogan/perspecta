@@ -21,11 +21,16 @@ anyhow = "1.0"
 dicom-core = "0.10.0"
 dicom-object = "0.10.0"
 dicom-pixeldata = "0.10.0"
-eframe = "0.35"
 egui = "0.35"
 log = "0.4"
 rfd = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+
+[target.'cfg(not(windows))'.dependencies]
+eframe = "0.35"
 
 [dev-dependencies]
 dicom-encoding = "0.10.0"
