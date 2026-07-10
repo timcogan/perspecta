@@ -31,9 +31,9 @@ jobs:
 
           current_version="$(
             awk '
-              /^\s*\[package\]\s*$/ { in_package = 1; next }
-              /^\s*\[/ { in_package = 0 }
-              in_package && /^\s*version\s*=\s*/ { print $3; exit }
+              /^[[:space:]]*\[package\][[:space:]]*$/ { in_package = 1; next }
+              /^[[:space:]]*\[/ { in_package = 0 }
+              in_package && /^[[:space:]]*version[[:space:]]*=[[:space:]]*/ { print $3; exit }
             ' Cargo.toml | tr -d '"'
           )"
 
