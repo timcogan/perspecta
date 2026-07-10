@@ -55,9 +55,9 @@ jobs:
 
           current_version="$(
             awk '
-              /^\[package\]$/ { in_package = 1; next }
-              /^\[/ { in_package = 0 }
-              in_package && /^version = / { print $3; exit }
+              /^[[:space:]]*\[package\][[:space:]]*$/ { in_package = 1; next }
+              /^[[:space:]]*\[/ { in_package = 0 }
+              in_package && /^[[:space:]]*version[[:space:]]*=[[:space:]]*/ { print $3; exit }
             ' Cargo.toml | tr -d '"'
           )"
 
@@ -100,9 +100,9 @@ jobs:
                 if previous_manifest="$(git show "$BEFORE_SHA:Cargo.toml" 2>/dev/null)"; then
                   previous_version="$(
                     printf '%s\n' "$previous_manifest" | awk '
-                      /^\[package\]$/ { in_package = 1; next }
-                      /^\[/ { in_package = 0 }
-                      in_package && /^version = / { print $3; exit }
+                      /^[[:space:]]*\[package\][[:space:]]*$/ { in_package = 1; next }
+                      /^[[:space:]]*\[/ { in_package = 0 }
+                      in_package && /^[[:space:]]*version[[:space:]]*=[[:space:]]*/ { print $3; exit }
                     ' | tr -d '"'
                   )"
                 fi
