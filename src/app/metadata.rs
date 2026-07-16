@@ -5,6 +5,8 @@ use crate::dicom::{
     load_full_metadata_from_source, FullMetadataField, FullMetadataItem, FullMetadataValue,
 };
 
+const METADATA_OVERLAY_TEXT_BACKGROUND: egui::Color32 = egui::Color32::from_black_alpha(128);
+
 impl DicomViewerApp {
     pub(super) fn active_full_metadata(&self) -> Option<Arc<[FullMetadataField]>> {
         if self.image.is_some() || self.loaded_mammo_count() > 0 {
@@ -207,12 +209,12 @@ impl DicomViewerApp {
                             }
                             shown_count = shown_count.saturating_add(1);
                             ui.horizontal_wrapped(|ui| {
-                                ui.monospace(key);
-                                ui.label(value);
+                                ui.monospace(Self::metadata_overlay_text(key));
+                                ui.label(Self::metadata_overlay_text(value));
                             });
                         }
                         if shown_count == 0 {
-                            ui.label("No metadata fields selected.");
+                            ui.label(Self::metadata_overlay_text("No metadata fields selected."));
                         }
 
                         ui.add_space(ui.spacing().item_spacing.y);
@@ -226,19 +228,26 @@ impl DicomViewerApp {
         open_requested
     }
 
+    fn metadata_overlay_text(text: impl Into<String>) -> egui::RichText {
+        egui::RichText::new(text).background_color(METADATA_OVERLAY_TEXT_BACKGROUND)
+    }
+
     fn metadata_overlay_action(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
         let font_id = egui::TextStyle::Body.resolve(ui.style());
-        let galley = ui.painter().layout_no_wrap(
-            text.to_owned(),
-            font_id.clone(),
-            ui.visuals().weak_text_color(),
+        let mut layout_job = egui::text::LayoutJob::default();
+        Self::metadata_overlay_text(text).font(font_id).append_to(
+            &mut layout_job,
+            ui.style(),
+            egui::FontSelection::Default,
+            egui::Align::BOTTOM,
         );
+        let sizing_galley = ui.painter().layout_job(layout_job.clone());
         let sense = if enabled {
             egui::Sense::click()
         } else {
             egui::Sense::hover()
         };
-        let (rect, response) = ui.allocate_exact_size(galley.size(), sense);
+        let (rect, response) = ui.allocate_exact_size(sizing_galley.size(), sense);
         let response = if enabled {
             response.on_hover_cursor(egui::CursorIcon::PointingHand)
         } else {
@@ -251,13 +260,11 @@ impl DicomViewerApp {
         } else {
             ui.visuals().weak_text_color().gamma_multiply(0.65)
         };
-        ui.painter().text(
-            rect.left_top(),
-            egui::Align2::LEFT_TOP,
-            text,
-            font_id,
-            color,
-        );
+        for section in &mut layout_job.sections {
+            section.format.color = color;
+        }
+        let galley = ui.painter().layout_job(layout_job);
+        ui.painter().galley(rect.left_top(), galley, color);
         response
     }
 
@@ -412,6 +419,23 @@ mod tests {
             vr: "PN".to_string(),
             value: FullMetadataValue::Scalar("Doe^Jane".to_string()),
         }]
+    }
+
+    #[test]
+    fn metadata_overlay_text_uses_half_black_background() {
+        let mut layout_job = egui::text::LayoutJob::default();
+        DicomViewerApp::metadata_overlay_text("Sample text").append_to(
+            &mut layout_job,
+            &egui::Style::default(),
+            egui::FontSelection::Default,
+            egui::Align::BOTTOM,
+        );
+
+        assert_eq!(layout_job.sections.len(), 1);
+        assert_eq!(
+            layout_job.sections[0].format.background,
+            egui::Color32::from_black_alpha(128)
+        );
     }
 
     #[test]
