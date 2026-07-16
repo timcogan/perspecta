@@ -241,13 +241,13 @@ impl DicomViewerApp {
             egui::FontSelection::Default,
             egui::Align::BOTTOM,
         );
-        let galley = ui.painter().layout_job(layout_job);
+        let sizing_galley = ui.painter().layout_job(layout_job.clone());
         let sense = if enabled {
             egui::Sense::click()
         } else {
             egui::Sense::hover()
         };
-        let (rect, response) = ui.allocate_exact_size(galley.size(), sense);
+        let (rect, response) = ui.allocate_exact_size(sizing_galley.size(), sense);
         let response = if enabled {
             response.on_hover_cursor(egui::CursorIcon::PointingHand)
         } else {
@@ -260,6 +260,10 @@ impl DicomViewerApp {
         } else {
             ui.visuals().weak_text_color().gamma_multiply(0.65)
         };
+        for section in &mut layout_job.sections {
+            section.format.color = color;
+        }
+        let galley = ui.painter().layout_job(layout_job);
         ui.painter().galley(rect.left_top(), galley, color);
         response
     }
