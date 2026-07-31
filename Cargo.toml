@@ -29,7 +29,10 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 [target.'cfg(windows)'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 
-[target.'cfg(not(windows))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+
+[target.'cfg(not(any(windows, target_os = "linux")))'.dependencies]
 eframe = "0.35"
 
 [dev-dependencies]
