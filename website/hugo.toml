@@ -5,7 +5,7 @@ disableKinds = ["taxonomy", "term", "RSS"]
 enableRobotsTXT = true
 
 [params]
-description = "Open source desktop DICOM viewer built in Rust with DICOMweb launch, mammography layouts, GSPS overlays, and Structured Reports."
+description = "Open-source DICOM viewer built in Rust, with native desktop releases and a local-only browser technical preview."
 productName = "Perspecta DICOM Viewer"
 brandName = "Perspecta"
 github = "https://github.com/timcogan/perspecta"

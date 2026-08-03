@@ -4,7 +4,8 @@ SHELL := /bin/bash
 
 .PHONY: help build build-local build-release build-release-local run run-local run-release \
 	check test fmt fmt-check clippy clean install-watch watch-check watch-test watch-run \
-	watch-all dev site install-protocol-linux benchmark local-build-env
+	watch-all dev site site-build site-web web-assets web-pages verify-web-pages \
+	install-protocol-linux benchmark local-build-env
 
 BENCH_RUNS ?= 5
 BENCH_WARMUP ?= 1
@@ -16,7 +17,6 @@ PACKAGE_VERSION := $(shell awk '/^\[package\]$$/ { in_package = 1; next } /^\[/ 
 LOCAL_BUILD_TIMESTAMP ?= $(shell date -u +%Y%m%d%H%M%S)
 LOCAL_VERSION_SUFFIX := -$(LOCAL_BUILD_TIMESTAMP)
 LOCAL_VERSION := $(PACKAGE_VERSION)$(LOCAL_VERSION_SUFFIX)
-
 help:
 	@echo "Perspecta DICOM Viewer - Make targets"
 	@echo ""
@@ -42,6 +42,11 @@ help:
 	@echo "  make watch-all      Re-run check + test on file changes"
 	@echo "  make dev            Start watch-run, or show install hint if missing"
 	@echo "  make site           Run website locally with Hugo"
+	@echo "  make site-build     Build the static Hugo site"
+	@echo "  make web-assets     Build release WASM and hashed web assets"
+	@echo "  make site-web       Build web assets, then run Hugo locally"
+	@echo "  make web-pages      Build and verify the complete Pages artifact"
+	@echo "  make verify-web-pages  Check the built Pages artifact"
 	@echo "  make install-protocol-linux  Register perspecta:// URL handler (Linux)"
 
 build:
@@ -110,6 +115,30 @@ dev:
 site:
 	@command -v hugo >/dev/null 2>&1 || { echo "hugo is not installed."; echo "Install Hugo and retry."; exit 1; }
 	hugo server --source website
+
+site-build:
+	@command -v hugo >/dev/null 2>&1 || { echo "hugo is not installed."; echo "Install Hugo and retry."; exit 1; }
+	@site_destination="$(abspath website/public)"; \
+		if [[ -L "$$site_destination" ]]; then \
+			echo "Refusing unsafe Hugo destination: $$site_destination" >&2; \
+			exit 1; \
+		fi; \
+		hugo --source website --destination "$$site_destination" --cleanDestinationDir --minify
+
+web-assets:
+	bash scripts/build-web-demo.sh
+
+site-web: web-assets
+	@command -v hugo >/dev/null 2>&1 || { echo "hugo is not installed."; echo "Install Hugo and retry."; exit 1; }
+	hugo server --source website
+
+web-pages:
+	@$(MAKE) web-assets
+	@$(MAKE) site-build
+	@$(MAKE) verify-web-pages
+
+verify-web-pages:
+	bash scripts/verify-web-demo.sh
 
 install-protocol-linux:
 	bash scripts/register-protocol-linux.sh

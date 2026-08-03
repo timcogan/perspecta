@@ -271,7 +271,7 @@ impl SrIndexedNode {
 }
 
 impl StructuredReportDocument {
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn test_stub() -> Self {
         Self {
             title: "Structured Report".to_string(),
@@ -1004,7 +1004,7 @@ fn default_sr_label(value_type: &str) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::io::Cursor;
 

@@ -1,25 +1,37 @@
+#[cfg(any(test, target_arch = "wasm32"))]
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(any(test, target_arch = "wasm32"))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use eframe::egui::{
-    self, ColorImage, ResizeDirection, Sense, TextureHandle, TextureOptions, ViewportCommand,
-};
+use eframe::egui::{self, ColorImage, Sense, TextureHandle, TextureOptions};
+#[cfg(not(target_arch = "wasm32"))]
+use eframe::egui::{ResizeDirection, ViewportCommand};
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::dicom::detect_dicom_prefix_offset;
+#[cfg(any(test, target_arch = "wasm32"))]
+use crate::dicom::ParametricMapPixelCounter;
 use crate::dicom::{
-    classify_dicom_path, detect_dicom_prefix_offset, load_dicom, load_gsps_overlays,
-    load_mammography_cad_sr_overlays, load_parametric_map, load_parametric_map_overlays,
-    load_structured_report, read_sop_instance_uid, DicomImage, DicomPathKind, DicomSource,
-    DicomSourceMeta, FullMetadataField, GspsGraphic, GspsOverlay, GspsUnits, ParametricMapOverlay,
-    SrOverlay, SrOverlayLabel, StructuredReportDocument, StructuredReportNode,
-    METADATA_FIELD_NAMES,
+    classify_dicom_path, load_dicom, load_gsps_overlays, load_mammography_cad_sr_overlays,
+    load_parametric_map, load_parametric_map_overlays, load_structured_report,
+    read_sop_instance_uid, DicomImage, DicomPathKind, DicomSource, DicomSourceMeta,
+    FullMetadataField, GspsGraphic, GspsOverlay, GspsUnits, ParametricMapOverlay, SrOverlay,
+    SrOverlayLabel, StructuredReportDocument, StructuredReportNode, METADATA_FIELD_NAMES,
+};
+#[cfg(any(test, target_arch = "wasm32"))]
+use crate::dicom::{
+    read_dicom_frame_pixel_count, read_dicom_logical_pixel_count, WEB_MAX_RETAINED_PIXELS,
+    WEB_PIXEL_LIMIT_MESSAGE,
 };
 use crate::dicomweb::{
     download_dicomweb_group_request, download_dicomweb_request, DicomWebDownloadResult,
@@ -27,6 +39,7 @@ use crate::dicomweb::{
 };
 use crate::launch::{DicomWebGroupedLaunchRequest, DicomWebLaunchRequest, LaunchRequest};
 use crate::mammo::{mammo_image_align, mammo_label, order_mammo_indices, preferred_mammo_slot};
+use crate::platform::MonotonicInstant;
 use crate::renderer::{blend_rgba_overlay, render_rgb, render_window_level};
 
 mod history;
@@ -34,11 +47,15 @@ mod load;
 mod measurement;
 mod metadata;
 mod overlay;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod web_budget;
 
-#[cfg(test)]
+#[cfg(any(test, target_arch = "wasm32"))]
+use self::history::web_history_entry_pixel_count;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 use self::history::{
-    history_id_from_paths, HistoryGroupData, HistoryGroupViewportData, HistoryReportData,
-    HistoryThumb,
+    history_id_from_paths, web_history_retained_entry_flags, HistoryGroupData,
+    HistoryGroupViewportData, HistoryReportData, HistoryThumb,
 };
 use self::history::{
     HistoryEntry, HistoryKind, HistoryPreloadJob, HistoryPreloadJobKey, HistoryPreloadResult,
@@ -58,11 +75,18 @@ const VALID_GROUP_SIZES: &[usize] = &[1, 2, 3, 4, 8];
 const PERSPECTA_BRAND_BLUE: egui::Color32 = egui::Color32::from_rgb(14, 165, 233);
 const ICON_STROKE_WIDTH: f32 = 1.25;
 const CLOSE_ICON_SIZE_FACTOR: f32 = 0.36;
+#[cfg(not(target_arch = "wasm32"))]
 const TITLEBAR_MINIMIZE_ICON_HORIZONTAL_PADDING: f32 = 10.0;
+#[cfg(not(target_arch = "wasm32"))]
 const TITLEBAR_MINIMIZE_ICON_VERTICAL_PADDING: f32 = 9.0;
+#[cfg(not(target_arch = "wasm32"))]
 const PICKER_DICOM_PREFIX_READ_BYTES: usize = 132;
 const PICKER_NO_DICOM_CANDIDATES_MESSAGE: &str =
     "Selected files did not include supported DICOM candidates.";
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_MAX_FILE_BYTES: usize = 512 * 1024 * 1024;
+#[cfg(any(test, target_arch = "wasm32"))]
+const WEB_MAX_SESSION_BYTES: usize = 1024 * 1024 * 1024;
 const TITLEBAR_MAXIMIZE_ICON_MARGIN: f32 = 15.0;
 const TITLEBAR_MAXIMIZE_ICON_MIN_SIDE: f32 = 1.0;
 const TITLEBAR_RESTORE_ICON_OFFSET_FACTOR: f32 = 0.24;
@@ -136,6 +160,162 @@ enum FullMetadataLoadResult {
     },
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+struct WebSelectedFile {
+    name: String,
+    bytes: WebSelectedBytes,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+enum WebSelectedBytes {
+    #[cfg(target_arch = "wasm32")]
+    Shared(Arc<[u8]>),
+    Owned(Vec<u8>),
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl WebSelectedBytes {
+    fn len(&self) -> usize {
+        match self {
+            #[cfg(target_arch = "wasm32")]
+            Self::Shared(bytes) => bytes.len(),
+            Self::Owned(bytes) => bytes.len(),
+        }
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+thread_local! {
+    static WEB_DROP_BATCH: RefCell<Option<Vec<WebSelectedFile>>> = const { RefCell::new(None) };
+    static WEB_DROP_READ_IN_FLIGHT: Cell<bool> = const { Cell::new(false) };
+    static WEB_DROP_REPAINT_CONTEXT: RefCell<Option<egui::Context>> = const { RefCell::new(None) };
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) struct WebDropReadGuard;
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl Drop for WebDropReadGuard {
+    fn drop(&mut self) {
+        WEB_DROP_READ_IN_FLIGHT.with(|state| state.set(false));
+        request_web_drop_repaint();
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn request_web_drop_repaint() {
+    WEB_DROP_REPAINT_CONTEXT.with(|slot| {
+        if let Some(ctx) = slot.borrow().as_ref() {
+            ctx.request_repaint();
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn set_web_drop_repaint_context(ctx: egui::Context) {
+    WEB_DROP_REPAINT_CONTEXT.with(|slot| slot.replace(Some(ctx)));
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn begin_web_drop_read() -> Result<WebDropReadGuard, String> {
+    let started = WEB_DROP_READ_IN_FLIGHT.with(|state| {
+        if state.get() {
+            false
+        } else {
+            state.set(true);
+            true
+        }
+    });
+    if !started || WEB_DROP_BATCH.with(|batch| batch.borrow().is_some()) {
+        if started {
+            WEB_DROP_READ_IN_FLIGHT.with(|state| state.set(false));
+        }
+        return Err(
+            "Perspecta is still reading the previous dropped selection. Wait for it to finish, then try again."
+                .to_string(),
+        );
+    }
+    request_web_drop_repaint();
+    Ok(WebDropReadGuard)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn queue_web_selected_files(selected: Vec<WebSelectedFile>) -> Result<(), String> {
+    if selected.is_empty() {
+        return Err(PICKER_NO_DICOM_CANDIDATES_MESSAGE.to_string());
+    }
+    let queued = WEB_DROP_BATCH.with(|batch| {
+        let mut batch = batch.borrow_mut();
+        if batch.is_some() {
+            false
+        } else {
+            *batch = Some(selected);
+            true
+        }
+    });
+    if !queued {
+        return Err(
+            "Perspecta is still opening the previous dropped selection. Wait for it to finish, then try again."
+                .to_string(),
+        );
+    }
+    request_web_drop_repaint();
+    Ok(())
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn queue_web_dropped_files(files: Vec<(String, Vec<u8>)>) -> Result<(), String> {
+    let selected = files
+        .into_iter()
+        .map(|(name, bytes)| WebSelectedFile {
+            name,
+            bytes: WebSelectedBytes::Owned(bytes),
+        })
+        .collect();
+    queue_web_selected_files(selected)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn take_web_drop_batch() -> Option<Vec<WebSelectedFile>> {
+    WEB_DROP_BATCH.with(|batch| batch.borrow_mut().take())
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_drop_busy() -> bool {
+    WEB_DROP_READ_IN_FLIGHT.with(Cell::get) || WEB_DROP_BATCH.with(|batch| batch.borrow().is_some())
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+struct WebLoadInFlightGuard {
+    in_flight: Arc<AtomicUsize>,
+    repaint_ctx: egui::Context,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl WebLoadInFlightGuard {
+    fn start(in_flight: Arc<AtomicUsize>, repaint_ctx: egui::Context) -> Self {
+        in_flight.fetch_add(1, Ordering::AcqRel);
+        Self {
+            in_flight,
+            repaint_ctx,
+        }
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl Drop for WebLoadInFlightGuard {
+    fn drop(&mut self) {
+        let previous = self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "web load in-flight count underflowed");
+        self.repaint_ctx.request_repaint();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+type WebPickerResult = Result<Vec<WebSelectedFile>, String>;
+#[cfg(target_arch = "wasm32")]
+type WebPreflightResult = Result<(Vec<DicomSource>, usize), String>;
+
 pub struct DicomViewerApp {
     image: Option<DicomImage>,
     report: Option<StructuredReportDocument>,
@@ -152,6 +332,18 @@ pub struct DicomViewerApp {
     pending_history_open_armed: bool,
     pending_local_open_paths: Option<Vec<PathBuf>>,
     pending_local_open_armed: bool,
+    #[cfg(target_arch = "wasm32")]
+    web_picker_receiver: Option<Receiver<WebPickerResult>>,
+    #[cfg(target_arch = "wasm32")]
+    web_preflight_receiver: Option<Receiver<WebPreflightResult>>,
+    #[cfg(target_arch = "wasm32")]
+    web_session_bytes: usize,
+    #[cfg(target_arch = "wasm32")]
+    web_session_sources: HashMap<String, DicomSource>,
+    #[cfg(target_arch = "wasm32")]
+    web_next_source_id: u64,
+    #[cfg(any(test, target_arch = "wasm32"))]
+    web_selection_pixel_reservation: usize,
     pending_launch_request: Option<LaunchRequest>,
     dicomweb_receiver: Option<Receiver<Result<DicomWebDownloadResult, String>>>,
     dicomweb_active_path_receiver: Option<Receiver<DicomWebGroupStreamUpdate>>,
@@ -170,6 +362,12 @@ pub struct DicomViewerApp {
     history_preload_receiver: Option<Receiver<Result<HistoryPreloadResult, String>>>,
     history_preload_queue: VecDeque<HistoryPreloadJob>,
     history_preload_active_key: Option<HistoryPreloadJobKey>,
+    #[cfg(any(test, target_arch = "wasm32"))]
+    history_preload_cancel: Option<Arc<AtomicBool>>,
+    #[cfg(any(test, target_arch = "wasm32"))]
+    history_preload_in_flight: Arc<AtomicUsize>,
+    #[cfg(any(test, target_arch = "wasm32"))]
+    web_load_in_flight: Arc<AtomicUsize>,
     window_center: f32,
     window_width: f32,
     pending_gsps_overlays: HashMap<String, GspsOverlay>,
@@ -182,7 +380,7 @@ pub struct DicomViewerApp {
     current_frame: usize,
     cine_mode: bool,
     cine_fps: f32,
-    last_cine_advance: Option<Instant>,
+    last_cine_advance: Option<MonotonicInstant>,
     single_view_zoom: f32,
     single_view_pan: egui::Vec2,
     single_view_frame_scroll_accum: f32,
@@ -223,6 +421,18 @@ impl DicomViewerApp {
             pending_history_open_armed: false,
             pending_local_open_paths: None,
             pending_local_open_armed: false,
+            #[cfg(target_arch = "wasm32")]
+            web_picker_receiver: None,
+            #[cfg(target_arch = "wasm32")]
+            web_preflight_receiver: None,
+            #[cfg(target_arch = "wasm32")]
+            web_session_bytes: 0,
+            #[cfg(target_arch = "wasm32")]
+            web_session_sources: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_next_source_id: 1,
+            #[cfg(any(test, target_arch = "wasm32"))]
+            web_selection_pixel_reservation: 0,
             pending_launch_request: initial_request,
             dicomweb_receiver: None,
             dicomweb_active_path_receiver: None,
@@ -241,6 +451,12 @@ impl DicomViewerApp {
             history_preload_receiver: None,
             history_preload_queue: VecDeque::new(),
             history_preload_active_key: None,
+            #[cfg(any(test, target_arch = "wasm32"))]
+            history_preload_cancel: None,
+            #[cfg(any(test, target_arch = "wasm32"))]
+            history_preload_in_flight: Arc::new(AtomicUsize::new(0)),
+            #[cfg(any(test, target_arch = "wasm32"))]
+            web_load_in_flight: Arc::new(AtomicUsize::new(0)),
             window_center: 0.0,
             window_width: 1.0,
             pending_gsps_overlays: HashMap::new(),
@@ -292,8 +508,53 @@ impl DicomViewerApp {
             || self.local_prepare_receiver.is_some()
             || self.history_preload_receiver.is_some()
             || !self.history_preload_queue.is_empty()
+            || {
+                #[cfg(any(test, target_arch = "wasm32"))]
+                {
+                    self.web_load_in_flight.load(Ordering::Acquire) > 0
+                }
+                #[cfg(all(not(test), not(target_arch = "wasm32")))]
+                {
+                    false
+                }
+            }
+            || {
+                #[cfg(any(test, target_arch = "wasm32"))]
+                {
+                    web_drop_busy()
+                }
+                #[cfg(all(not(test), not(target_arch = "wasm32")))]
+                {
+                    false
+                }
+            }
+            || {
+                #[cfg(any(test, target_arch = "wasm32"))]
+                {
+                    self.history_preload_in_flight.load(Ordering::Acquire) > 0
+                }
+                #[cfg(all(not(test), not(target_arch = "wasm32")))]
+                {
+                    false
+                }
+            }
             || self.pending_history_open_id.is_some()
             || self.pending_local_open_paths.is_some()
+            || {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.web_picker_receiver.is_some() || self.web_preflight_receiver.is_some()
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    false
+                }
+            }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn begin_web_load_in_flight(&self, ctx: &egui::Context) -> WebLoadInFlightGuard {
+        WebLoadInFlightGuard::start(Arc::clone(&self.web_load_in_flight), ctx.clone())
     }
 
     fn is_supported_group_size(count: usize) -> bool {
@@ -537,6 +798,7 @@ impl DicomViewerApp {
                 .collect::<Vec<_>>();
             let mut safe_frames = vec![0usize; inputs.len()];
 
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::scope(|scope| {
                 let mut jobs = Vec::with_capacity(inputs.len());
                 for (index, (image, safe_frame, center, width)) in inputs.iter().enumerate() {
@@ -559,6 +821,13 @@ impl DicomViewerApp {
                     rendered[index] = job.join().ok().flatten();
                 }
             });
+
+            #[cfg(target_arch = "wasm32")]
+            for (index, (image, safe_frame, center, width)) in inputs.iter().enumerate() {
+                safe_frames[index] = *safe_frame;
+                rendered[index] =
+                    Self::render_image_frame(image, *safe_frame, *center, *width, overlay_visible);
+            }
 
             (rendered, safe_frames, slots)
         };
@@ -696,6 +965,7 @@ impl DicomViewerApp {
         self.pending_local_open_armed = false;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn picker_dicom_candidates(paths: Vec<PathBuf>) -> Vec<PathBuf> {
         paths
             .into_iter()
@@ -703,6 +973,7 @@ impl DicomViewerApp {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn is_picker_dicom_candidate(path: &Path) -> bool {
         if path
             .extension()
@@ -715,10 +986,12 @@ impl DicomViewerApp {
         Self::path_has_dicom_prefix(path)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn is_known_dicom_extension(extension: &str) -> bool {
         extension.eq_ignore_ascii_case("dcm") || extension.eq_ignore_ascii_case("dicom")
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn path_has_dicom_prefix(path: &Path) -> bool {
         let mut file = match fs::File::open(path) {
             Ok(file) => file,
@@ -745,6 +1018,7 @@ impl DicomViewerApp {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn queue_picker_paths_open(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
         let selected_count = paths.len();
         let candidates = Self::picker_dicom_candidates(paths);
@@ -769,6 +1043,7 @@ impl DicomViewerApp {
         ctx.request_repaint();
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn local_paths_from_dropped_files(dropped_files: &[egui::DroppedFile]) -> Vec<PathBuf> {
         dropped_files
             .iter()
@@ -789,6 +1064,7 @@ impl DicomViewerApp {
     }
 
     fn file_drop_overlay_heading(hovered_files: &[egui::HoveredFile]) -> String {
+        #[cfg(not(target_arch = "wasm32"))]
         if !hovered_files.is_empty() && hovered_files.iter().all(|file| file.path.is_none()) {
             return "Only local files can be dropped here".to_string();
         }
@@ -800,6 +1076,7 @@ impl DicomViewerApp {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn apply_dropped_files(&mut self, dropped_files: &[egui::DroppedFile], ctx: &egui::Context) {
         if dropped_files.is_empty() {
             return;
@@ -819,6 +1096,38 @@ impl DicomViewerApp {
         self.queue_local_paths_open(paths);
         ctx.set_cursor_icon(egui::CursorIcon::Progress);
         ctx.request_repaint();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn apply_dropped_files(&mut self, dropped_files: &[egui::DroppedFile], ctx: &egui::Context) {
+        if dropped_files.is_empty() {
+            return;
+        }
+
+        let selected = dropped_files
+            .iter()
+            .filter_map(|file| {
+                file.bytes.as_ref().map(|bytes| WebSelectedFile {
+                    name: file.name.clone(),
+                    bytes: WebSelectedBytes::Shared(Arc::clone(bytes)),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if selected.is_empty() {
+            self.set_load_error("Dropped items did not include readable local file bytes.");
+            ctx.request_repaint();
+            return;
+        }
+
+        self.open_web_selected_files(selected, ctx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn poll_web_drop_batch(&mut self, ctx: &egui::Context) {
+        if let Some(selected) = take_web_drop_batch() {
+            self.open_web_selected_files(selected, ctx);
+        }
     }
 
     fn process_pending_local_open(&mut self, ctx: &egui::Context) {
@@ -869,12 +1178,259 @@ impl DicomViewerApp {
         self.load_error_message = Some(message.into());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn open_dicoms(&mut self, ctx: &egui::Context) {
         let picked = rfd::FileDialog::new().pick_files();
 
         if let Some(paths) = picked {
             self.queue_picker_paths_open(paths, ctx);
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn open_dicoms(&mut self, ctx: &egui::Context) {
+        if self.is_loading() {
+            self.set_load_error(
+                "Perspecta is still opening the previous selection. Wait for it to finish, then try again.",
+            );
+            return;
+        }
+        let (tx, rx) = mpsc::channel::<WebPickerResult>();
+        self.web_picker_receiver = Some(rx);
+        let current_session_bytes = self.web_session_bytes;
+        let web_load_guard = self.begin_web_load_in_flight(ctx);
+
+        wasm_bindgen_futures::spawn_local(async move {
+            let _web_load_guard = web_load_guard;
+            let Some(handles) = rfd::AsyncFileDialog::new().pick_files().await else {
+                let _ = tx.send(Ok(Vec::new()));
+                return;
+            };
+
+            let selected_sizes = match handles
+                .iter()
+                .map(|handle| checked_web_file_size(handle.inner().size()))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(sizes) => sizes,
+                Err(message) => {
+                    let _ = tx.send(Err(message.to_string()));
+                    return;
+                }
+            };
+            if let Err(message) = checked_web_session_byte_total(
+                current_session_bytes,
+                selected_sizes.iter().copied(),
+            ) {
+                let _ = tx.send(Err(message.to_string()));
+                return;
+            }
+
+            let mut selected = Vec::with_capacity(handles.len());
+            for handle in handles {
+                let name = handle.file_name();
+                let bytes = WebSelectedBytes::Owned(handle.read().await);
+                selected.push(WebSelectedFile { name, bytes });
+            }
+            let _ = tx.send(Ok(selected));
+        });
+        ctx.request_repaint();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn poll_web_picker(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.web_picker_receiver.take() else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(Ok(selected)) => {
+                if !selected.is_empty() {
+                    self.open_web_selected_files(selected, ctx);
+                }
+            }
+            Ok(Err(message)) => self.set_load_error(message),
+            Err(TryRecvError::Empty) => {
+                self.web_picker_receiver = Some(receiver);
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.set_load_error("The browser file picker closed unexpectedly.");
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn open_web_selected_files(&mut self, selected: Vec<WebSelectedFile>, ctx: &egui::Context) {
+        if self.is_loading() {
+            self.set_load_error(
+                "Perspecta is still opening the previous selection. Wait for it to finish, then try again.",
+            );
+            return;
+        }
+        let mut sources = Vec::with_capacity(selected.len());
+
+        for file in selected {
+            let byte_len = file.bytes.len();
+            if byte_len > WEB_MAX_FILE_BYTES {
+                self.set_load_error("A selected file exceeds the 512 MiB browser limit.");
+                return;
+            }
+
+            let source_id = self.web_next_source_id;
+            let Some(next_source_id) = source_id.checked_add(1) else {
+                self.set_load_error("The browser source identifier limit was reached.");
+                return;
+            };
+            self.web_next_source_id = next_source_id;
+            let identity = format!("web-local:{source_id}:{byte_len}");
+            let source = match file.bytes {
+                WebSelectedBytes::Shared(bytes) => {
+                    DicomSource::from_memory_arc_with_identity(&file.name, identity, bytes)
+                }
+                WebSelectedBytes::Owned(bytes) => {
+                    DicomSource::from_memory_vec_with_identity(&file.name, identity, bytes)
+                }
+            };
+            sources.push(source);
+        }
+
+        if sources.is_empty() {
+            self.set_load_error(PICKER_NO_DICOM_CANDIDATES_MESSAGE);
+            return;
+        }
+
+        let proposed_total = match checked_web_session_byte_total(
+            self.web_session_bytes,
+            sources.iter().filter_map(DicomSource::byte_len),
+        ) {
+            Ok(total) => total,
+            Err(message) => {
+                self.set_load_error(message);
+                return;
+            }
+        };
+
+        for source in &sources {
+            self.web_session_sources
+                .insert(source.identity_key().into_owned(), source.clone());
+        }
+        self.web_session_bytes = proposed_total;
+        self.sync_web_session_marker();
+        self.clear_load_error();
+        let (tx, rx) = mpsc::channel::<WebPreflightResult>();
+        let web_load_guard = self.begin_web_load_in_flight(ctx);
+        wasm_bindgen_futures::spawn_local(async move {
+            let _web_load_guard = web_load_guard;
+            let result = web_budget::selected_source_retained_pixels_cooperative(sources).await;
+            let _ = tx.send(result);
+        });
+        self.web_preflight_receiver = Some(rx);
+        ctx.set_cursor_icon(egui::CursorIcon::Progress);
+        ctx.request_repaint();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn poll_web_preflight(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.web_preflight_receiver.take() else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(Ok((sources, selected_pixels))) => {
+                match self.begin_web_selection_pixel_reservation(selected_pixels) {
+                    Ok(()) => self.start_local_paths_prepare(sources, ctx),
+                    Err(message) => self.set_load_error(message),
+                }
+                ctx.request_repaint();
+            }
+            Ok(Err(message)) => {
+                self.set_load_error(message);
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {
+                self.web_preflight_receiver = Some(receiver);
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.set_load_error("Browser DICOM preflight did not complete.");
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn retained_web_source_identities(&self) -> HashSet<String> {
+        let mut retained = HashSet::new();
+        if let Some(path) = self.current_single_path.as_ref() {
+            retained.insert(path.identity_key().to_string());
+        }
+        retained.extend(
+            self.loaded_mammo_viewports()
+                .map(|viewport| viewport.path.identity_key().to_string()),
+        );
+        for entry in &self.history_entries {
+            match &entry.kind {
+                HistoryKind::Single(single) => {
+                    retained.insert(single.path.identity_key().to_string());
+                }
+                HistoryKind::Group(group) => {
+                    retained.extend(
+                        group
+                            .viewports
+                            .iter()
+                            .map(|viewport| viewport.path.identity_key().to_string()),
+                    );
+                }
+                HistoryKind::Report(report) => {
+                    retained.insert(report.path.identity_key().to_string());
+                }
+            }
+        }
+        retained
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn prune_web_session_sources(&mut self) {
+        if self.is_loading() {
+            return;
+        }
+
+        let retained = self.retained_web_source_identities();
+        self.web_session_sources
+            .retain(|identity, _| retained.contains(identity));
+        self.web_session_bytes = self
+            .web_session_sources
+            .values()
+            .filter_map(DicomSource::byte_len)
+            .fold(0usize, usize::saturating_add);
+        self.sync_web_session_marker();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn sync_web_session_marker(&self) {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(root) = document.document_element() else {
+            return;
+        };
+        let _ = root.set_attribute(
+            "data-perspecta-session-bytes",
+            &self.web_session_bytes.to_string(),
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn sync_web_loading_marker(&self) {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(root) = document.document_element() else {
+            return;
+        };
+        let state = if self.is_loading() { "true" } else { "false" };
+        let _ = root.set_attribute("data-perspecta-loading", state);
     }
 
     fn show_file_drop_overlay(&self, ctx: &egui::Context, hovered_files: &[egui::HoveredFile]) {
@@ -923,7 +1479,7 @@ impl DicomViewerApp {
             }
             self.cine_mode = !self.cine_mode;
             self.clear_live_measurement();
-            self.last_cine_advance = Some(Instant::now());
+            self.last_cine_advance = Some(MonotonicInstant::now());
             return;
         }
 
@@ -948,7 +1504,7 @@ impl DicomViewerApp {
         let enabling = !self.cine_mode;
         self.cine_mode = enabling;
         self.clear_live_measurement();
-        self.last_cine_advance = Some(Instant::now());
+        self.last_cine_advance = Some(MonotonicInstant::now());
         if enabling {
             let start_frame = self
                 .selected_mammo_frame_index()
@@ -975,7 +1531,7 @@ impl DicomViewerApp {
 
         let fps = self.cine_fps.clamp(1.0, 120.0);
         let frame_interval = Duration::from_secs_f32(1.0 / fps);
-        let now = Instant::now();
+        let now = MonotonicInstant::now();
         let last = self.last_cine_advance.unwrap_or(now);
         let elapsed = now.duration_since(last);
 
@@ -1220,7 +1776,7 @@ impl DicomViewerApp {
                 state.current_frame.min(state.frame_count.saturating_sub(1))
             };
             let _ = self.set_mammo_group_frame(frame_index);
-            self.last_cine_advance = Some(Instant::now());
+            self.last_cine_advance = Some(MonotonicInstant::now());
         } else {
             let next_frame = if state.frame_count == 0 {
                 0
@@ -1541,6 +2097,7 @@ impl DicomViewerApp {
         painter.line_segment([icon_rect.right_top(), icon_rect.left_bottom()], stroke);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn paint_titlebar_minimize_icon(
         painter: &egui::Painter,
         button_rect: egui::Rect,
@@ -2199,11 +2756,12 @@ impl DicomViewerApp {
                 if self.set_mammo_group_frame(frame_target) {
                     ui.ctx().request_repaint_after(Duration::from_millis(16));
                 }
-                self.last_cine_advance = Some(Instant::now());
+                self.last_cine_advance = Some(MonotonicInstant::now());
             }
         });
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn show_resize_grip(&self, ctx: &egui::Context) {
         const GRIP_SIZE: f32 = 18.0;
         const MARGIN: f32 = 1.0;
@@ -2237,20 +2795,57 @@ impl DicomViewerApp {
                 }
             });
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn web_is_fullscreen() -> bool {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.fullscreen_element())
+            .is_some()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn toggle_web_fullscreen() {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+
+        if document.fullscreen_element().is_some() {
+            document.exit_fullscreen();
+        } else if let Some(element) = document.document_element() {
+            let _ = element.request_fullscreen();
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn navigate_web_home() {
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().set_href("../");
+        }
+    }
 }
 
 impl eframe::App for DicomViewerApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
         let ctx = &ctx;
+        #[cfg(target_arch = "wasm32")]
+        crate::platform::set_web_max_texture_side(ctx.input(|input| input.max_texture_side));
         Self::apply_black_background(ctx);
         if self.is_loading() || self.frame_wait_pending {
             ctx.set_cursor_icon(egui::CursorIcon::Progress);
         } else {
             ctx.set_cursor_icon(egui::CursorIcon::Default);
         }
+        #[cfg(target_arch = "wasm32")]
+        self.poll_web_drop_batch(ctx);
         let dropped_files = ctx.input(|input| input.raw.dropped_files.clone());
         self.apply_dropped_files(&dropped_files, ctx);
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.poll_web_picker(ctx);
+            self.poll_web_preflight(ctx);
+        }
         self.process_pending_history_open(ctx);
         self.process_pending_local_open(ctx);
 
@@ -2313,19 +2908,30 @@ impl eframe::App for DicomViewerApp {
             }
         });
         if close_app_requested {
-            ctx.send_viewport_cmd(ViewportCommand::Close);
-            return;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+                return;
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                Self::navigate_web_home();
+                return;
+            }
         }
         if let Some(direction) = history_cycle_direction {
             self.cycle_history_entry(direction);
         }
         let history_transition_pending = self.pending_history_open_id.is_some();
-        if close_group_requested
-            && !history_transition_pending
-            && self.handle_close_group_shortcut(ctx)
-        {
-            ctx.send_viewport_cmd(ViewportCommand::Close);
-            return;
+        if close_group_requested && !history_transition_pending {
+            let close_window = self.handle_close_group_shortcut(ctx);
+            #[cfg(not(target_arch = "wasm32"))]
+            if close_window {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+                return;
+            }
+            #[cfg(target_arch = "wasm32")]
+            let _ = close_window;
         }
         if c_pressed && !history_transition_pending {
             self.toggle_cine_mode();
@@ -2346,7 +2952,10 @@ impl eframe::App for DicomViewerApp {
         let mut open_dicoms_clicked = false;
         let hovered_files = ctx.input(|input| input.raw.hovered_files.clone());
 
+        #[cfg(not(target_arch = "wasm32"))]
         let is_maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+        #[cfg(target_arch = "wasm32")]
+        let is_maximized = Self::web_is_fullscreen();
         let title_text = format!("{APP_TITLE} v{APP_VERSION}");
         let bar_fill = ctx.global_style().visuals.panel_fill;
         egui::Panel::top("titlebar")
@@ -2355,8 +2964,12 @@ impl eframe::App for DicomViewerApp {
             .exact_size(30.0)
             .show(root_ui, |ui| {
                 let button_size = egui::vec2(28.0, 22.0);
-                let right_controls_min_width =
-                    button_size.x * 3.0 + ui.spacing().item_spacing.x * 2.0;
+                #[cfg(not(target_arch = "wasm32"))]
+                let right_button_count = 3.0;
+                #[cfg(target_arch = "wasm32")]
+                let right_button_count = 2.0;
+                let right_controls_min_width = button_size.x * right_button_count
+                    + ui.spacing().item_spacing.x * (right_button_count - 1.0);
                 let left_controls_width = right_controls_min_width;
                 let total_width = ui.available_width();
                 let titlebar_rect = ui.max_rect();
@@ -2426,11 +3039,15 @@ impl eframe::App for DicomViewerApp {
                         ui.visuals().text_color(),
                     );
 
+                    #[cfg(not(target_arch = "wasm32"))]
                     if drag_response.is_pointer_button_down_on() {
                         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
                     }
                     if drag_response.double_clicked() {
+                        #[cfg(not(target_arch = "wasm32"))]
                         ctx.send_viewport_cmd(ViewportCommand::Maximized(!is_maximized));
+                        #[cfg(target_arch = "wasm32")]
+                        Self::toggle_web_fullscreen();
                     }
 
                     ui.allocate_ui_with_layout(
@@ -2449,9 +3066,19 @@ impl eframe::App for DicomViewerApp {
                                 Self::icon_stroke(ui, &close_response),
                             );
                             if close_response.clicked() {
+                                #[cfg(not(target_arch = "wasm32"))]
                                 ctx.send_viewport_cmd(ViewportCommand::Close);
+                                #[cfg(target_arch = "wasm32")]
+                                Self::navigate_web_home();
                             }
-                            Self::register_icon_button_accessibility(&close_response, "Close");
+                            Self::register_icon_button_accessibility(
+                                &close_response,
+                                if cfg!(target_arch = "wasm32") {
+                                    "Back to Perspecta home"
+                                } else {
+                                    "Close"
+                                },
+                            );
 
                             let maximize_response = ui.add_sized(
                                 button_size,
@@ -2466,31 +3093,37 @@ impl eframe::App for DicomViewerApp {
                                 is_maximized,
                             );
                             if maximize_response.clicked() {
+                                #[cfg(not(target_arch = "wasm32"))]
                                 ctx.send_viewport_cmd(ViewportCommand::Maximized(!is_maximized));
+                                #[cfg(target_arch = "wasm32")]
+                                Self::toggle_web_fullscreen();
                             }
                             Self::register_icon_button_accessibility(
                                 &maximize_response,
                                 if is_maximized { "Restore" } else { "Maximize" },
                             );
 
-                            let minimize_response = ui.add_sized(
-                                button_size,
-                                egui::Button::new("")
-                                    .fill(bar_fill)
-                                    .stroke(egui::Stroke::NONE),
-                            );
-                            Self::paint_titlebar_minimize_icon(
-                                ui.painter(),
-                                minimize_response.rect,
-                                Self::icon_stroke(ui, &minimize_response),
-                            );
-                            if minimize_response.clicked() {
-                                ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                let minimize_response = ui.add_sized(
+                                    button_size,
+                                    egui::Button::new("")
+                                        .fill(bar_fill)
+                                        .stroke(egui::Stroke::NONE),
+                                );
+                                Self::paint_titlebar_minimize_icon(
+                                    ui.painter(),
+                                    minimize_response.rect,
+                                    Self::icon_stroke(ui, &minimize_response),
+                                );
+                                if minimize_response.clicked() {
+                                    ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                                }
+                                Self::register_icon_button_accessibility(
+                                    &minimize_response,
+                                    "Minimize",
+                                );
                             }
-                            Self::register_icon_button_accessibility(
-                                &minimize_response,
-                                "Minimize",
-                            );
                         },
                     );
                 });
@@ -2699,7 +3332,7 @@ impl eframe::App for DicomViewerApp {
                                         {
                                             frame_index = 0;
                                             state.current_frame = 0;
-                                            self.last_cine_advance = Some(Instant::now());
+                                            self.last_cine_advance = Some(MonotonicInstant::now());
                                             request_rebuild = true;
                                         }
 
@@ -2713,7 +3346,7 @@ impl eframe::App for DicomViewerApp {
                                         .changed()
                                         {
                                             state.current_frame = frame_index as usize;
-                                            self.last_cine_advance = Some(Instant::now());
+                                            self.last_cine_advance = Some(MonotonicInstant::now());
                                             request_rebuild = true;
                                         }
 
@@ -2734,7 +3367,7 @@ impl eframe::App for DicomViewerApp {
                                             .changed()
                                         {
                                             state.current_frame = frame_index as usize;
-                                            self.last_cine_advance = Some(Instant::now());
+                                            self.last_cine_advance = Some(MonotonicInstant::now());
                                             request_rebuild = true;
                                         }
                                     },
@@ -2762,7 +3395,7 @@ impl eframe::App for DicomViewerApp {
                                         {
                                             self.cine_fps =
                                                 self.default_cine_fps_for_active_image();
-                                            self.last_cine_advance = Some(Instant::now());
+                                            self.last_cine_advance = Some(MonotonicInstant::now());
                                         }
 
                                         if Self::add_value_control_no_border(
@@ -2776,7 +3409,7 @@ impl eframe::App for DicomViewerApp {
                                         .changed()
                                         {
                                             self.cine_fps = self.cine_fps.clamp(1.0, 120.0);
-                                            self.last_cine_advance = Some(Instant::now());
+                                            self.last_cine_advance = Some(MonotonicInstant::now());
                                         }
 
                                         if ui
@@ -2796,7 +3429,7 @@ impl eframe::App for DicomViewerApp {
                                             .changed()
                                         {
                                             self.cine_fps = self.cine_fps.clamp(1.0, 120.0);
-                                            self.last_cine_advance = Some(Instant::now());
+                                            self.last_cine_advance = Some(MonotonicInstant::now());
                                         }
                                     },
                                 );
@@ -2962,7 +3595,7 @@ impl eframe::App for DicomViewerApp {
                                                 .clamp(0, frame_count as i32 - 1)
                                                 as usize,
                                         );
-                                        self.last_cine_advance = Some(Instant::now());
+                                        self.last_cine_advance = Some(MonotonicInstant::now());
                                         self.rebuild_texture(ctx);
                                     }
                                 }
@@ -3156,10 +3789,17 @@ impl eframe::App for DicomViewerApp {
         }
 
         self.show_file_drop_overlay(ctx, &hovered_files);
+        #[cfg(not(target_arch = "wasm32"))]
         self.show_resize_grip(ctx);
 
         if self.is_loading() {
             ctx.set_cursor_icon(egui::CursorIcon::Progress);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.finish_web_selection_pixel_reservation_if_idle();
+            self.prune_web_session_sources();
+            self.sync_web_loading_marker();
         }
     }
 }
@@ -3171,6 +3811,93 @@ fn default_visible_metadata_fields() -> HashSet<String> {
         .collect()
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn checked_web_session_byte_total(
+    current_bytes: usize,
+    selected_sizes: impl IntoIterator<Item = usize>,
+) -> Result<usize, &'static str> {
+    let mut total = current_bytes;
+    for byte_len in selected_sizes {
+        if byte_len > WEB_MAX_FILE_BYTES {
+            return Err("A selected file exceeds the 512 MiB browser limit.");
+        }
+        total = total.checked_add(byte_len).ok_or(
+            "Opening these files would exceed the browser memory limit. Close studies you no longer need or reload the page.",
+        )?;
+        if total > WEB_MAX_SESSION_BYTES {
+            return Err(
+                "Opening these files would exceed the 1 GiB retained-input limit. Close studies you no longer need or reload the page.",
+            );
+        }
+    }
+    Ok(total)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn checked_web_file_size(file_size: f64) -> Result<usize, &'static str> {
+    if !file_size.is_finite() || file_size < 0.0 || file_size > WEB_MAX_FILE_BYTES as f64 {
+        return Err("A selected file exceeds the 512 MiB browser limit.");
+    }
+
+    Ok(file_size as usize)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Debug, Default)]
+struct WebRetainedPixelCounter {
+    total: usize,
+    pm_frames: ParametricMapPixelCounter,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl WebRetainedPixelCounter {
+    fn add_pixels(&mut self, pixels: usize) -> Option<()> {
+        self.total = self.total.checked_add(pixels)?;
+        Some(())
+    }
+
+    fn add_base_image(&mut self, image: &DicomImage) -> Option<()> {
+        let pixels = image.web_retained_base_pixel_count()?;
+        self.add_pixels(pixels)
+    }
+
+    fn add_pm_overlay(&mut self, overlay: &ParametricMapOverlay) -> Option<()> {
+        let pixels = self.pm_frames.add_overlay(overlay)?;
+        self.add_pixels(pixels)
+    }
+
+    fn add_pm_overlays(&mut self, overlays: &HashMap<String, ParametricMapOverlay>) -> Option<()> {
+        for overlay in overlays.values() {
+            self.add_pm_overlay(overlay)?;
+        }
+        Some(())
+    }
+
+    fn add_image(&mut self, image: &DicomImage) -> Option<()> {
+        self.add_base_image(image)?;
+        if let Some(overlay) = image.pm_overlay.as_ref() {
+            self.add_pm_overlay(overlay)?;
+        }
+        Some(())
+    }
+
+    fn ensure_limit(&self) -> Result<usize, String> {
+        self.ensure_limit_with(WEB_MAX_RETAINED_PIXELS)
+    }
+
+    fn ensure_limit_with(&self, limit: usize) -> Result<usize, String> {
+        if self.total > limit {
+            Err(WEB_PIXEL_LIMIT_MESSAGE.to_string())
+        } else {
+            Ok(self.total)
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.total
+    }
+}
+
 fn ordered_visible_metadata_fields(visible: &HashSet<String>) -> Vec<String> {
     METADATA_FIELD_NAMES
         .iter()
@@ -3180,14 +3907,19 @@ fn ordered_visible_metadata_fields(visible: &HashSet<String>) -> Vec<String> {
 }
 
 fn metadata_settings_file_path() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
     {
         return env::var_os("APPDATA")
             .map(PathBuf::from)
             .map(|base| base.join("perspecta").join("settings.toml"));
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
     {
         env::var_os("HOME").map(PathBuf::from).map(|home| {
             home.join("Library")
@@ -3197,7 +3929,10 @@ fn metadata_settings_file_path() -> Option<PathBuf> {
         })
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(any(target_os = "windows", target_os = "macos"))
+    ))]
     {
         if let Some(xdg) = env::var_os("XDG_CONFIG_HOME") {
             return Some(PathBuf::from(xdg).join("perspecta").join("settings.toml"));
@@ -3287,7 +4022,7 @@ fn unescape_toml_string(value: &str) -> String {
     output
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use dicom_core::value::DataSetSequence;
@@ -3328,6 +4063,338 @@ mod tests {
             (actual - expected).abs() < 0.001,
             "expected {expected}, got {actual}"
         );
+    }
+
+    #[test]
+    fn web_byte_limits_accept_exact_file_and_session_boundaries() {
+        assert_eq!(
+            checked_web_session_byte_total(0, [WEB_MAX_FILE_BYTES]),
+            Ok(WEB_MAX_FILE_BYTES)
+        );
+        assert_eq!(
+            checked_web_session_byte_total(
+                WEB_MAX_SESSION_BYTES - WEB_MAX_FILE_BYTES,
+                [WEB_MAX_FILE_BYTES],
+            ),
+            Ok(WEB_MAX_SESSION_BYTES)
+        );
+    }
+
+    #[test]
+    fn web_byte_limits_reject_oversized_file_and_session() {
+        assert!(
+            checked_web_session_byte_total(0, [WEB_MAX_FILE_BYTES + 1]).is_err(),
+            "a file above 512 MiB must be rejected"
+        );
+        assert!(
+            checked_web_session_byte_total(WEB_MAX_SESSION_BYTES, [1]).is_err(),
+            "a session above 1 GiB must be rejected"
+        );
+    }
+
+    #[test]
+    fn web_drop_queue_keeps_four_files_as_one_atomic_batch() {
+        WEB_DROP_BATCH.with(|batch| batch.replace(None));
+        WEB_DROP_READ_IN_FLIGHT.with(|state| state.set(false));
+
+        let guard = begin_web_drop_read().expect("a fresh web drop should start");
+        assert!(web_drop_busy());
+        assert!(
+            begin_web_drop_read().is_err(),
+            "a second drop must not read concurrently"
+        );
+
+        let files = ["rcc.dcm", "lcc.dcm", "rmlo.dcm", "lmlo.dcm"]
+            .into_iter()
+            .map(|name| (name.to_string(), vec![0_u8; 8]))
+            .collect();
+        queue_web_dropped_files(files).expect("the complete drop should queue atomically");
+        drop(guard);
+
+        assert!(
+            web_drop_busy(),
+            "the queued batch must remain busy until the app takes it"
+        );
+        let batch = take_web_drop_batch().expect("the app should receive one queued batch");
+        assert_eq!(batch.len(), 4);
+        assert_eq!(
+            batch
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rcc.dcm", "lcc.dcm", "rmlo.dcm", "lmlo.dcm"]
+        );
+        assert!(batch.iter().all(|file| file.bytes.len() == 8));
+        assert!(!web_drop_busy());
+    }
+
+    #[test]
+    fn web_picker_size_conversion_rejects_invalid_and_oversized_js_values() {
+        assert_eq!(
+            checked_web_file_size(WEB_MAX_FILE_BYTES as f64),
+            Ok(WEB_MAX_FILE_BYTES)
+        );
+        assert!(checked_web_file_size((WEB_MAX_FILE_BYTES + 1) as f64).is_err());
+        assert!(checked_web_file_size(f64::NAN).is_err());
+        assert!(checked_web_file_size(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn web_selection_counts_one_resident_frame_for_multiframe_mammography() {
+        let source = test_memory_multiframe_image_source(
+            "synthetic-dbt.dcm",
+            "9.999.300.1",
+            "9.999.300.2",
+            "9.999.300.3",
+            200,
+        );
+        let report = test_memory_source(
+            "synthetic-sr.dcm",
+            "9.999.301.1",
+            "9.999.301.2",
+            "9.999.301.3",
+        );
+
+        assert_eq!(
+            read_dicom_logical_pixel_count(&source)
+                .expect("synthetic DBT logical pixels should be readable"),
+            200
+        );
+        assert_eq!(
+            web_budget::selected_source_retained_pixels(&[source, report]),
+            Ok(1),
+            "a normal browser multi-frame image retains one decoded frame and SR retains none"
+        );
+    }
+
+    #[test]
+    fn web_history_pixel_count_includes_pm_and_deduplicates_pending_clones() {
+        let image_uid = "9.999.201.1";
+        let overlay = test_parametric_map_overlay(image_uid);
+        let mut first_image = DicomImage::test_stub_with_mono_frames(None, 1);
+        first_image.pm_overlay = Some(overlay.clone());
+        let mut second_image = DicomImage::test_stub_with_mono_frames(None, 1);
+        second_image.pm_overlay = Some(overlay.clone());
+        let ctx = egui::Context::default();
+        let entry = HistoryEntry {
+            id: "pm-budget-history".to_string(),
+            kind: HistoryKind::Group(HistoryGroupData {
+                viewports: vec![
+                    HistoryGroupViewportData {
+                        path: test_meta("pm-budget-a.dcm"),
+                        image: first_image,
+                        texture: test_texture(&ctx, "pm-budget-a"),
+                        history_thumb: test_preview(),
+                        label: "A".to_string(),
+                        window_center: 0.0,
+                        window_width: 1.0,
+                        current_frame: 0,
+                    },
+                    HistoryGroupViewportData {
+                        path: test_meta("pm-budget-b.dcm"),
+                        image: second_image,
+                        texture: test_texture(&ctx, "pm-budget-b"),
+                        history_thumb: test_preview(),
+                        label: "B".to_string(),
+                        window_center: 0.0,
+                        window_width: 1.0,
+                        current_frame: 0,
+                    },
+                ],
+                selected_index: 0,
+            }),
+            thumbs: Vec::new(),
+        };
+
+        let mut counter = WebRetainedPixelCounter::default();
+        counter
+            .add_pm_overlays(&HashMap::from([(image_uid.to_string(), overlay)]))
+            .expect("pending PM pixels should count");
+        assert_eq!(counter.total(), 1);
+        assert_eq!(
+            web_history_entry_pixel_count(&entry, &mut counter),
+            Some(2),
+            "history adds two base pixels but must not count the shared pending PM buffer again"
+        );
+        assert_eq!(counter.total(), 3);
+        assert_eq!(
+            web_history_retained_entry_flags(
+                &[entry],
+                Some(0),
+                3,
+                &HashMap::from([(
+                    image_uid.to_string(),
+                    test_parametric_map_overlay(image_uid),
+                )]),
+            ),
+            vec![false],
+            "a distinct pending PM buffer must consume its own logical pixel"
+        );
+    }
+
+    #[test]
+    fn web_selection_budget_deduplicates_pm_shared_by_uncached_active_and_history() {
+        let image_uid = "9.999.201.2";
+        let overlay = test_parametric_map_overlay(image_uid);
+        let mut active_image = DicomImage::test_stub_with_mono_frames(None, 1);
+        active_image.pm_overlay = Some(overlay.clone());
+        let ctx = egui::Context::default();
+        let mut background_entry = single_history_entry(&ctx, "shared-pm-history.dcm", "shared-pm");
+        let HistoryKind::Single(background_data) = &mut background_entry.kind else {
+            panic!("single history test helper must produce a single entry");
+        };
+        background_data.image.pm_overlay = Some(overlay);
+        let background_id = background_entry.id.clone();
+        let mut app = DicomViewerApp {
+            image: Some(active_image),
+            current_single_path: Some(test_meta("uncached-active.dcm")),
+            history_entries: vec![background_entry],
+            ..Default::default()
+        };
+
+        app.begin_web_selection_pixel_reservation(WEB_MAX_RETAINED_PIXELS - 3)
+            .expect("shared PM plus two base pixels should fit exactly");
+
+        assert_eq!(app.history_entries.len(), 1);
+        assert_eq!(app.history_entries[0].id, background_id);
+    }
+
+    #[test]
+    fn rejected_pm_merge_leaves_pending_and_active_state_unchanged() {
+        let image_uid = "9.999.202.1";
+        let existing_overlay = test_parametric_map_overlay(image_uid);
+        let incoming_overlay = test_parametric_map_overlay(image_uid);
+        let mut image = DicomImage::test_stub_with_mono_frames(None, 1);
+        image.width = WEB_MAX_RETAINED_PIXELS - 1;
+        image.sop_instance_uid = Some(image_uid.to_string());
+        image.pm_overlay = Some(existing_overlay.clone());
+        let mut app = DicomViewerApp {
+            image: Some(image),
+            pending_pm_overlays: HashMap::from([(image_uid.to_string(), existing_overlay.clone())]),
+            ..Default::default()
+        };
+
+        app.merge_pending_pm_overlays(HashMap::from([(image_uid.to_string(), incoming_overlay)]));
+
+        assert_eq!(
+            app.pending_pm_overlays
+                .get(image_uid)
+                .map(|overlay| overlay.layers.len()),
+            Some(existing_overlay.layers.len()),
+            "the rejected merge must not mutate pending PM layers"
+        );
+        assert_eq!(
+            app.image
+                .as_ref()
+                .and_then(|image| image.pm_overlay.as_ref())
+                .map(|overlay| overlay.layers.len()),
+            Some(existing_overlay.layers.len()),
+            "the rejected merge must not attach any incoming PM layer"
+        );
+        assert_eq!(
+            app.load_error_message.as_deref(),
+            Some(WEB_PIXEL_LIMIT_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn replacement_budget_includes_retained_history_before_accepting_pm() {
+        let image_uid = "9.999.203.1";
+        let overlay = test_parametric_map_overlay(image_uid);
+        let ctx = egui::Context::default();
+        let old_image = DicomImage::test_stub_with_mono_frames(None, 1);
+        let mut candidate = DicomImage::test_stub_with_mono_frames(None, 1);
+        candidate.width = WEB_MAX_RETAINED_PIXELS - 1;
+        candidate.sop_instance_uid = Some(image_uid.to_string());
+        let mut app = DicomViewerApp {
+            image: Some(old_image.clone()),
+            current_single_path: Some(test_meta("old-active.dcm")),
+            texture: Some(test_texture(&ctx, "old-active")),
+            pending_pm_overlays: HashMap::from([(image_uid.to_string(), overlay)]),
+            history_entries: vec![HistoryEntry {
+                id: super::history::history_id_from_paths(&[test_meta("retained-history.dcm")]),
+                kind: HistoryKind::Single(Box::new(HistorySingleData {
+                    path: test_meta("retained-history.dcm"),
+                    image: DicomImage::test_stub_with_mono_frames(None, 1),
+                    texture: test_texture(&ctx, "retained-history"),
+                    window_center: 0.0,
+                    window_width: 1.0,
+                    current_frame: 0,
+                    cine_fps: DEFAULT_CINE_FPS,
+                })),
+                thumbs: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        let result = app.apply_loaded_single(
+            test_pending_load("replacement-candidate.dcm", candidate),
+            &ctx,
+        );
+
+        assert_eq!(result, Err(WEB_PIXEL_LIMIT_MESSAGE.to_string()));
+        assert_eq!(
+            app.current_single_path.as_ref(),
+            Some(&test_meta("old-active.dcm")),
+            "the rejected candidate must not replace the active study"
+        );
+        assert_eq!(
+            app.image.as_ref().map(|image| image.width),
+            Some(old_image.width)
+        );
+        assert_eq!(app.history_entries.len(), 1);
+    }
+
+    #[test]
+    fn web_load_in_flight_guard_tracks_job_until_drop() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let mut app = DicomViewerApp {
+            web_load_in_flight: Arc::clone(&in_flight),
+            ..Default::default()
+        };
+        let guard = WebLoadInFlightGuard::start(Arc::clone(&in_flight), egui::Context::default());
+
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+        assert!(app.is_loading());
+        app.clear_active_study();
+        assert!(
+            app.is_loading(),
+            "clearing UI receivers must not hide a source-retaining task"
+        );
+
+        drop(guard);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        assert!(!app.is_loading());
+    }
+
+    #[test]
+    fn clearing_history_preload_cancels_web_job_and_keeps_it_in_flight() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let in_flight = Arc::new(AtomicUsize::new(1));
+        let (_tx, rx) = mpsc::channel();
+        let mut app = DicomViewerApp {
+            history_preload_receiver: Some(rx),
+            history_preload_queue: VecDeque::from([HistoryPreloadJob::StructuredReport(
+                DicomSource::from(PathBuf::from("cancelled-history-preload.dcm")),
+            )]),
+            history_preload_active_key: Some(HistoryPreloadJobKey::StructuredReport(
+                "cancelled-history-preload".to_string(),
+            )),
+            history_preload_cancel: Some(Arc::clone(&cancel)),
+            history_preload_in_flight: Arc::clone(&in_flight),
+            ..Default::default()
+        };
+
+        app.clear_history_preload();
+
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(app.history_preload_receiver.is_none());
+        assert!(app.history_preload_queue.is_empty());
+        assert!(app.history_preload_active_key.is_none());
+        assert!(app.is_loading());
+
+        in_flight.store(0, Ordering::Release);
+        assert!(!app.is_loading());
     }
 
     fn test_sr_overlay_with_graphics(graphics: Vec<SrOverlayGraphic>) -> SrOverlay {
@@ -3438,6 +4505,16 @@ mod tests {
         series_uid: &str,
         instance_uid: &str,
     ) -> DicomSource {
+        test_memory_multiframe_image_source(preferred_name, study_uid, series_uid, instance_uid, 1)
+    }
+
+    fn test_memory_multiframe_image_source(
+        preferred_name: &str,
+        study_uid: &str,
+        series_uid: &str,
+        instance_uid: &str,
+        frame_count: usize,
+    ) -> DicomSource {
         let image_sop_class_uid = DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID;
         let image_dataset = InMemDicomObject::from_element_iter([
             DataElement::new(Tag(0x0008, 0x0016), VR::UI, image_sop_class_uid),
@@ -3447,13 +4524,18 @@ mod tests {
             DataElement::new(Tag(0x0020, 0x000E), VR::UI, series_uid),
             DataElement::new(Tag(0x0028, 0x0002), VR::US, PrimitiveValue::from(1u16)),
             DataElement::new(Tag(0x0028, 0x0004), VR::CS, "MONOCHROME2"),
+            DataElement::new(Tag(0x0028, 0x0008), VR::IS, frame_count.max(1).to_string()),
             DataElement::new(Tag(0x0028, 0x0010), VR::US, PrimitiveValue::from(1u16)),
             DataElement::new(Tag(0x0028, 0x0011), VR::US, PrimitiveValue::from(1u16)),
             DataElement::new(Tag(0x0028, 0x0100), VR::US, PrimitiveValue::from(8u16)),
             DataElement::new(Tag(0x0028, 0x0101), VR::US, PrimitiveValue::from(8u16)),
             DataElement::new(Tag(0x0028, 0x0102), VR::US, PrimitiveValue::from(7u16)),
             DataElement::new(Tag(0x0028, 0x0103), VR::US, PrimitiveValue::from(0u16)),
-            DataElement::new(Tag(0x7FE0, 0x0010), VR::OB, PrimitiveValue::from(vec![0u8])),
+            DataElement::new(
+                Tag(0x7FE0, 0x0010),
+                VR::OB,
+                PrimitiveValue::from(vec![0u8; frame_count.max(1)]),
+            ),
         ]);
 
         let image_obj = image_dataset
@@ -3592,6 +4674,20 @@ mod tests {
         let bytes = fs::read(&path).expect("memory Parametric Map test bytes should read");
         let _ = fs::remove_file(&path);
         DicomSource::from_memory(preferred_name, bytes)
+    }
+
+    fn test_parametric_map_overlay(referenced_instance_uid: &str) -> ParametricMapOverlay {
+        let source = test_memory_parametric_map_source(
+            "pm-budget",
+            "9.999.200.1",
+            "9.999.200.2",
+            "9.999.200.3",
+            referenced_instance_uid,
+        );
+        load_parametric_map_overlays(&source)
+            .expect("Parametric Map budget fixture should parse")
+            .remove(referenced_instance_uid)
+            .expect("Parametric Map budget fixture should reference the test image")
     }
 
     fn single_history_entry(ctx: &egui::Context, path: &str, texture_name: &str) -> HistoryEntry {

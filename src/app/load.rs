@@ -20,6 +20,17 @@ struct PreparedImagePath {
 struct PreparedParametricMapPath {
     path: DicomSource,
     overlays: HashMap<String, ParametricMapOverlay>,
+    #[cfg(target_arch = "wasm32")]
+    logical_pixels: usize,
+}
+
+#[derive(Default)]
+struct PreparedLoadAccumulator {
+    prepared: PreparedLoadPaths,
+    images: Vec<PreparedImagePath>,
+    parametric_maps: Vec<PreparedParametricMapPath>,
+    #[cfg(target_arch = "wasm32")]
+    web_pixels: WebRetainedPixelCounter,
 }
 
 struct PendingOverlayState {
@@ -52,6 +63,8 @@ pub(super) enum LocalPrepareResult {
         prepared_groups: Vec<PreparedLoadPaths>,
         open_group: usize,
     },
+    #[cfg(target_arch = "wasm32")]
+    Error(String),
 }
 
 #[derive(Default, Clone)]
@@ -64,10 +77,22 @@ pub(super) struct PreparedLoadPaths {
     pub(super) pm_overlays: HashMap<String, ParametricMapOverlay>,
     pub(super) gsps_files_found: usize,
     pub(super) other_files_found: usize,
+    #[cfg(target_arch = "wasm32")]
+    pub(super) web_pixel_limit_error: Option<String>,
+    #[cfg(target_arch = "wasm32")]
+    pub(super) web_base_pixel_count: usize,
 }
 
 impl DicomViewerApp {
-    fn commit_pending_overlay_state(&mut self, pending_overlay_state: PendingOverlayState) {
+    fn commit_pending_overlay_state(
+        &mut self,
+        pending_overlay_state: PendingOverlayState,
+    ) -> Result<(), String> {
+        #[cfg(any(test, target_arch = "wasm32"))]
+        if pending_overlay_state.attach_to_current_study {
+            self.ensure_web_retained_pm_pixel_limit(&pending_overlay_state.pending_pm_overlays)?;
+        }
+
         if pending_overlay_state.clear_history_preload {
             self.clear_history_preload();
         }
@@ -85,6 +110,7 @@ impl DicomViewerApp {
             self.attach_pending_overlays_to_current_study();
             self.sync_current_state_to_history();
         }
+        Ok(())
     }
 
     pub(super) fn prepare_load_paths<T>(paths: Vec<T>) -> PreparedLoadPaths
@@ -102,79 +128,178 @@ impl DicomViewerApp {
         T: Into<DicomSource>,
         F: Fn() -> bool,
     {
-        let mut prepared = PreparedLoadPaths::default();
-        let mut prepared_images = Vec::<PreparedImagePath>::new();
-        let mut prepared_parametric_maps = Vec::<PreparedParametricMapPath>::new();
+        let mut accumulator = PreparedLoadAccumulator::default();
 
         for path in paths {
             if cancelled() {
                 return None;
             }
-            let path = path.into();
-            match classify_dicom_path(&path) {
-                Ok(DicomPathKind::Gsps) => {
-                    prepared.gsps_files_found = prepared.gsps_files_found.saturating_add(1);
-                    match load_gsps_overlays(&path) {
-                        Ok(overlays) => {
-                            Self::merge_gsps_overlays(&mut prepared.gsps_overlays, &overlays)
-                        }
-                        Err(err) => {
-                            log::warn!("Could not parse GSPS input: {err:#}");
-                        }
-                    }
-                }
-                Ok(DicomPathKind::StructuredReport) => {
-                    match load_mammography_cad_sr_overlays(&path) {
-                        Ok(overlays) => {
-                            Self::merge_sr_overlays(&mut prepared.sr_overlays, &overlays)
-                        }
-                        Err(err) => {
-                            log::warn!("Could not parse Mammography CAD SR overlay input: {err:#}");
-                        }
-                    }
-                    prepared.structured_report_paths.push(path);
-                }
-                Ok(DicomPathKind::ParametricMap) => match load_parametric_map_overlays(&path) {
-                    Ok(overlays) => {
-                        prepared_parametric_maps.push(PreparedParametricMapPath { path, overlays })
-                    }
-                    Err(err) => {
-                        log::warn!("Could not parse Parametric Map overlay input: {err:#}");
-                        prepared.parametric_map_paths.push(path);
-                    }
-                },
-                Ok(DicomPathKind::Image) | Err(_) => {
-                    let sop_instance_uid = match read_sop_instance_uid(&path) {
-                        Ok(uid) => uid,
-                        Err(err) => {
-                            log::warn!("Could not inspect image SOP Instance UID: {err:#}");
-                            None
-                        }
-                    };
-                    prepared_images.push(PreparedImagePath {
-                        path,
-                        sop_instance_uid,
-                    });
-                }
-                Ok(DicomPathKind::Other) => {
-                    prepared.other_files_found = prepared.other_files_found.saturating_add(1);
-                }
-            }
+            Self::prepare_one_path(path.into(), &mut accumulator);
         }
 
-        let selected_image_uids = prepared_images
+        if cancelled() {
+            return None;
+        }
+        Some(Self::finish_prepared_paths(accumulator))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn add_web_prepared_base_pixels(
+        path: &DicomSource,
+        accumulator: &mut PreparedLoadAccumulator,
+    ) -> Result<(), String> {
+        let retained_pixels = read_dicom_frame_pixel_count(path).map_err(|err| {
+            format!("Could not inspect DICOM pixel dimensions for browser limits: {err:#}")
+        })?;
+        let mut prospective = accumulator.web_pixels.clone();
+        prospective
+            .add_pixels(retained_pixels)
+            .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        prospective.ensure_limit()?;
+        let base_pixels = accumulator
+            .prepared
+            .web_base_pixel_count
+            .checked_add(retained_pixels)
+            .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        accumulator.web_pixels = prospective;
+        accumulator.prepared.web_base_pixel_count = base_pixels;
+        Ok(())
+    }
+
+    fn prepare_one_path(path: DicomSource, accumulator: &mut PreparedLoadAccumulator) {
+        #[cfg(target_arch = "wasm32")]
+        if accumulator.prepared.web_pixel_limit_error.is_some() {
+            return;
+        }
+
+        match classify_dicom_path(&path) {
+            Ok(DicomPathKind::Gsps) => {
+                accumulator.prepared.gsps_files_found =
+                    accumulator.prepared.gsps_files_found.saturating_add(1);
+                match load_gsps_overlays(&path) {
+                    Ok(overlays) => Self::merge_gsps_overlays(
+                        &mut accumulator.prepared.gsps_overlays,
+                        &overlays,
+                    ),
+                    Err(err) => log::warn!("Could not parse GSPS input: {err:#}"),
+                }
+            }
+            Ok(DicomPathKind::StructuredReport) => {
+                match load_mammography_cad_sr_overlays(&path) {
+                    Ok(overlays) => {
+                        Self::merge_sr_overlays(&mut accumulator.prepared.sr_overlays, &overlays)
+                    }
+                    Err(err) => {
+                        log::warn!("Could not parse Mammography CAD SR overlay input: {err:#}");
+                    }
+                }
+                accumulator.prepared.structured_report_paths.push(path);
+            }
+            Ok(DicomPathKind::ParametricMap) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let logical_pixels = match read_dicom_logical_pixel_count(&path) {
+                        Ok(pixels) => pixels,
+                        Err(err) => {
+                            accumulator.prepared.web_pixel_limit_error = Some(format!(
+                                "Could not inspect Parametric Map dimensions for browser limits: {err:#}"
+                            ));
+                            return;
+                        }
+                    };
+                    let mut prospective = accumulator.web_pixels.clone();
+                    if prospective.add_pixels(logical_pixels).is_none()
+                        || prospective.ensure_limit().is_err()
+                    {
+                        accumulator.prepared.web_pixel_limit_error =
+                            Some(WEB_PIXEL_LIMIT_MESSAGE.to_string());
+                        return;
+                    }
+
+                    match load_parametric_map_overlays(&path) {
+                        Ok(overlays) => {
+                            accumulator.web_pixels = prospective;
+                            accumulator.parametric_maps.push(PreparedParametricMapPath {
+                                path,
+                                overlays,
+                                logical_pixels,
+                            });
+                        }
+                        Err(err) => {
+                            log::warn!("Could not parse Parametric Map overlay input: {err:#}");
+                            let Some(base_pixels) = accumulator
+                                .prepared
+                                .web_base_pixel_count
+                                .checked_add(logical_pixels)
+                            else {
+                                accumulator.prepared.web_pixel_limit_error =
+                                    Some(WEB_PIXEL_LIMIT_MESSAGE.to_string());
+                                return;
+                            };
+                            accumulator.web_pixels = prospective;
+                            accumulator.prepared.web_base_pixel_count = base_pixels;
+                            accumulator.prepared.parametric_map_paths.push(path);
+                        }
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                match load_parametric_map_overlays(&path) {
+                    Ok(overlays) => accumulator
+                        .parametric_maps
+                        .push(PreparedParametricMapPath { path, overlays }),
+                    Err(err) => {
+                        log::warn!("Could not parse Parametric Map overlay input: {err:#}");
+                        accumulator.prepared.parametric_map_paths.push(path);
+                    }
+                }
+            }
+            Ok(DicomPathKind::Image) | Err(_) => {
+                #[cfg(target_arch = "wasm32")]
+                if let Err(message) = Self::add_web_prepared_base_pixels(&path, accumulator) {
+                    accumulator.prepared.web_pixel_limit_error = Some(message);
+                    return;
+                }
+                let sop_instance_uid = match read_sop_instance_uid(&path) {
+                    Ok(uid) => uid,
+                    Err(err) => {
+                        log::warn!("Could not inspect image SOP Instance UID: {err:#}");
+                        None
+                    }
+                };
+                accumulator.images.push(PreparedImagePath {
+                    path,
+                    sop_instance_uid,
+                });
+            }
+            Ok(DicomPathKind::Other) => {
+                accumulator.prepared.other_files_found =
+                    accumulator.prepared.other_files_found.saturating_add(1);
+            }
+        }
+    }
+
+    fn finish_prepared_paths(accumulator: PreparedLoadAccumulator) -> PreparedLoadPaths {
+        let PreparedLoadAccumulator {
+            mut prepared,
+            images,
+            parametric_maps,
+            #[cfg(target_arch = "wasm32")]
+                web_pixels: _,
+        } = accumulator;
+        #[cfg(target_arch = "wasm32")]
+        if prepared.web_pixel_limit_error.is_some() {
+            return prepared;
+        }
+        let selected_image_uids = images
             .iter()
             .filter_map(|image| image.sop_instance_uid.clone())
             .collect::<HashSet<_>>();
-        prepared.image_paths = prepared_images
+        prepared.image_paths = images
             .into_iter()
             .map(|image| image.path)
             .collect::<Vec<_>>();
 
-        for prepared_map in prepared_parametric_maps {
-            if cancelled() {
-                return None;
-            }
+        for prepared_map in parametric_maps {
             let matched_overlays = prepared_map
                 .overlays
                 .into_iter()
@@ -183,17 +308,63 @@ impl DicomViewerApp {
                 })
                 .collect::<HashMap<_, _>>();
             if matched_overlays.is_empty() {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let Some(base_pixels) = prepared
+                        .web_base_pixel_count
+                        .checked_add(prepared_map.logical_pixels)
+                    else {
+                        prepared.web_pixel_limit_error = Some(WEB_PIXEL_LIMIT_MESSAGE.to_string());
+                        return prepared;
+                    };
+                    prepared.web_base_pixel_count = base_pixels;
+                }
                 prepared.parametric_map_paths.push(prepared_map.path);
             } else {
                 Self::merge_pm_overlays(&mut prepared.pm_overlays, &matched_overlays);
             }
         }
+        prepared
+    }
 
-        if cancelled() {
-            None
-        } else {
-            Some(prepared)
+    #[cfg(target_arch = "wasm32")]
+    async fn prepare_load_paths_cooperative(
+        paths: Vec<DicomSource>,
+        cancel: &Arc<AtomicBool>,
+    ) -> Option<PreparedLoadPaths> {
+        let mut accumulator = PreparedLoadAccumulator::default();
+        for path in paths {
+            if cancel.load(Ordering::Acquire) {
+                return None;
+            }
+            Self::prepare_one_path(path, &mut accumulator);
+            crate::platform::yield_to_browser().await;
         }
+        if cancel.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(Self::finish_prepared_paths(accumulator))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn extend_web_prepared_pixel_budget(
+        counter: &mut WebRetainedPixelCounter,
+        prepared: &PreparedLoadPaths,
+    ) -> Result<(), String> {
+        if let Some(message) = prepared.web_pixel_limit_error.as_ref() {
+            return Err(message.clone());
+        }
+
+        let mut prospective = counter.clone();
+        prospective
+            .add_pixels(prepared.web_base_pixel_count)
+            .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        prospective
+            .add_pm_overlays(&prepared.pm_overlays)
+            .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        prospective.ensure_limit()?;
+        *counter = prospective;
+        Ok(())
     }
 
     pub(super) fn handle_launch_request(&mut self, request: LaunchRequest, ctx: &egui::Context) {
@@ -245,7 +416,8 @@ impl DicomViewerApp {
         let cancel = self.begin_local_prepare();
 
         let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
-        thread::spawn(move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::platform::spawn(move || {
             let cancelled = || cancel.load(Ordering::Acquire);
             let Some(prepared) = Self::prepare_load_paths_with_cancel(paths, cancelled) else {
                 return;
@@ -254,6 +426,25 @@ impl DicomViewerApp {
                 return;
             }
             let _ = tx.send(LocalPrepareResult::Paths(prepared));
+        });
+        #[cfg(target_arch = "wasm32")]
+        let web_load_guard = self.begin_web_load_in_flight(ctx);
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let _web_load_guard = web_load_guard;
+            let Some(prepared) = Self::prepare_load_paths_cooperative(paths, &cancel).await else {
+                return;
+            };
+            if cancel.load(Ordering::Acquire) {
+                return;
+            }
+            let mut web_pixels = WebRetainedPixelCounter::default();
+            if let Err(message) = Self::extend_web_prepared_pixel_budget(&mut web_pixels, &prepared)
+            {
+                let _ = tx.send(LocalPrepareResult::Error(message));
+            } else {
+                let _ = tx.send(LocalPrepareResult::Paths(prepared));
+            }
         });
         self.local_prepare_receiver = Some(rx);
         ctx.request_repaint();
@@ -274,7 +465,8 @@ impl DicomViewerApp {
         let cancel = self.begin_local_prepare();
 
         let (tx, rx) = mpsc::channel::<LocalPrepareResult>();
-        thread::spawn(move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::platform::spawn(move || {
             if groups.is_empty() {
                 if cancel.load(Ordering::Acquire) {
                     return;
@@ -337,6 +529,82 @@ impl DicomViewerApp {
                 open_group: active_group,
             });
         });
+        #[cfg(target_arch = "wasm32")]
+        let web_load_guard = self.begin_web_load_in_flight(ctx);
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let _web_load_guard = web_load_guard;
+            if groups.is_empty() {
+                if !cancel.load(Ordering::Acquire) {
+                    let _ = tx.send(LocalPrepareResult::Groups {
+                        prepared_groups: Vec::new(),
+                        open_group: 0,
+                    });
+                }
+                return;
+            }
+
+            let group_count = groups.len();
+            let active_group = open_group.min(group_count.saturating_sub(1));
+            let mut pending_groups = groups.into_iter().map(Some).collect::<Vec<_>>();
+            let Some(active_paths) = pending_groups.get_mut(active_group).and_then(Option::take)
+            else {
+                return;
+            };
+            let Some(active_prepared) =
+                Self::prepare_load_paths_cooperative(active_paths, &cancel).await
+            else {
+                return;
+            };
+            let mut web_pixels = WebRetainedPixelCounter::default();
+            if let Err(message) =
+                Self::extend_web_prepared_pixel_budget(&mut web_pixels, &active_prepared)
+            {
+                let _ = tx.send(LocalPrepareResult::Error(message));
+                return;
+            }
+            if cancel.load(Ordering::Acquire)
+                || tx
+                    .send(LocalPrepareResult::OpenGroup {
+                        prepared_group: active_prepared.clone(),
+                        open_group: active_group,
+                    })
+                    .is_err()
+            {
+                return;
+            }
+
+            crate::platform::yield_to_browser().await;
+            let mut prepared_groups = vec![None; group_count];
+            prepared_groups[active_group] = Some(active_prepared);
+            for (group_index, group) in pending_groups.into_iter().enumerate() {
+                let Some(group) = group else {
+                    continue;
+                };
+                let Some(prepared) = Self::prepare_load_paths_cooperative(group, &cancel).await
+                else {
+                    return;
+                };
+                if let Err(message) =
+                    Self::extend_web_prepared_pixel_budget(&mut web_pixels, &prepared)
+                {
+                    let _ = tx.send(LocalPrepareResult::Error(message));
+                    return;
+                }
+                prepared_groups[group_index] = Some(prepared);
+            }
+            if cancel.load(Ordering::Acquire) {
+                return;
+            }
+            let prepared_groups = prepared_groups
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default();
+            let _ = tx.send(LocalPrepareResult::Groups {
+                prepared_groups,
+                open_group: active_group,
+            });
+        });
         self.local_prepare_receiver = Some(rx);
         ctx.request_repaint();
     }
@@ -367,6 +635,12 @@ impl DicomViewerApp {
                 self.local_prepare_cancel = None;
                 let _ =
                     self.apply_prepared_local_group_backgrounds(prepared_groups, open_group, ctx);
+                ctx.request_repaint();
+            }
+            #[cfg(target_arch = "wasm32")]
+            Ok(LocalPrepareResult::Error(message)) => {
+                self.local_prepare_cancel = None;
+                self.set_load_error(message);
                 ctx.request_repaint();
             }
             Err(TryRecvError::Empty) => {
@@ -441,6 +715,13 @@ impl DicomViewerApp {
         prepared: &PreparedLoadPaths,
         group_index: usize,
     ) -> Result<(), ()> {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(message) = prepared.web_pixel_limit_error.as_ref() {
+            self.set_load_error(message.clone());
+            log::warn!("{message}");
+            return Err(());
+        }
+
         if Self::is_supported_prepared_group(prepared) {
             return Ok(());
         }
@@ -505,7 +786,7 @@ impl DicomViewerApp {
         self.dicomweb_active_pending_paths.clear();
         log::info!("Loading study from DICOMweb...");
         let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
-        thread::spawn(move || {
+        crate::platform::spawn(move || {
             let result = download_dicomweb_request(&request).map_err(|err| format!("{err:#}"));
             let _ = tx.send(result);
         });
@@ -540,7 +821,7 @@ impl DicomViewerApp {
 
         let (active_path_tx, active_path_rx) = mpsc::channel::<DicomWebGroupStreamUpdate>();
         let (tx, rx) = mpsc::channel::<Result<DicomWebDownloadResult, String>>();
-        thread::spawn(move || {
+        crate::platform::spawn(move || {
             let result = download_dicomweb_group_request(&request, |update| {
                 let _ = active_path_tx.send(update);
             })
@@ -556,6 +837,11 @@ impl DicomViewerApp {
         mut pending: PendingLoad,
         ctx: &egui::Context,
     ) -> Result<(), String> {
+        #[cfg(any(test, target_arch = "wasm32"))]
+        self.ensure_web_group_candidate_pixel_limit(&pending.image)?;
+        #[cfg(target_arch = "wasm32")]
+        Self::ensure_web_texture_dimensions(&pending.image, ctx)?;
+
         let slot = preferred_mammo_slot(&pending.image, self.mammo_group.len(), |index| {
             self.mammo_group
                 .get(index)
@@ -804,7 +1090,11 @@ impl DicomViewerApp {
                     count if Self::is_supported_multi_view_group_size(count) => {
                         self.dicomweb_active_group_paths.push((&path).into());
                         if let Some(sender) = self.mammo_load_sender.as_ref().cloned() {
-                            thread::spawn(move || {
+                            #[cfg(target_arch = "wasm32")]
+                            let web_load_guard = self.begin_web_load_in_flight(ctx);
+                            crate::platform::spawn(move || {
+                                #[cfg(target_arch = "wasm32")]
+                                let _web_load_guard = web_load_guard;
                                 let result = match load_dicom(&path) {
                                     Ok(image) => Self::pending_load(path, image),
                                     Err(err) => {
@@ -1106,8 +1396,11 @@ impl DicomViewerApp {
             Ok(result) => {
                 match result {
                     Ok(PendingSingleLoad::Image(pending)) => {
-                        self.apply_loaded_single(*pending, ctx);
-                        self.clear_load_error();
+                        if let Err(message) = self.apply_loaded_single(*pending, ctx) {
+                            self.set_load_error(message);
+                        } else {
+                            self.clear_load_error();
+                        }
                     }
                     Ok(PendingSingleLoad::StructuredReport { path, report }) => {
                         self.apply_loaded_structured_report(path, *report, ctx);
@@ -1141,6 +1434,13 @@ impl DicomViewerApp {
         prepared: PreparedLoadPaths,
         ctx: &egui::Context,
     ) -> Result<(), ()> {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(message) = prepared.web_pixel_limit_error.as_ref() {
+            self.set_load_error(message.clone());
+            log::warn!("{message}");
+            return Err(());
+        }
+
         let PreparedLoadPaths {
             image_paths: paths,
             structured_report_paths,
@@ -1150,6 +1450,10 @@ impl DicomViewerApp {
             pm_overlays,
             gsps_files_found,
             other_files_found,
+            #[cfg(target_arch = "wasm32")]
+                web_pixel_limit_error: _,
+            #[cfg(target_arch = "wasm32")]
+                web_base_pixel_count: _,
         } = prepared;
         if !paths.is_empty()
             || !structured_report_paths.is_empty()
@@ -1201,7 +1505,10 @@ impl DicomViewerApp {
                 .split_first()
                 .map(|(first, rest)| (first.clone(), rest))
             {
-                self.commit_pending_overlay_state(pending_overlay_state);
+                if let Err(message) = self.commit_pending_overlay_state(pending_overlay_state) {
+                    self.set_load_error(message);
+                    return Err(());
+                }
                 self.stage_structured_report_history_entries(&structured_report_paths, ctx);
                 self.stage_parametric_map_history_entries(remaining_parametric_maps, ctx);
                 self.load_parametric_map_path(pm_path, ctx);
@@ -1211,7 +1518,10 @@ impl DicomViewerApp {
                 .split_first()
                 .map(|(first, rest)| (first.clone(), rest))
             {
-                self.commit_pending_overlay_state(pending_overlay_state);
+                if let Err(message) = self.commit_pending_overlay_state(pending_overlay_state) {
+                    self.set_load_error(message);
+                    return Err(());
+                }
                 self.stage_structured_report_history_entries(remaining_reports, ctx);
                 self.load_structured_report_path(report_path, ctx);
                 return Ok(());
@@ -1238,7 +1548,10 @@ impl DicomViewerApp {
         match paths.len() {
             0 => Err(()),
             1 => {
-                self.commit_pending_overlay_state(pending_overlay_state);
+                if let Err(message) = self.commit_pending_overlay_state(pending_overlay_state) {
+                    self.set_load_error(message);
+                    return Err(());
+                }
                 if !structured_report_paths.is_empty() {
                     self.stage_structured_report_history_entries(&structured_report_paths, ctx);
                     log::info!(
@@ -1260,7 +1573,10 @@ impl DicomViewerApp {
                 Ok(())
             }
             count if Self::is_supported_multi_view_group_size(count) => {
-                self.commit_pending_overlay_state(pending_overlay_state);
+                if let Err(message) = self.commit_pending_overlay_state(pending_overlay_state) {
+                    self.set_load_error(message);
+                    return Err(());
+                }
                 if !structured_report_paths.is_empty() {
                     self.stage_structured_report_history_entries(&structured_report_paths, ctx);
                     log::info!(
@@ -1332,6 +1648,9 @@ impl DicomViewerApp {
         path: DicomSource,
         image: DicomImage,
     ) -> Result<PendingLoad, String> {
+        #[cfg(target_arch = "wasm32")]
+        Self::ensure_web_image_pixel_limit(&image)?;
+
         let mut preview = None;
         let mut initial_frame = 0;
         for frame_index in 0..image.frame_count() {
@@ -1362,6 +1681,13 @@ impl DicomViewerApp {
     }
 
     pub(super) fn load_path(&mut self, path: DicomSource, ctx: &egui::Context) {
+        #[cfg(target_arch = "wasm32")]
+        if self.web_selection_pixel_reservation == 0 {
+            self.set_load_error(
+                "Browser decode was stopped because its pre-decode pixel reservation was unavailable.",
+            );
+            return;
+        }
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
         self.single_load_receiver = None;
@@ -1370,7 +1696,11 @@ impl DicomViewerApp {
         log::info!("Loading selected DICOM...");
         log::info!(target: "perf", "{OPEN_STARTED_EVENT}");
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
-        thread::spawn(move || {
+        #[cfg(target_arch = "wasm32")]
+        let web_load_guard = self.begin_web_load_in_flight(ctx);
+        crate::platform::spawn(move || {
+            #[cfg(target_arch = "wasm32")]
+            let _web_load_guard = web_load_guard;
             let result = match load_dicom(&path) {
                 Ok(image) => Self::pending_load(path, image).map(|pending| {
                     log::info!(target: "perf", "{OPEN_DICOM_LOADED_EVENT}");
@@ -1385,6 +1715,13 @@ impl DicomViewerApp {
     }
 
     pub(super) fn load_parametric_map_path(&mut self, path: DicomSource, ctx: &egui::Context) {
+        #[cfg(target_arch = "wasm32")]
+        if self.web_selection_pixel_reservation == 0 {
+            self.set_load_error(
+                "Browser decode was stopped because its pre-decode pixel reservation was unavailable.",
+            );
+            return;
+        }
         self.mammo_load_receiver = None;
         self.mammo_load_sender = None;
         self.single_load_receiver = None;
@@ -1392,7 +1729,11 @@ impl DicomViewerApp {
         self.clear_load_error();
         log::info!("Loading selected Parametric Map...");
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
-        thread::spawn(move || {
+        #[cfg(target_arch = "wasm32")]
+        let web_load_guard = self.begin_web_load_in_flight(ctx);
+        crate::platform::spawn(move || {
+            #[cfg(target_arch = "wasm32")]
+            let _web_load_guard = web_load_guard;
             let result = match load_parametric_map(&path) {
                 Ok(image) => Self::pending_load(path, image)
                     .map(|pending| PendingSingleLoad::Image(Box::new(pending))),
@@ -1412,7 +1753,11 @@ impl DicomViewerApp {
         self.clear_load_error();
         log::info!("Loading selected Structured Report...");
         let (tx, rx) = mpsc::channel::<Result<PendingSingleLoad, String>>();
-        thread::spawn(move || {
+        #[cfg(target_arch = "wasm32")]
+        let web_load_guard = self.begin_web_load_in_flight(ctx);
+        crate::platform::spawn(move || {
+            #[cfg(target_arch = "wasm32")]
+            let _web_load_guard = web_load_guard;
             let result = match load_structured_report(&path) {
                 Ok(report) => Ok(PendingSingleLoad::StructuredReport {
                     path,
@@ -1426,7 +1771,16 @@ impl DicomViewerApp {
         ctx.request_repaint();
     }
 
-    pub(super) fn apply_loaded_single(&mut self, pending: PendingLoad, ctx: &egui::Context) {
+    pub(super) fn apply_loaded_single(
+        &mut self,
+        pending: PendingLoad,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        #[cfg(any(test, target_arch = "wasm32"))]
+        self.ensure_web_replacement_pixel_limit(&pending.path, &pending.image)?;
+        #[cfg(target_arch = "wasm32")]
+        Self::ensure_web_texture_dimensions(&pending.image, ctx)?;
+
         let PendingLoad {
             path,
             mut image,
@@ -1484,6 +1838,7 @@ impl DicomViewerApp {
             );
         }
         log::info!("Loaded selected DICOM.");
+        Ok(())
     }
 
     pub(super) fn apply_loaded_structured_report(
@@ -1504,6 +1859,13 @@ impl DicomViewerApp {
     }
 
     pub(super) fn load_mammo_group_paths(&mut self, paths: Vec<DicomSource>, ctx: &egui::Context) {
+        #[cfg(target_arch = "wasm32")]
+        if self.web_selection_pixel_reservation == 0 {
+            self.set_load_error(
+                "Browser decode was stopped because its pre-decode pixel reservation was unavailable.",
+            );
+            return;
+        }
         if !Self::is_supported_multi_view_group_size(paths.len()) {
             let err = Self::format_multi_view_size_error(paths.len());
             self.set_load_error(err.clone());
@@ -1531,7 +1893,8 @@ impl DicomViewerApp {
         if group_len == 8 {
             log::info!(target: "perf", "{OPEN_STARTED_EVENT}");
         }
-        thread::spawn(move || {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::platform::spawn(move || {
             for path in paths {
                 match load_dicom(&path) {
                     Ok(image) => {
@@ -1554,7 +1917,86 @@ impl DicomViewerApp {
                 }
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        let web_load_guard = self.begin_web_load_in_flight(ctx);
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(async move {
+            let _web_load_guard = web_load_guard;
+            let mut active_pixel_count = 0usize;
+            for path in paths {
+                let image = match load_dicom(&path) {
+                    Ok(image) => image,
+                    Err(err) => {
+                        let _ = tx.send(Err(format!("Error opening DICOM in group: {err:#}")));
+                        return;
+                    }
+                };
+                let image_pixel_count = match Self::web_image_pixel_count(&image) {
+                    Ok(count) => count,
+                    Err(err) => {
+                        let _ = tx.send(Err(err));
+                        return;
+                    }
+                };
+                active_pixel_count = match active_pixel_count.checked_add(image_pixel_count) {
+                    Some(count) if count <= WEB_MAX_RETAINED_PIXELS => count,
+                    _ => {
+                        let _ = tx.send(Err(format!(
+                            "The active images exceed the {WEB_MAX_RETAINED_PIXELS} retained-pixel browser limit."
+                        )));
+                        return;
+                    }
+                };
+                let pending = match Self::pending_load(path, image) {
+                    Ok(pending) => pending,
+                    Err(err) => {
+                        let _ = tx.send(Err(err));
+                        return;
+                    }
+                };
+                if group_len == 8 {
+                    log::info!(target: "perf", "{OPEN_DICOM_LOADED_EVENT}");
+                }
+                if tx.send(Ok(pending)).is_err() {
+                    return;
+                }
+                crate::platform::yield_to_browser().await;
+            }
+        });
         self.mammo_load_receiver = Some(rx);
         ctx.request_repaint();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn web_image_pixel_count(image: &DicomImage) -> Result<usize, String> {
+        image
+            .web_retained_base_pixel_count()
+            .ok_or_else(|| "The DICOM pixel dimensions exceed browser limits.".to_string())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn ensure_web_image_pixel_limit(image: &DicomImage) -> Result<(), String> {
+        let pixels = Self::web_image_pixel_count(image)?;
+        if pixels > WEB_MAX_RETAINED_PIXELS {
+            return Err(format!(
+                "The image exceeds the {WEB_MAX_RETAINED_PIXELS} retained-pixel browser limit."
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn ensure_web_texture_dimensions(
+        image: &DicomImage,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
+        let max_texture_side = ctx.input(|input| input.max_texture_side);
+        if image.width > max_texture_side || image.height > max_texture_side {
+            return Err(format!(
+                "The image dimensions {}x{} exceed this browser's {max_texture_side}px texture limit.",
+                image.width, image.height
+            ));
+        }
+        Ok(())
     }
 }

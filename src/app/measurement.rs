@@ -271,7 +271,7 @@ fn measurement_label_text(measurement: LiveMeasurement, geometry: MeasurementGeo
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 fn measurement_label_layout(start: egui::Pos2, end: egui::Pos2) -> (egui::Vec2, Align2) {
     let delta = end - start;
     let place_right = delta.x >= 0.0;
@@ -355,7 +355,7 @@ fn clamp_rect_to_clip(rect: egui::Rect, clip_rect: egui::Rect) -> egui::Rect {
     rect.translate(egui::vec2(translation_x, translation_y))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

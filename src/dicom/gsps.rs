@@ -44,7 +44,7 @@ impl GspsOverlay {
         self.graphics.is_empty()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub fn from_graphics(graphics: Vec<GspsGraphic>) -> Self {
         Self {
             graphics: graphics
@@ -334,7 +334,7 @@ fn approximate_ellipse(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::dicom::{EXPLICIT_VR_LITTLE_ENDIAN_UID, GSPS_SOP_CLASS_UID};

@@ -34,3 +34,7 @@ Thumbs.db
 # dist generated manifests
 plan-dist-manifest.json
 dist-manifest.json
+
+# Generated browser preview artifacts (created by make web-assets)
+/website/data/demo_assets.json
+/website/static/demo/assets/

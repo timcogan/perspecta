@@ -4,16 +4,20 @@ on:
   push:
     branches:
       - master
-      - main
     paths:
+      - ".cargo/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "build.rs"
+      - "rust-toolchain*"
+      - "src/**"
+      - "scripts/**"
       - "website/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+permissions: {}
 
 concurrency:
   group: pages
@@ -22,13 +26,91 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      PERSPECTA_WEB_SOURCE_COMMIT: ${{ github.sha }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
 
-      - name: Setup Pages
-        id: pages
-        uses: actions/configure-pages@v6
+      - name: Verify master source
+        shell: bash
+        env:
+          PERSPECTA_TRIGGER_REF: ${{ github.ref }}
+          PERSPECTA_TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$PERSPECTA_TRIGGER_REF" != "refs/heads/master" ]]; then
+            echo "Pages may only be deployed from master, got: $PERSPECTA_TRIGGER_REF" >&2
+            exit 1
+          fi
+          actual_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ "$actual_sha" != "$PERSPECTA_TRIGGER_SHA" ]]; then
+            echo "Checked-out commit does not match the Pages trigger." >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+            echo "Pages checkout is unexpectedly dirty." >&2
+            exit 1
+          fi
+
+      - name: Resolve Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain="$(
+            awk -F '"' '/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"/ { print $2; exit }' rust-toolchain.toml
+          )"
+          if [[ -z "$toolchain" ]]; then
+            echo "Could not determine the Rust toolchain from rust-toolchain.toml." >&2
+            exit 1
+          fi
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pages-wasm
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # v1.21.1
+        with:
+          version: "1.21.1"
+
+      - name: Install matching wasm-bindgen CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$({ awk '
+            /^\[\[package\]\]$/ { in_package = 0 }
+            /^name = "wasm-bindgen"$/ { in_package = 1; next }
+            in_package && /^version = / {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.lock; } || true)"
+          if [[ -z "$version" ]]; then
+            echo "Could not determine the wasm-bindgen version from Cargo.lock." >&2
+            exit 1
+          fi
+          cargo binstall wasm-bindgen-cli --version "$version" --locked --no-confirm --disable-strategies compile
+
+      - name: Install WASM optimizer
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binaryen
 
       - name: Setup Hugo
         uses: peaceiris/actions-hugo@v3
@@ -36,9 +118,14 @@ jobs:
           hugo-version: "0.123.8"
           extended: false
 
+      - name: Build web preview assets
+        run: make web-assets
+
       - name: Build site
-        working-directory: website
-        run: hugo --destination public --minify
+        run: make site-build
+
+      - name: Verify Pages artifact
+        run: make verify-web-pages
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
@@ -48,6 +135,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

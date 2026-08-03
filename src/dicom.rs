@@ -2,8 +2,13 @@ use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 use std::{fs, io::Cursor};
 
@@ -24,12 +29,14 @@ mod sr;
 #[allow(unused_imports)]
 pub use gsps::GspsOverlayGraphic;
 pub use gsps::{load_gsps_overlays, GspsGraphic, GspsOverlay, GspsUnits};
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) use parametric_map::ParametricMapPixelCounter;
 pub use parametric_map::{load_parametric_map, load_parametric_map_overlays, ParametricMapOverlay};
 pub use sr::{
     load_mammography_cad_sr_overlays, load_structured_report, SrOverlay, SrOverlayLabel,
     StructuredReportDocument, StructuredReportNode,
 };
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub use sr::{SrOverlayGraphic, SrRenderingIntent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,18 +109,31 @@ pub const GSPS_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.11.1";
 pub const PARAMETRIC_MAP_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.30";
 pub const STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX: &str = "1.2.840.10008.5.1.4.1.1.88.";
 pub const MAMMOGRAPHY_CAD_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.50";
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub const DIGITAL_MAMMOGRAPHY_XRAY_IMAGE_PRESENTATION_SOP_CLASS_UID: &str =
     "1.2.840.10008.5.1.4.1.1.1.2";
 pub const EXPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2.1";
 const IMPLICIT_VR_LITTLE_ENDIAN_UID: &str = "1.2.840.10008.1.2";
 const EXPLICIT_VR_BIG_ENDIAN_UID: &str = "1.2.840.10008.1.2.2";
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub const BASIC_TEXT_SR_SOP_CLASS_UID: &str = "1.2.840.10008.5.1.4.1.1.88.11";
-#[cfg(all(test, feature = "jpeg_ls"))]
+#[cfg(all(test, feature = "jpeg_ls", not(target_arch = "wasm32")))]
 const SECONDARY_CAPTURE_IMAGE_STORAGE_UID: &str = "1.2.840.10008.5.1.4.1.1.7";
 // Treat cumulative_delta from read_per_frame_image_positions as meaningful only above 0.001 mm so float noise does not flip reverse-order detection.
 const IMAGE_POSITION_PATIENT_DOMINANT_DELTA_TOLERANCE_MM: f32 = 0.001;
+#[cfg(any(test, target_arch = "wasm32"))]
+macro_rules! define_web_retained_pixel_limit {
+    ($limit:literal) => {
+        pub(crate) const WEB_MAX_RETAINED_PIXELS: usize = $limit;
+        pub(crate) const WEB_PIXEL_LIMIT_MESSAGE: &str = concat!(
+            "The retained image frames and Parametric Map buffers exceed the ",
+            stringify!($limit),
+            " retained-pixel browser limit."
+        );
+    };
+}
+#[cfg(any(test, target_arch = "wasm32"))]
+define_web_retained_pixel_limit!(192000000);
 
 #[derive(Debug, Clone)]
 pub enum DicomSource {
@@ -122,14 +142,33 @@ pub enum DicomSource {
         id: u64,
         label: Arc<str>,
         identity_key: Arc<str>,
-        bytes: Arc<[u8]>,
+        bytes: DicomMemoryBytes,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum DicomMemoryBytes {
+    Shared(Arc<[u8]>),
+    Owned(Arc<Vec<u8>>),
+}
+
+impl DicomMemoryBytes {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Shared(bytes) => bytes.as_ref(),
+            Self::Owned(bytes) => bytes.as_slice(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
 }
 
 impl DicomSource {
     pub fn from_memory(preferred_name: &str, bytes: Vec<u8>) -> Self {
         let identity_key = infer_memory_source_identity_key(preferred_name, bytes.as_slice());
-        Self::from_memory_with_identity(preferred_name, identity_key, bytes)
+        Self::from_memory_vec_with_identity(preferred_name, identity_key, bytes)
     }
 
     pub fn from_memory_with_identity(
@@ -137,17 +176,60 @@ impl DicomSource {
         identity_key: impl Into<Arc<str>>,
         bytes: Vec<u8>,
     ) -> Self {
+        Self::from_memory_vec_with_identity(preferred_name, identity_key, bytes)
+    }
+
+    pub fn from_memory_vec_with_identity(
+        preferred_name: &str,
+        identity_key: impl Into<Arc<str>>,
+        bytes: Vec<u8>,
+    ) -> Self {
+        Self::from_memory_bytes_with_identity(
+            preferred_name,
+            identity_key,
+            DicomMemoryBytes::Owned(Arc::new(bytes)),
+        )
+    }
+
+    pub fn from_memory_arc(preferred_name: &str, bytes: Arc<[u8]>) -> Self {
+        let identity_key = infer_memory_source_identity_key(preferred_name, bytes.as_ref());
+        Self::from_memory_arc_with_identity(preferred_name, identity_key, bytes)
+    }
+
+    pub fn from_memory_arc_with_identity(
+        preferred_name: &str,
+        identity_key: impl Into<Arc<str>>,
+        bytes: Arc<[u8]>,
+    ) -> Self {
+        Self::from_memory_bytes_with_identity(
+            preferred_name,
+            identity_key,
+            DicomMemoryBytes::Shared(bytes),
+        )
+    }
+
+    fn from_memory_bytes_with_identity(
+        preferred_name: &str,
+        identity_key: impl Into<Arc<str>>,
+        bytes: DicomMemoryBytes,
+    ) -> Self {
         static IN_MEMORY_DICOM_COUNTER: AtomicU64 = AtomicU64::new(1);
 
         let id = IN_MEMORY_DICOM_COUNTER.fetch_add(1, Ordering::Relaxed);
         let label = Arc::<str>::from(sanitize_memory_source_label(preferred_name));
-        let bytes = Arc::<[u8]>::from(bytes.into_boxed_slice());
         let identity_key = identity_key.into();
         Self::Memory {
             id,
             label,
             identity_key,
             bytes,
+        }
+    }
+
+    pub fn byte_len(&self) -> Option<usize> {
+        match self {
+            Self::File(_) => None,
+            Self::Memory { bytes, .. } => Some(bytes.len()),
         }
     }
 
@@ -183,10 +265,10 @@ impl DicomSource {
         }
     }
 
-    fn bytes(&self) -> Option<&Arc<[u8]>> {
+    fn bytes(&self) -> Option<&[u8]> {
         match self {
             Self::File(_) => None,
-            Self::Memory { bytes, .. } => Some(bytes),
+            Self::Memory { bytes, .. } => Some(bytes.as_slice()),
         }
     }
 
@@ -345,8 +427,49 @@ pub enum DicomPathKind {
     Other,
 }
 
-type MonoFrameCache = Arc<Mutex<Vec<Option<Arc<[i32]>>>>>;
-type RgbFrameCache = Arc<Mutex<Vec<Option<Arc<[u8]>>>>>;
+#[cfg(not(target_arch = "wasm32"))]
+type FrameCache<T> = Arc<Mutex<Vec<Option<Arc<[T]>>>>>;
+
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Debug)]
+struct WebCachedFrame<T> {
+    frame_index: usize,
+    frame: Arc<[T]>,
+}
+
+#[cfg(target_arch = "wasm32")]
+type FrameCache<T> = Arc<Mutex<Option<WebCachedFrame<T>>>>;
+type MonoFrameCache = FrameCache<i32>;
+type RgbFrameCache = FrameCache<u8>;
+
+#[cfg(any(test, target_arch = "wasm32"))]
+type WebFrameCache<T> = Arc<Mutex<Option<WebCachedFrame<T>>>>;
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn web_cached_frame<T>(cache: &WebFrameCache<T>, frame_index: usize) -> Option<Arc<[T]>> {
+    let cache = cache.lock().ok()?;
+    cache
+        .as_ref()
+        .filter(|cached| cached.frame_index == frame_index)
+        .map(|cached| Arc::clone(&cached.frame))
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn retain_only_cached_frame<T>(
+    cache: &WebFrameCache<T>,
+    frame_index: usize,
+    frame: &Arc<[T]>,
+) -> bool {
+    let mut cache = match cache.lock() {
+        Ok(cache) => cache,
+        Err(_) => return false,
+    };
+    *cache = Some(WebCachedFrame {
+        frame_index,
+        frame: Arc::clone(frame),
+    });
+    true
+}
 
 #[derive(Debug, Clone)]
 pub struct DicomImage {
@@ -397,6 +520,9 @@ enum RgbFrames {
 struct LazyMonoFrames {
     source: DicomSource,
     cache: MonoFrameCache,
+    #[cfg(target_arch = "wasm32")]
+    object: Arc<DefaultDicomObject>,
+    #[cfg(not(target_arch = "wasm32"))]
     preload_started: Arc<AtomicBool>,
 }
 
@@ -404,6 +530,9 @@ struct LazyMonoFrames {
 struct LazyRgbFrames {
     source: DicomSource,
     cache: RgbFrameCache,
+    #[cfg(target_arch = "wasm32")]
+    object: Arc<DefaultDicomObject>,
+    #[cfg(not(target_arch = "wasm32"))]
     preload_started: Arc<AtomicBool>,
 }
 
@@ -414,6 +543,17 @@ impl DicomImage {
 
     pub fn frame_count(&self) -> usize {
         self.frame_count
+    }
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub(crate) fn web_retained_base_pixel_count(&self) -> Option<usize> {
+        let retained_frames = match (&self.mono_frames, &self.rgb_frames) {
+            (MonoFrames::Eager(frames), _) if !frames.is_empty() => frames.len(),
+            (_, RgbFrames::Eager(frames)) if !frames.is_empty() => frames.len(),
+            (MonoFrames::Lazy(_), _) | (_, RgbFrames::Lazy(_)) => 1,
+            _ => 1,
+        };
+        checked_web_frame_pixel_count(self.width, self.height)?.checked_mul(retained_frames)
     }
 
     pub(crate) fn display_frame_index_to_stored(&self, frame_index: usize) -> Option<usize> {
@@ -520,7 +660,7 @@ impl DicomImage {
         true
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn ensure_full_metadata_loaded(&mut self) {
         if self.full_metadata_loaded || self.full_metadata_loading || !self.full_metadata.is_empty()
         {
@@ -550,17 +690,49 @@ impl DicomImage {
 
 impl LazyMonoFrames {
     fn frame(&self, frame_index: usize) -> Option<Arc<[i32]>> {
-        if let Ok(cache) = self.cache.lock() {
-            if let Some(frame) = cache.get(frame_index).and_then(|slot| slot.clone()) {
-                self.ensure_background_preload();
-                return Some(frame);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Ok(cache) = self.cache.lock() {
+                if let Some(frame) = cache.get(frame_index).and_then(|slot| slot.clone()) {
+                    self.ensure_background_preload();
+                    return Some(frame);
+                }
             }
+
+            self.ensure_background_preload();
+            None
         }
 
-        self.ensure_background_preload();
-        None
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.frame_without_preload(frame_index)
+        }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn frame_without_preload(&self, frame_index: usize) -> Option<Arc<[i32]>> {
+        if let Some(frame) = web_cached_frame(&self.cache, frame_index) {
+            return Some(frame);
+        }
+
+        let frame = match decode_mono_frame_from_object(&self.object, frame_index) {
+            Ok(frame) => frame,
+            Err(err) => {
+                log::warn!(
+                    "Could not decode the requested monochrome DICOM frame from {} in the browser: {err:#}",
+                    self.source
+                );
+                return None;
+            }
+        };
+
+        if !retain_only_cached_frame(&self.cache, frame_index, &frame) {
+            log::warn!("Could not update the browser's monochrome DICOM frame cache");
+        }
+        Some(frame)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn ensure_background_preload(&self) {
         if self.preload_started.swap(true, Ordering::Relaxed) {
             return;
@@ -579,17 +751,49 @@ impl LazyMonoFrames {
 
 impl LazyRgbFrames {
     fn frame(&self, frame_index: usize) -> Option<Arc<[u8]>> {
-        if let Ok(cache) = self.cache.lock() {
-            if let Some(frame) = cache.get(frame_index).and_then(|slot| slot.clone()) {
-                self.ensure_background_preload();
-                return Some(frame);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Ok(cache) = self.cache.lock() {
+                if let Some(frame) = cache.get(frame_index).and_then(|slot| slot.clone()) {
+                    self.ensure_background_preload();
+                    return Some(frame);
+                }
             }
+
+            self.ensure_background_preload();
+            None
         }
 
-        self.ensure_background_preload();
-        None
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.frame_without_preload(frame_index)
+        }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn frame_without_preload(&self, frame_index: usize) -> Option<Arc<[u8]>> {
+        if let Some(frame) = web_cached_frame(&self.cache, frame_index) {
+            return Some(frame);
+        }
+
+        let frame = match decode_rgb_frame_from_object(&self.object, frame_index) {
+            Ok(frame) => frame,
+            Err(err) => {
+                log::warn!(
+                    "Could not decode the requested color DICOM frame from {} in the browser: {err:#}",
+                    self.source
+                );
+                return None;
+            }
+        };
+
+        if !retain_only_cached_frame(&self.cache, frame_index, &frame) {
+            log::warn!("Could not update the browser's color DICOM frame cache");
+        }
+        Some(frame)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn ensure_background_preload(&self) {
         if self.preload_started.swap(true, Ordering::Relaxed) {
             return;
@@ -619,6 +823,7 @@ pub fn is_structured_report_sop_class_uid(uid: &str) -> bool {
         .starts_with(STRUCTURED_REPORT_SOP_CLASS_UID_PREFIX)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn dicom_source_from_bytes_with_identity(
     preferred_name: &str,
     identity_key: impl Into<Arc<str>>,
@@ -704,6 +909,7 @@ fn read_item_multi_int(item: &InMemDicomObject, tag: Tag) -> Option<Vec<i32>> {
         .filter(|values| !values.is_empty())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn prime_reverse_frame_cache<T, F>(
     frame_count: usize,
     reverse_frame_order: bool,
@@ -724,9 +930,128 @@ where
     Ok(cache)
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+fn prime_web_frame_cache<T, F>(
+    frame_count: usize,
+    reverse_frame_order: bool,
+    first_frame_pixels: Arc<[T]>,
+    decode_initial_display_frame: F,
+) -> Result<Option<WebCachedFrame<T>>>
+where
+    F: FnOnce(usize) -> Result<Arc<[T]>>,
+{
+    if frame_count == 0 {
+        bail!("Cannot prime a browser frame cache for an image with no frames");
+    }
+
+    let frame_index = if reverse_frame_order {
+        frame_count - 1
+    } else {
+        0
+    };
+    let frame = if reverse_frame_order {
+        decode_initial_display_frame(frame_index)?
+    } else {
+        first_frame_pixels
+    };
+    Ok(Some(WebCachedFrame { frame_index, frame }))
+}
+
+fn read_frame_count(obj: &DefaultDicomObject) -> Result<usize> {
+    match read_int_first(obj, "NumberOfFrames") {
+        Some(value) if value > 0 => Ok(value as usize),
+        Some(value) => bail!("Invalid NumberOfFrames={} (must be >= 1)", value),
+        None => Ok(1),
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn read_dicom_pixel_dimensions(source: &DicomSource) -> Result<(usize, usize, usize)> {
+    let obj = open_dicom_object(source)?;
+    let width: usize = obj
+        .element_by_name("Columns")
+        .context("Missing Columns tag")?
+        .to_int()
+        .context("Invalid Columns value")?;
+    let height: usize = obj
+        .element_by_name("Rows")
+        .context("Missing Rows tag")?
+        .to_int()
+        .context("Invalid Rows value")?;
+    let frame_count = read_frame_count(&obj)?;
+
+    Ok((width, height, frame_count))
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn read_dicom_frame_pixel_count(source: &DicomSource) -> Result<usize> {
+    let (width, height, _) = read_dicom_pixel_dimensions(source)?;
+
+    checked_web_frame_pixel_count(width, height)
+        .context("DICOM frame dimensions overflow browser limits")
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) fn read_dicom_logical_pixel_count(source: &DicomSource) -> Result<usize> {
+    let (width, height, frame_count) = read_dicom_pixel_dimensions(source)?;
+
+    checked_web_logical_pixel_count(width, height, frame_count)
+        .context("DICOM pixel dimensions overflow browser limits")
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn checked_web_frame_pixel_count(width: usize, height: usize) -> Option<usize> {
+    width.checked_mul(height)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn checked_web_logical_pixel_count(
+    width: usize,
+    height: usize,
+    frame_count: usize,
+) -> Option<usize> {
+    checked_web_frame_pixel_count(width, height)?.checked_mul(frame_count)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn ensure_web_decode_dimensions(
+    width: usize,
+    height: usize,
+    retained_frame_count: usize,
+) -> Result<()> {
+    let max_texture_side = crate::platform::web_max_texture_side()
+        .context("Browser texture limits are not initialized yet")?;
+    validate_web_decode_dimensions(width, height, retained_frame_count, max_texture_side)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn validate_web_decode_dimensions(
+    width: usize,
+    height: usize,
+    retained_frame_count: usize,
+    max_texture_side: usize,
+) -> Result<()> {
+    let decoded_pixels = checked_web_logical_pixel_count(width, height, retained_frame_count)
+        .context("DICOM pixel dimensions overflow browser limits")?;
+    if decoded_pixels > WEB_MAX_RETAINED_PIXELS {
+        bail!(
+            "The image exceeds the {WEB_MAX_RETAINED_PIXELS} retained-pixel browser limit ({width}x{height}x{retained_frame_count})"
+        );
+    }
+
+    if width > max_texture_side || height > max_texture_side {
+        bail!(
+            "The image dimensions {width}x{height} exceed this browser's {max_texture_side}px texture limit"
+        );
+    }
+    Ok(())
+}
+
 pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     let source = source.into();
     let obj = open_dicom_object(&source)?;
+    #[cfg(target_arch = "wasm32")]
+    let obj = Arc::new(obj);
     match classify_dicom_object(&obj) {
         DicomPathKind::StructuredReport => {
             let sop_class =
@@ -763,6 +1088,14 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     let photometric = read_string_or_default(&obj, "PhotometricInterpretation", "MONOCHROME2");
     let invert = photometric.eq_ignore_ascii_case("MONOCHROME1");
 
+    #[cfg(target_arch = "wasm32")]
+    let frame_count = read_frame_count(&obj)?;
+    #[cfg(target_arch = "wasm32")]
+    // Browser multi-frame images keep one decoded frame resident and decode
+    // another only when it is requested. Parametric Maps pass their full frame
+    // count separately because their RGB/RGBA buffers are eager.
+    ensure_web_decode_dimensions(width, height, 1)?;
+
     let decoded = obj
         .decode_pixel_data_frame(0)
         .context("Failed to decode PixelData frame 0")?;
@@ -779,11 +1112,8 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
         );
     }
 
-    let frame_count = match read_int_first(&obj, "NumberOfFrames") {
-        Some(value) if value > 0 => value as usize,
-        Some(value) => bail!("Invalid NumberOfFrames={} (must be >= 1)", value),
-        None => 1,
-    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let frame_count = read_frame_count(&obj)?;
 
     let samples_per_pixel = decoded.samples_per_pixel();
     let recommended_cine_fps = read_float_first(&obj, "FrameTime")
@@ -829,47 +1159,61 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
             let mono_frames = if frame_count == 1 {
                 MonoFrames::Eager(vec![first_frame_pixels])
             } else {
+                let decode_initial_display_frame = |initial_display_frame| {
+                    let decoded_initial_display = obj
+                        .decode_pixel_data_frame(initial_display_frame as u32)
+                        .with_context(|| {
+                            format!(
+                                "Failed to decode PixelData frame {} for initial reverse-order preview",
+                                initial_display_frame
+                            )
+                        })?;
+                    if decoded_initial_display.samples_per_pixel() != 1 {
+                        bail!(
+                            "Initial reverse-order preview expected monochrome pixels, got SamplesPerPixel={}",
+                            decoded_initial_display.samples_per_pixel()
+                        );
+                    }
+                    let initial_display_pixels: Vec<i32> = decoded_initial_display
+                        .to_vec_frame(0)
+                        .with_context(|| {
+                            format!(
+                                "Could not convert decoded frame {} to i32 samples for initial reverse-order preview",
+                                initial_display_frame
+                            )
+                        })?;
+                    if initial_display_pixels.len() != width * height {
+                        bail!(
+                            "Decoded pixel count mismatch in frame {}: got {}, expected {}",
+                            initial_display_frame,
+                            initial_display_pixels.len(),
+                            width * height
+                        );
+                    }
+                    Ok(Arc::<[i32]>::from(
+                        initial_display_pixels.into_boxed_slice(),
+                    ))
+                };
+                #[cfg(not(target_arch = "wasm32"))]
                 let cache = prime_reverse_frame_cache(
                     frame_count,
                     reverse_frame_order,
                     Arc::clone(&first_frame_pixels),
-                    |initial_display_frame| {
-                        let decoded_initial_display =
-                            obj.decode_pixel_data_frame(initial_display_frame as u32)
-                                .with_context(|| {
-                                    format!(
-                                        "Failed to decode PixelData frame {} for initial reverse-order preview",
-                                        initial_display_frame
-                                    )
-                                })?;
-                        if decoded_initial_display.samples_per_pixel() != 1 {
-                            bail!(
-                                "Initial reverse-order preview expected monochrome pixels, got SamplesPerPixel={}",
-                                decoded_initial_display.samples_per_pixel()
-                            );
-                        }
-                        let initial_display_pixels: Vec<i32> = decoded_initial_display
-                            .to_vec_frame(0)
-                            .with_context(|| {
-                                format!(
-                                    "Could not convert decoded frame {} to i32 samples for initial reverse-order preview",
-                                    initial_display_frame
-                                )
-                            })?;
-                        if initial_display_pixels.len() != width * height {
-                            bail!(
-                                "Decoded pixel count mismatch in frame {}: got {}, expected {}",
-                                initial_display_frame,
-                                initial_display_pixels.len(),
-                                width * height
-                            );
-                        }
-                        Ok(Arc::<[i32]>::from(initial_display_pixels.into_boxed_slice()))
-                    },
+                    decode_initial_display_frame,
+                )?;
+                #[cfg(target_arch = "wasm32")]
+                let cache = prime_web_frame_cache(
+                    frame_count,
+                    reverse_frame_order,
+                    Arc::clone(&first_frame_pixels),
+                    decode_initial_display_frame,
                 )?;
                 MonoFrames::Lazy(LazyMonoFrames {
                     source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
+                    #[cfg(target_arch = "wasm32")]
+                    object: Arc::clone(&obj),
+                    #[cfg(not(target_arch = "wasm32"))]
                     preload_started: Arc::new(AtomicBool::new(false)),
                 })
             };
@@ -943,56 +1287,70 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
             let rgb_frames = if frame_count == 1 {
                 RgbFrames::Eager(vec![first_frame_pixels])
             } else {
+                let decode_initial_display_frame = |initial_display_frame| {
+                    let decoded_initial_display = obj
+                        .decode_pixel_data_frame(initial_display_frame as u32)
+                        .with_context(|| {
+                            format!(
+                                "Failed to decode PixelData frame {} for initial reverse-order preview",
+                                initial_display_frame
+                            )
+                        })?;
+                    let initial_display_pixels: Vec<u8> = if bits_allocated == 8 {
+                        decoded_initial_display.to_vec_frame(0).with_context(|| {
+                            format!(
+                                "Could not convert decoded frame {} to u8 samples for initial reverse-order preview",
+                                initial_display_frame
+                            )
+                        })?
+                    } else {
+                        let bits_shift = decoded_initial_display.bits_stored().saturating_sub(8);
+                        let frame_pixels_u16: Vec<u16> = decoded_initial_display
+                            .to_vec_frame(0)
+                            .with_context(|| {
+                                format!(
+                                    "Could not convert decoded frame {} to u16 samples for initial reverse-order preview",
+                                    initial_display_frame
+                                )
+                            })?;
+                        frame_pixels_u16
+                            .into_iter()
+                            .map(|sample| (sample >> bits_shift) as u8)
+                            .collect()
+                    };
+
+                    if initial_display_pixels.len() != expected_len {
+                        bail!(
+                            "Decoded color pixel count mismatch in frame {}: got {}, expected {}",
+                            initial_display_frame,
+                            initial_display_pixels.len(),
+                            expected_len
+                        );
+                    }
+                    Ok(Arc::<[u8]>::from(
+                        initial_display_pixels.into_boxed_slice(),
+                    ))
+                };
+                #[cfg(not(target_arch = "wasm32"))]
                 let cache = prime_reverse_frame_cache(
                     frame_count,
                     reverse_frame_order,
                     Arc::clone(&first_frame_pixels),
-                    |initial_display_frame| {
-                        let decoded_initial_display =
-                            obj.decode_pixel_data_frame(initial_display_frame as u32)
-                                .with_context(|| {
-                                    format!(
-                                        "Failed to decode PixelData frame {} for initial reverse-order preview",
-                                        initial_display_frame
-                                    )
-                                })?;
-                        let initial_display_pixels: Vec<u8> = if bits_allocated == 8 {
-                            decoded_initial_display.to_vec_frame(0).with_context(|| {
-                                format!(
-                                    "Could not convert decoded frame {} to u8 samples for initial reverse-order preview",
-                                    initial_display_frame
-                                )
-                            })?
-                        } else {
-                            let bits_shift =
-                                decoded_initial_display.bits_stored().saturating_sub(8);
-                            let frame_pixels_u16: Vec<u16> =
-                                decoded_initial_display.to_vec_frame(0).with_context(|| {
-                                    format!(
-                                        "Could not convert decoded frame {} to u16 samples for initial reverse-order preview",
-                                        initial_display_frame
-                                    )
-                                })?;
-                            frame_pixels_u16
-                                .into_iter()
-                                .map(|sample| (sample >> bits_shift) as u8)
-                                .collect()
-                        };
-
-                        if initial_display_pixels.len() != expected_len {
-                            bail!(
-                                "Decoded color pixel count mismatch in frame {}: got {}, expected {}",
-                                initial_display_frame,
-                                initial_display_pixels.len(),
-                                expected_len
-                            );
-                        }
-                        Ok(Arc::<[u8]>::from(initial_display_pixels.into_boxed_slice()))
-                    },
+                    decode_initial_display_frame,
+                )?;
+                #[cfg(target_arch = "wasm32")]
+                let cache = prime_web_frame_cache(
+                    frame_count,
+                    reverse_frame_order,
+                    Arc::clone(&first_frame_pixels),
+                    decode_initial_display_frame,
                 )?;
                 RgbFrames::Lazy(LazyRgbFrames {
                     source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
+                    #[cfg(target_arch = "wasm32")]
+                    object: Arc::clone(&obj),
+                    #[cfg(not(target_arch = "wasm32"))]
                     preload_started: Arc::new(AtomicBool::new(false)),
                 })
             };
@@ -1034,6 +1392,93 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     }
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+fn validate_decoded_frame_buffer_len(
+    actual_len: usize,
+    columns: usize,
+    rows: usize,
+    samples_per_pixel: usize,
+    frame_kind: &str,
+) -> Result<()> {
+    let expected_len = columns
+        .checked_mul(rows)
+        .and_then(|pixels| pixels.checked_mul(samples_per_pixel))
+        .with_context(|| format!("Overflow while calculating decoded {frame_kind} frame size"))?;
+    if actual_len != expected_len {
+        bail!(
+            "Decoded {frame_kind} frame buffer length mismatch: got {actual_len}, expected {expected_len} ({columns}x{rows}x{samples_per_pixel})"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_mono_frame_from_object(
+    obj: &DefaultDicomObject,
+    frame_index: usize,
+) -> Result<Arc<[i32]>> {
+    let frame_number = u32::try_from(frame_index).context("DICOM frame index exceeds u32")?;
+    let decoded = obj
+        .decode_pixel_data_frame(frame_number)
+        .context("Failed to decode the requested monochrome PixelData frame")?;
+    if decoded.samples_per_pixel() != 1 {
+        bail!(
+            "Requested monochrome frame has SamplesPerPixel={}",
+            decoded.samples_per_pixel()
+        );
+    }
+    let frame_pixels: Vec<i32> = decoded
+        .to_vec_frame(0)
+        .context("Could not convert the requested monochrome frame to i32 samples")?;
+    validate_decoded_frame_buffer_len(
+        frame_pixels.len(),
+        decoded.columns() as usize,
+        decoded.rows() as usize,
+        1,
+        "monochrome",
+    )?;
+    Ok(Arc::<[i32]>::from(frame_pixels.into_boxed_slice()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_rgb_frame_from_object(obj: &DefaultDicomObject, frame_index: usize) -> Result<Arc<[u8]>> {
+    let frame_number = u32::try_from(frame_index).context("DICOM frame index exceeds u32")?;
+    let decoded = obj
+        .decode_pixel_data_frame(frame_number)
+        .context("Failed to decode the requested color PixelData frame")?;
+    let bits_allocated = decoded.bits_allocated();
+    if bits_allocated != 8 && bits_allocated != 16 {
+        bail!(
+            "BitsAllocated={} is not supported for color images (only 8/16)",
+            bits_allocated
+        );
+    }
+
+    let frame_pixels = if bits_allocated == 8 {
+        decoded
+            .to_vec_frame(0)
+            .context("Could not convert the requested color frame to u8 samples")?
+    } else {
+        let bits_shift = decoded.bits_stored().saturating_sub(8);
+        let frame_pixels_u16: Vec<u16> = decoded
+            .to_vec_frame(0)
+            .context("Could not convert the requested color frame to u16 samples")?;
+        frame_pixels_u16
+            .into_iter()
+            .map(|sample| (sample >> bits_shift) as u8)
+            .collect()
+    };
+    validate_decoded_frame_buffer_len(
+        frame_pixels.len(),
+        decoded.columns() as usize,
+        decoded.rows() as usize,
+        decoded.samples_per_pixel() as usize,
+        "color",
+    )?;
+    Ok(Arc::<[u8]>::from(frame_pixels.into_boxed_slice()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn preload_mono_frames_from_source(source: &DicomSource, cache: &MonoFrameCache) -> Result<()> {
     let frame_count = match cache.lock() {
         Ok(guard) => guard.len(),
@@ -1122,6 +1567,7 @@ fn preload_mono_frames_from_source(source: &DicomSource, cache: &MonoFrameCache)
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn preload_rgb_frames_from_source(source: &DicomSource, cache: &RgbFrameCache) -> Result<()> {
     let frame_count = match cache.lock() {
         Ok(guard) => guard.len(),
@@ -1230,7 +1676,7 @@ fn preload_rgb_frames_from_source(source: &DicomSource, cache: &RgbFrameCache) -
 fn open_dicom_object(source: impl Into<DicomSource>) -> Result<DefaultDicomObject> {
     let source = source.into();
     if let Some(bytes) = source.bytes() {
-        return open_dicom_object_from_bytes(bytes.as_ref(), &source.to_string());
+        return open_dicom_object_from_bytes(bytes, &source.to_string());
     }
 
     let path = source
@@ -1416,6 +1862,7 @@ fn fallback_memory_identity_key(preferred_name: &str, bytes: &[u8]) -> String {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn preload_worker_count(frame_count: usize) -> usize {
     let auto_workers = thread::available_parallelism()
         .map(|n| n.get())
@@ -1426,6 +1873,7 @@ fn preload_worker_count(frame_count: usize) -> usize {
     configured.clamp(1, 32).min(frame_count.max(1))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn configured_preload_workers() -> Option<usize> {
     static CONFIG: OnceLock<Option<usize>> = OnceLock::new();
 
@@ -2275,7 +2723,7 @@ fn min_max(values: &[i32]) -> Option<(i32, i32)> {
     Some((min_v, max_v))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 impl DicomImage {
     pub(crate) fn test_stub(gsps_overlay: Option<GspsOverlay>) -> Self {
         Self::test_stub_with_mono_frames(gsps_overlay, 0)
@@ -2352,6 +2800,7 @@ impl DicomImage {
             mono_frames: MonoFrames::Lazy(LazyMonoFrames {
                 source: DicomSource::from(PathBuf::from("lazy-cache-test.dcm")),
                 cache: Arc::new(Mutex::new(cache)),
+                #[cfg(not(target_arch = "wasm32"))]
                 preload_started: Arc::new(AtomicBool::new(true)),
             }),
             rgb_frames: RgbFrames::None,
@@ -2382,7 +2831,7 @@ impl DicomImage {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use dicom_core::value::DataSetSequence;
@@ -3082,6 +3531,164 @@ mod tests {
         assert!(!image.finish_full_metadata_load(&stale_source, Arc::default()));
         assert!(image.full_metadata_source.is_some());
         assert!(image.full_metadata_loading);
+    }
+
+    #[test]
+    fn dicom_source_from_memory_arc_reuses_bytes_and_reports_length() {
+        let bytes: Arc<[u8]> = Arc::from([1_u8, 2, 3, 4]);
+        let source = DicomSource::from_memory_arc_with_identity(
+            "synthetic-memory.dcm",
+            "synthetic-memory-id",
+            Arc::clone(&bytes),
+        );
+
+        assert_eq!(source.byte_len(), Some(4));
+        match &source {
+            DicomSource::Memory { bytes: stored, .. } => {
+                let DicomMemoryBytes::Shared(stored) = stored else {
+                    panic!("expected shared in-memory bytes");
+                };
+                assert!(Arc::ptr_eq(&bytes, stored));
+            }
+            DicomSource::File(_) => panic!("expected an in-memory DICOM source"),
+        }
+    }
+
+    #[test]
+    fn dicom_source_from_memory_vec_reuses_the_vector_allocation() {
+        let bytes = vec![1_u8, 2, 3, 4];
+        let allocation = bytes.as_ptr();
+        let source = DicomSource::from_memory_with_identity(
+            "synthetic-memory.dcm",
+            "synthetic-memory-id",
+            bytes,
+        );
+
+        assert_eq!(source.byte_len(), Some(4));
+        match &source {
+            DicomSource::Memory { bytes: stored, .. } => {
+                let DicomMemoryBytes::Owned(stored) = stored else {
+                    panic!("expected owned in-memory bytes");
+                };
+                assert_eq!(allocation, stored.as_ptr());
+            }
+            DicomSource::File(_) => panic!("expected an in-memory DICOM source"),
+        }
+    }
+
+    #[test]
+    fn file_dicom_source_has_no_known_in_memory_byte_length() {
+        let source = DicomSource::from(PathBuf::from("synthetic-file.dcm"));
+
+        assert_eq!(source.byte_len(), None);
+    }
+
+    #[test]
+    fn bounded_frame_cache_retains_only_requested_frame() {
+        let original = Arc::<[i32]>::from([10_i32]);
+        let cache: WebFrameCache<i32> = Arc::new(Mutex::new(Some(WebCachedFrame {
+            frame_index: 0,
+            frame: Arc::clone(&original),
+        })));
+        let requested = Arc::<[i32]>::from([30_i32]);
+
+        assert!(retain_only_cached_frame(&cache, 2, &requested));
+        assert!(web_cached_frame(&cache, 0).is_none());
+        assert!(web_cached_frame(&cache, 2)
+            .as_ref()
+            .is_some_and(|stored| Arc::ptr_eq(stored, &requested)));
+    }
+
+    #[test]
+    fn browser_frame_cache_primes_only_the_initial_display_frame() {
+        let first = Arc::<[i32]>::from([10_i32]);
+        let last = Arc::<[i32]>::from([20_i32]);
+        let cache = prime_web_frame_cache(4, true, first, |_| Ok(Arc::clone(&last)))
+            .expect("synthetic browser cache should be primed");
+        let cache: WebFrameCache<i32> = Arc::new(Mutex::new(cache));
+
+        assert!(web_cached_frame(&cache, 0).is_none());
+        assert!(web_cached_frame(&cache, 3)
+            .as_ref()
+            .is_some_and(|stored| Arc::ptr_eq(stored, &last)));
+    }
+
+    #[test]
+    fn decoded_frame_buffer_length_matches_decoded_dimensions() {
+        assert!(validate_decoded_frame_buffer_len(6, 3, 2, 1, "monochrome").is_ok());
+        assert!(validate_decoded_frame_buffer_len(18, 3, 2, 3, "color").is_ok());
+    }
+
+    #[test]
+    fn decoded_frame_buffer_length_rejects_malformed_frames() {
+        let mono_error = validate_decoded_frame_buffer_len(5, 3, 2, 1, "monochrome")
+            .expect_err("a short monochrome frame must be rejected");
+        assert!(mono_error.to_string().contains("got 5, expected 6 (3x2x1)"));
+
+        let color_error = validate_decoded_frame_buffer_len(17, 3, 2, 3, "color")
+            .expect_err("a short color frame must be rejected");
+        assert!(color_error
+            .to_string()
+            .contains("got 17, expected 18 (3x2x3)"));
+    }
+
+    #[test]
+    fn decoded_frame_buffer_length_rejects_overflow() {
+        let error = validate_decoded_frame_buffer_len(0, usize::MAX, 2, 1, "monochrome")
+            .expect_err("overflowing decoded dimensions must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("Overflow while calculating decoded monochrome frame size"));
+    }
+
+    #[test]
+    fn browser_logical_pixel_inspection_reads_dimensions_without_decoding() {
+        let object =
+            basic_image_test_object(vec![DataElement::new(Tag(0x0028, 0x0008), VR::IS, "3")]);
+        let source = DicomSource::from_memory("logical-pixels.dcm", object_bytes(&object));
+
+        assert_eq!(
+            read_dicom_logical_pixel_count(&source)
+                .expect("synthetic dimensions should be readable"),
+            3
+        );
+        assert_eq!(
+            read_dicom_frame_pixel_count(&source)
+                .expect("synthetic frame dimensions should be readable"),
+            1
+        );
+    }
+
+    #[test]
+    fn browser_retained_base_pixels_count_one_lazy_frame_but_all_eager_frames() {
+        let eager = DicomImage::test_stub_with_mono_frames(None, 4);
+        let lazy = DicomImage::test_stub_with_lazy_mono_cache(&[(3, 30)]);
+
+        assert_eq!(eager.web_retained_base_pixel_count(), Some(4));
+        assert_eq!(lazy.web_retained_base_pixel_count(), Some(1));
+    }
+
+    #[test]
+    fn browser_decode_limits_reject_pixels_and_texture_dimensions() {
+        assert_eq!(checked_web_frame_pixel_count(1_920, 1_000), Some(1_920_000));
+        assert_eq!(
+            checked_web_logical_pixel_count(1_920, 1_000, 100),
+            Some(WEB_MAX_RETAINED_PIXELS)
+        );
+        assert!(checked_web_frame_pixel_count(usize::MAX, 2).is_none());
+        assert!(checked_web_logical_pixel_count(usize::MAX, 2, 1).is_none());
+        assert!(validate_web_decode_dimensions(1_920, 1_000, 100, 4_096).is_ok());
+
+        let pixel_error = validate_web_decode_dimensions(1_920, 1_000, 101, 4_096)
+            .expect_err("pixels above the browser budget should be rejected");
+        assert!(pixel_error
+            .to_string()
+            .contains("retained-pixel browser limit"));
+
+        let texture_error = validate_web_decode_dimensions(4_097, 1, 1, 4_096)
+            .expect_err("oversized browser textures should be rejected");
+        assert!(texture_error.to_string().contains("texture limit"));
     }
 
     #[test]

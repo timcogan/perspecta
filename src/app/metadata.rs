@@ -134,7 +134,11 @@ impl DicomViewerApp {
             return;
         };
 
-        thread::spawn(move || {
+        #[cfg(target_arch = "wasm32")]
+        let web_load_guard = self.begin_web_load_in_flight(ctx);
+        crate::platform::spawn(move || {
+            #[cfg(target_arch = "wasm32")]
+            let _web_load_guard = web_load_guard;
             let result = match load_full_metadata_from_source(&source) {
                 Ok(metadata) => FullMetadataLoadResult::Loaded { source, metadata },
                 Err(_) => FullMetadataLoadResult::Failed { source },
@@ -407,7 +411,7 @@ impl DicomViewerApp {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::dicom::StructuredReportDocument;

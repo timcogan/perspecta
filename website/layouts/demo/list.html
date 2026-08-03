@@ -1,0 +1,125 @@
+{{- $demoModule := "" -}}
+{{- $sourceCommit := "" -}}
+{{- $sourceDirty := false -}}
+{{- with .Site.Data.demo_assets -}}
+  {{- with .js }}{{ $demoModule = . }}{{ end -}}
+  {{- with index . "source_commit" }}{{ $sourceCommit = . }}{{ end -}}
+  {{- with index . "source_dirty" }}{{ $sourceDirty = . }}{{ end -}}
+{{- end -}}
+{{- $shortSourceCommit := $sourceCommit -}}
+{{- if ge (len $sourceCommit) 7 -}}
+  {{- $shortSourceCommit = substr $sourceCommit 0 7 -}}
+{{- end -}}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>{{ .Title }} · {{ .Site.Title }}</title>
+    <meta name="description" content="{{ .Params.description }}">
+    <meta name="robots" content="index,follow">
+    <meta name="referrer" content="no-referrer">
+    {{/* The style hash permits only rfd 0.17.2's embedded WASM file-picker CSS. */}}
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'sha256-9tSqG2Th9gNn6sbn1ZYMSqakJLznxnsamRDeigez2Mo='; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; worker-src 'none'">
+    <link rel="canonical" href="{{ .Permalink }}">
+    <link rel="icon" href="{{ "/brand/perspecta.svg" | relURL }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ "/css/styles.css" | relURL }}">
+
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="{{ .Site.Title }}">
+    <meta property="og:title" content="{{ .Title }}">
+    <meta property="og:description" content="{{ .Params.description }}">
+    <meta property="og:url" content="{{ .Permalink }}">
+    <meta property="og:image" content="{{ "/brand/perspecta.svg" | absURL }}">
+    <meta property="og:image:alt" content="Perspecta DICOM Viewer logo">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="{{ .Title }}">
+    <meta name="twitter:description" content="{{ .Params.description }}">
+
+  </head>
+  <body class="demo-page">
+    <main class="demo-shell">
+      <h1 class="demo-heading">Try Perspecta DICOM Viewer in your browser</h1>
+      <section class="demo-viewer" aria-label="Perspecta browser DICOM viewer">
+        <canvas id="perspecta-canvas" class="demo-canvas" role="application" aria-label="Perspecta DICOM viewer. Drop local DICOM files here or open the hamburger menu and choose Open DICOM(s).">
+          Your browser does not support the canvas required by Perspecta.
+        </canvas>
+
+        <section id="demo-status" class="demo-status" data-state="{{ if $demoModule }}loading{{ else }}error{{ end }}" aria-live="polite" aria-atomic="true">
+          <div class="demo-loading-mark">
+            <img src="{{ "/brand/perspecta.svg" | relURL }}" alt="" width="64" height="64">
+            {{ if $demoModule }}
+            <div class="demo-spinner" aria-hidden="true"></div>
+            {{ end }}
+          </div>
+          {{ if $demoModule }}
+          <h2>Starting Perspecta</h2>
+          <p class="demo-status-message">Loading the private, local-only DICOM viewer…</p>
+          {{ else }}
+          <h2>Browser preview not built</h2>
+          <p class="demo-status-message">This local site build does not include the WebAssembly viewer. Build the demo assets, then rebuild the Hugo site.</p>
+          {{ end }}
+          <p class="demo-status-note">Technical preview · Not for diagnostic use</p>
+        </section>
+
+        <section id="demo-notice" class="demo-notice" role="status" aria-live="polite" aria-atomic="true" hidden>
+          <div>
+            <h2>DICOM files were not opened</h2>
+            <p class="demo-notice-message"></p>
+          </div>
+          <button class="demo-notice-dismiss" type="button">Dismiss</button>
+        </section>
+
+        <noscript>
+          <section class="demo-noscript">
+            <h2>JavaScript is required</h2>
+            <p>Perspecta runs locally in your browser with WebAssembly. Enable JavaScript to use the viewer, or install the <a href="{{ .Site.Params.releases }}">desktop release</a>.</p>
+          </section>
+        </noscript>
+      </section>
+
+      <footer class="demo-toolbar">
+        <a class="demo-brand" href="{{ "/" | relURL }}" aria-label="Perspecta home">
+          <img src="{{ "/brand/perspecta-wordmark.svg" | relURL }}" alt="Perspecta DICOM Viewer">
+        </a>
+        <p
+          class="demo-safety"
+          data-preview-sha="{{ $sourceCommit }}"
+          data-preview-dirty="{{ $sourceDirty }}">
+          <strong>Web preview</strong>
+          {{ if $sourceCommit }}
+          <span aria-hidden="true"> · </span><span><a
+            class="demo-build-commit"
+            href="{{ printf "%s/commit/%s" .Site.Params.github $sourceCommit }}"
+            target="_blank"
+            rel="noreferrer"
+            title="Full source commit {{ $sourceCommit }}"
+            aria-label="Source commit {{ $sourceCommit }}"><code>{{ $shortSourceCommit }}</code></a>{{ if $sourceDirty }}+dirty{{ end }}</span>
+          {{ else }}
+          <span aria-hidden="true"> · </span><span>build metadata unavailable</span>
+          {{ end }}
+          <span aria-hidden="true"> · </span>Not for diagnostic use
+        </p>
+        <details class="demo-details">
+          <summary>About &amp; privacy</summary>
+          <div class="demo-details-panel">
+            <div class="demo-details-scroll">
+              {{ .Content }}
+              <p><a href="{{ "/privacy/" | relURL }}">Full privacy policy</a> · <a href="{{ "/docs/" | relURL }}">Documentation</a> · <a href="{{ .Site.Params.releases }}">Desktop releases</a></p>
+            </div>
+          </div>
+        </details>
+      </footer>
+    </main>
+
+    {{ if $demoModule }}
+    <script
+      type="module"
+      src="{{ "/js/demo-loader.js" | relURL }}"
+      data-perspecta-loader
+      data-module-url="{{ $demoModule | relURL }}"
+      data-manifest-url="{{ "/demo/assets/manifest.json" | relURL }}"
+      data-canvas-id="perspecta-canvas"></script>
+    {{ end }}
+  </body>
+</html>

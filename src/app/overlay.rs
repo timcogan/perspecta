@@ -7,6 +7,103 @@ pub(super) struct OverlayNavigationTarget {
 }
 
 impl DicomViewerApp {
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub(super) fn ensure_web_retained_pm_pixel_limit(
+        &self,
+        pending_pm_overlays: &HashMap<String, ParametricMapOverlay>,
+    ) -> Result<(), String> {
+        let mut counter = WebRetainedPixelCounter::default();
+        counter
+            .add_pm_overlays(pending_pm_overlays)
+            .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+
+        for entry in &self.history_entries {
+            web_history_entry_pixel_count(entry, &mut counter)
+                .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        }
+
+        let current_is_cached = self.current_history_id().is_some_and(|current_id| {
+            self.history_entries
+                .iter()
+                .any(|entry| entry.id == current_id)
+        });
+        if let Some(image) = self.image.as_ref() {
+            if current_is_cached {
+                if let Some(overlay) = image.pm_overlay.as_ref() {
+                    counter
+                        .add_pm_overlay(overlay)
+                        .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+                }
+            } else {
+                counter
+                    .add_image(image)
+                    .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+            }
+        }
+        for viewport in self.loaded_mammo_viewports() {
+            if current_is_cached {
+                if let Some(overlay) = viewport.image.pm_overlay.as_ref() {
+                    counter
+                        .add_pm_overlay(overlay)
+                        .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+                }
+            } else {
+                counter
+                    .add_image(&viewport.image)
+                    .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+            }
+        }
+
+        counter.ensure_limit().map(|_| ())
+    }
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub(super) fn ensure_web_replacement_pixel_limit(
+        &self,
+        path: &DicomSource,
+        image: &DicomImage,
+    ) -> Result<(), String> {
+        let mut counter = WebRetainedPixelCounter::default();
+        counter
+            .add_pm_overlays(&self.pending_pm_overlays)
+            .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        let candidate_id = super::history::history_id_from_paths(&[DicomSourceMeta::from(path)]);
+        for entry in &self.history_entries {
+            if entry.id != candidate_id {
+                web_history_entry_pixel_count(entry, &mut counter)
+                    .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+            }
+        }
+        counter
+            .add_image(image)
+            .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        counter.ensure_limit().map(|_| ())
+    }
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub(super) fn ensure_web_group_candidate_pixel_limit(
+        &self,
+        image: &DicomImage,
+    ) -> Result<(), String> {
+        let mut counter = WebRetainedPixelCounter::default();
+        counter
+            .add_pm_overlays(&self.pending_pm_overlays)
+            .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        for entry in &self.history_entries {
+            web_history_entry_pixel_count(entry, &mut counter)
+                .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        }
+        for viewport in self.loaded_mammo_viewports() {
+            counter
+                .add_image(&viewport.image)
+                .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        }
+        counter
+            .add_image(image)
+            .ok_or_else(|| WEB_PIXEL_LIMIT_MESSAGE.to_string())?;
+        counter.ensure_limit().map(|_| ())
+    }
+
     pub(super) fn merge_gsps_overlays(
         destination: &mut HashMap<String, GspsOverlay>,
         source: &HashMap<String, GspsOverlay>,
@@ -252,12 +349,13 @@ impl DicomViewerApp {
             return;
         }
 
+        let mut prospective = self.pending_pm_overlays.clone();
         let mut merged_any = false;
         for (sop_uid, mut overlay) in overlays {
             if self.authoritative_pm_overlay_keys.contains(&sop_uid) || overlay.is_empty() {
                 continue;
             }
-            self.pending_pm_overlays
+            prospective
                 .entry(sop_uid)
                 .or_default()
                 .layers
@@ -268,6 +366,13 @@ impl DicomViewerApp {
             return;
         }
 
+        #[cfg(any(test, target_arch = "wasm32"))]
+        if let Err(message) = self.ensure_web_retained_pm_pixel_limit(&prospective) {
+            self.set_load_error(message);
+            return;
+        }
+
+        self.pending_pm_overlays = prospective;
         self.attach_pending_overlays_to_current_study();
         self.sync_current_state_to_history();
     }
@@ -513,6 +618,11 @@ impl DicomViewerApp {
             .into_iter()
             .filter(|(_, overlay)| !overlay.is_empty())
             .collect::<HashMap<_, _>>();
+        #[cfg(any(test, target_arch = "wasm32"))]
+        if let Err(message) = self.ensure_web_retained_pm_pixel_limit(&overlays) {
+            self.set_load_error(message);
+            return;
+        }
         let removed_sop_uids = self
             .pending_pm_overlays
             .keys()
@@ -781,7 +891,7 @@ impl DicomViewerApp {
 
         let overlay_was_hidden = !self.overlay_visible;
         self.overlay_visible = true;
-        self.last_cine_advance = Some(Instant::now());
+        self.last_cine_advance = Some(MonotonicInstant::now());
 
         if self.image.is_some() {
             self.current_frame = target.frame_index;
