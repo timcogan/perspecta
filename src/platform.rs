@@ -151,13 +151,7 @@ fn schedule_once_via_microtask(callback: &wasm_bindgen::JsValue) {
 
 #[cfg(target_arch = "wasm32")]
 fn schedule_once_or_invoke(callback: &wasm_bindgen::JsValue) {
-    use wasm_bindgen::JsCast as _;
-
-    if schedule_once(callback) {
-        return;
-    }
-
-    if let Some(callback) = callback.dyn_ref::<js_sys::Function>() {
-        let _ = callback.call0(&wasm_bindgen::JsValue::UNDEFINED);
+    if !schedule_once(callback) {
+        schedule_once_via_microtask(callback);
     }
 }
