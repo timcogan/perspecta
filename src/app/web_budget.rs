@@ -124,10 +124,9 @@ impl DicomViewerApp {
             counter,
         );
         if current_index.is_some_and(|index| !retained.get(index).copied().unwrap_or(false)) {
-            return Err(
-                "The active study and this selection exceed the 192000000 retained-pixel browser limit. Close the active study and try again."
-                    .to_string(),
-            );
+            return Err(format!(
+                "The active study and this selection exceed the {WEB_MAX_RETAINED_PIXELS} retained-pixel browser limit. Close the active study and try again."
+            ));
         }
 
         let mut index = 0usize;

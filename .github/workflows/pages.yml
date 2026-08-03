@@ -34,6 +34,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          persist-credentials: false
           ref: ${{ github.sha }}
 
       - name: Verify master source
@@ -82,6 +83,11 @@ jobs:
         with:
           shared-key: pages-wasm
 
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # v1.21.1
+        with:
+          version: "1.21.1"
+
       - name: Install matching wasm-bindgen CLI
         shell: bash
         run: |
@@ -99,7 +105,7 @@ jobs:
             echo "Could not determine the wasm-bindgen version from Cargo.lock." >&2
             exit 1
           fi
-          cargo install wasm-bindgen-cli --version "$version" --locked
+          cargo binstall wasm-bindgen-cli --version "$version" --locked --no-confirm --disable-strategies compile
 
       - name: Install WASM optimizer
         run: |

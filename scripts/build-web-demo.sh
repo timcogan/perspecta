@@ -99,12 +99,18 @@ case "$cargo_home_path" in
 esac
 readonly user_home_path
 readonly cargo_home_path
-readonly REMAP_FLAGS="--remap-path-prefix=$user_home_path=/build-user --remap-path-prefix=$cargo_home_path=/cargo-home --remap-path-prefix=$REPO_ROOT=."
-if [[ -n "${RUSTFLAGS:-}" ]]; then
-    export RUSTFLAGS="$RUSTFLAGS $REMAP_FLAGS"
-else
-    export RUSTFLAGS="$REMAP_FLAGS"
-fi
+readonly RUSTFLAG_SEPARATOR=$'\x1f'
+readonly REMAP_USER_FLAG="--remap-path-prefix=$user_home_path=/build-user"
+readonly REMAP_CARGO_FLAG="--remap-path-prefix=$cargo_home_path=/cargo-home"
+readonly REMAP_REPO_FLAG="--remap-path-prefix=$REPO_ROOT=."
+encoded_rustflags="${CARGO_ENCODED_RUSTFLAGS:-}"
+for remap_flag in "$REMAP_USER_FLAG" "$REMAP_CARGO_FLAG" "$REMAP_REPO_FLAG"; do
+    if [[ -n "$encoded_rustflags" ]]; then
+        encoded_rustflags+="$RUSTFLAG_SEPARATOR"
+    fi
+    encoded_rustflags+="$remap_flag"
+done
+export CARGO_ENCODED_RUSTFLAGS="$encoded_rustflags"
 export CARGO_PROFILE_RELEASE_LTO=true
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 # The native default enables openjp2. That crate links a standalone WASM module

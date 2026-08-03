@@ -31,6 +31,7 @@ use crate::dicom::{
 #[cfg(any(test, target_arch = "wasm32"))]
 use crate::dicom::{
     read_dicom_frame_pixel_count, read_dicom_logical_pixel_count, WEB_MAX_RETAINED_PIXELS,
+    WEB_PIXEL_LIMIT_MESSAGE,
 };
 use crate::dicomweb::{
     download_dicomweb_group_request, download_dicomweb_request, DicomWebDownloadResult,
@@ -86,9 +87,6 @@ const PICKER_NO_DICOM_CANDIDATES_MESSAGE: &str =
 const WEB_MAX_FILE_BYTES: usize = 512 * 1024 * 1024;
 #[cfg(any(test, target_arch = "wasm32"))]
 const WEB_MAX_SESSION_BYTES: usize = 1024 * 1024 * 1024;
-#[cfg(any(test, target_arch = "wasm32"))]
-const WEB_PIXEL_LIMIT_MESSAGE: &str =
-    "The retained image frames and Parametric Map buffers exceed the 192000000 retained-pixel browser limit.";
 const TITLEBAR_MAXIMIZE_ICON_MARGIN: f32 = 15.0;
 const TITLEBAR_MAXIMIZE_ICON_MIN_SIDE: f32 = 1.0;
 const TITLEBAR_RESTORE_ICON_OFFSET_FACTOR: f32 = 0.24;
@@ -3884,7 +3882,11 @@ impl WebRetainedPixelCounter {
     }
 
     fn ensure_limit(&self) -> Result<usize, String> {
-        if self.total > WEB_MAX_RETAINED_PIXELS {
+        self.ensure_limit_with(WEB_MAX_RETAINED_PIXELS)
+    }
+
+    fn ensure_limit_with(&self, limit: usize) -> Result<usize, String> {
+        if self.total > limit {
             Err(WEB_PIXEL_LIMIT_MESSAGE.to_string())
         } else {
             Ok(self.total)

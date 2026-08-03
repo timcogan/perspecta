@@ -122,7 +122,18 @@ const SECONDARY_CAPTURE_IMAGE_STORAGE_UID: &str = "1.2.840.10008.5.1.4.1.1.7";
 // Treat cumulative_delta from read_per_frame_image_positions as meaningful only above 0.001 mm so float noise does not flip reverse-order detection.
 const IMAGE_POSITION_PATIENT_DOMINANT_DELTA_TOLERANCE_MM: f32 = 0.001;
 #[cfg(any(test, target_arch = "wasm32"))]
-pub(crate) const WEB_MAX_RETAINED_PIXELS: usize = 192_000_000;
+macro_rules! define_web_retained_pixel_limit {
+    ($limit:literal) => {
+        pub(crate) const WEB_MAX_RETAINED_PIXELS: usize = $limit;
+        pub(crate) const WEB_PIXEL_LIMIT_MESSAGE: &str = concat!(
+            "The retained image frames and Parametric Map buffers exceed the ",
+            stringify!($limit),
+            " retained-pixel browser limit."
+        );
+    };
+}
+#[cfg(any(test, target_arch = "wasm32"))]
+define_web_retained_pixel_limit!(192000000);
 
 #[derive(Debug, Clone)]
 pub enum DicomSource {
@@ -509,6 +520,8 @@ enum RgbFrames {
 struct LazyMonoFrames {
     source: DicomSource,
     cache: MonoFrameCache,
+    #[cfg(target_arch = "wasm32")]
+    object: Arc<DefaultDicomObject>,
     #[cfg(not(target_arch = "wasm32"))]
     preload_started: Arc<AtomicBool>,
 }
@@ -517,6 +530,8 @@ struct LazyMonoFrames {
 struct LazyRgbFrames {
     source: DicomSource,
     cache: RgbFrameCache,
+    #[cfg(target_arch = "wasm32")]
+    object: Arc<DefaultDicomObject>,
     #[cfg(not(target_arch = "wasm32"))]
     preload_started: Arc<AtomicBool>,
 }
@@ -700,10 +715,13 @@ impl LazyMonoFrames {
             return Some(frame);
         }
 
-        let frame = match decode_mono_frame_from_source(&self.source, frame_index) {
+        let frame = match decode_mono_frame_from_object(&self.object, frame_index) {
             Ok(frame) => frame,
-            Err(_) => {
-                log::warn!("Could not decode the requested monochrome DICOM frame in the browser");
+            Err(err) => {
+                log::warn!(
+                    "Could not decode the requested monochrome DICOM frame from {} in the browser: {err:#}",
+                    self.source
+                );
                 return None;
             }
         };
@@ -758,10 +776,13 @@ impl LazyRgbFrames {
             return Some(frame);
         }
 
-        let frame = match decode_rgb_frame_from_source(&self.source, frame_index) {
+        let frame = match decode_rgb_frame_from_object(&self.object, frame_index) {
             Ok(frame) => frame,
-            Err(_) => {
-                log::warn!("Could not decode the requested color DICOM frame in the browser");
+            Err(err) => {
+                log::warn!(
+                    "Could not decode the requested color DICOM frame from {} in the browser: {err:#}",
+                    self.source
+                );
                 return None;
             }
         };
@@ -1029,6 +1050,8 @@ fn validate_web_decode_dimensions(
 pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     let source = source.into();
     let obj = open_dicom_object(&source)?;
+    #[cfg(target_arch = "wasm32")]
+    let obj = Arc::new(obj);
     match classify_dicom_object(&obj) {
         DicomPathKind::StructuredReport => {
             let sop_class =
@@ -1188,6 +1211,8 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 MonoFrames::Lazy(LazyMonoFrames {
                     source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
+                    #[cfg(target_arch = "wasm32")]
+                    object: Arc::clone(&obj),
                     #[cfg(not(target_arch = "wasm32"))]
                     preload_started: Arc::new(AtomicBool::new(false)),
                 })
@@ -1323,6 +1348,8 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
                 RgbFrames::Lazy(LazyRgbFrames {
                     source: source.clone(),
                     cache: Arc::new(Mutex::new(cache)),
+                    #[cfg(target_arch = "wasm32")]
+                    object: Arc::clone(&obj),
                     #[cfg(not(target_arch = "wasm32"))]
                     preload_started: Arc::new(AtomicBool::new(false)),
                 })
@@ -1365,10 +1392,32 @@ pub fn load_dicom(source: impl Into<DicomSource>) -> Result<DicomImage> {
     }
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+fn validate_decoded_frame_buffer_len(
+    actual_len: usize,
+    columns: usize,
+    rows: usize,
+    samples_per_pixel: usize,
+    frame_kind: &str,
+) -> Result<()> {
+    let expected_len = columns
+        .checked_mul(rows)
+        .and_then(|pixels| pixels.checked_mul(samples_per_pixel))
+        .with_context(|| format!("Overflow while calculating decoded {frame_kind} frame size"))?;
+    if actual_len != expected_len {
+        bail!(
+            "Decoded {frame_kind} frame buffer length mismatch: got {actual_len}, expected {expected_len} ({columns}x{rows}x{samples_per_pixel})"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(target_arch = "wasm32")]
-fn decode_mono_frame_from_source(source: &DicomSource, frame_index: usize) -> Result<Arc<[i32]>> {
+fn decode_mono_frame_from_object(
+    obj: &DefaultDicomObject,
+    frame_index: usize,
+) -> Result<Arc<[i32]>> {
     let frame_number = u32::try_from(frame_index).context("DICOM frame index exceeds u32")?;
-    let obj = open_dicom_object(source)?;
     let decoded = obj
         .decode_pixel_data_frame(frame_number)
         .context("Failed to decode the requested monochrome PixelData frame")?;
@@ -1381,13 +1430,19 @@ fn decode_mono_frame_from_source(source: &DicomSource, frame_index: usize) -> Re
     let frame_pixels: Vec<i32> = decoded
         .to_vec_frame(0)
         .context("Could not convert the requested monochrome frame to i32 samples")?;
+    validate_decoded_frame_buffer_len(
+        frame_pixels.len(),
+        decoded.columns() as usize,
+        decoded.rows() as usize,
+        1,
+        "monochrome",
+    )?;
     Ok(Arc::<[i32]>::from(frame_pixels.into_boxed_slice()))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn decode_rgb_frame_from_source(source: &DicomSource, frame_index: usize) -> Result<Arc<[u8]>> {
+fn decode_rgb_frame_from_object(obj: &DefaultDicomObject, frame_index: usize) -> Result<Arc<[u8]>> {
     let frame_number = u32::try_from(frame_index).context("DICOM frame index exceeds u32")?;
-    let obj = open_dicom_object(source)?;
     let decoded = obj
         .decode_pixel_data_frame(frame_number)
         .context("Failed to decode the requested color PixelData frame")?;
@@ -1413,6 +1468,13 @@ fn decode_rgb_frame_from_source(source: &DicomSource, frame_index: usize) -> Res
             .map(|sample| (sample >> bits_shift) as u8)
             .collect()
     };
+    validate_decoded_frame_buffer_len(
+        frame_pixels.len(),
+        decoded.columns() as usize,
+        decoded.rows() as usize,
+        decoded.samples_per_pixel() as usize,
+        "color",
+    )?;
     Ok(Arc::<[u8]>::from(frame_pixels.into_boxed_slice()))
 }
 
@@ -3549,6 +3611,35 @@ mod tests {
         assert!(web_cached_frame(&cache, 3)
             .as_ref()
             .is_some_and(|stored| Arc::ptr_eq(stored, &last)));
+    }
+
+    #[test]
+    fn decoded_frame_buffer_length_matches_decoded_dimensions() {
+        assert!(validate_decoded_frame_buffer_len(6, 3, 2, 1, "monochrome").is_ok());
+        assert!(validate_decoded_frame_buffer_len(18, 3, 2, 3, "color").is_ok());
+    }
+
+    #[test]
+    fn decoded_frame_buffer_length_rejects_malformed_frames() {
+        let mono_error = validate_decoded_frame_buffer_len(5, 3, 2, 1, "monochrome")
+            .expect_err("a short monochrome frame must be rejected");
+        assert!(mono_error.to_string().contains("got 5, expected 6 (3x2x1)"));
+
+        let color_error = validate_decoded_frame_buffer_len(17, 3, 2, 3, "color")
+            .expect_err("a short color frame must be rejected");
+        assert!(color_error
+            .to_string()
+            .contains("got 17, expected 18 (3x2x3)"));
+    }
+
+    #[test]
+    fn decoded_frame_buffer_length_rejects_overflow() {
+        let error = validate_decoded_frame_buffer_len(0, usize::MAX, 2, 1, "monochrome")
+            .expect_err("overflowing decoded dimensions must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("Overflow while calculating decoded monochrome frame size"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ const noticeMessage = notice?.querySelector(".demo-notice-message");
 const noticeDismiss = notice?.querySelector(".demo-notice-dismiss");
 const maxFileBytes = 512 * 1024 * 1024;
 const maxSelectionBytes = 1024 * 1024 * 1024;
+const manifestFetchTimeoutMs = 5000;
 let noticeTimer;
 let viewerReady = false;
 let queueDroppedFiles;
@@ -37,17 +38,27 @@ async function resolveModuleUrl() {
     if (manifestUrl.origin !== window.location.origin) {
       throw new Error("Cross-origin manifests are not allowed");
     }
-    const response = await fetch(manifestUrl, {
-      cache: "no-store",
-      credentials: "same-origin",
-    });
-    if (!response.ok) {
-      throw new Error("Asset manifest is unavailable");
-    }
-    const manifest = await response.json();
-    const currentModuleUrl = trustedModuleUrl(manifest?.js);
-    if (currentModuleUrl) {
-      return currentModuleUrl;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      manifestFetchTimeoutMs,
+    );
+    try {
+      const response = await fetch(manifestUrl, {
+        cache: "no-store",
+        credentials: "same-origin",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error("Asset manifest is unavailable");
+      }
+      const manifest = await response.json();
+      const currentModuleUrl = trustedModuleUrl(manifest?.js);
+      if (currentModuleUrl) {
+        return currentModuleUrl;
+      }
+    } finally {
+      window.clearTimeout(timeout);
     }
   } catch (_error) {
     // The build-time URL remains a safe fallback for offline/static mirrors.

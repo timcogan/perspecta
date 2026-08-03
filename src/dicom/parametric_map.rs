@@ -35,6 +35,10 @@ pub(crate) struct ParametricMapPixelCounter {
 
 #[cfg(any(test, target_arch = "wasm32"))]
 impl ParametricMapPixelCounter {
+    /// The pointer-and-length identity is valid only while every inspected
+    /// overlay and counted RGBA allocation remains alive for this entire
+    /// accounting pass. Callers must preserve those lifetimes so an address
+    /// cannot be reused while its key remains in `seen_rgba_frames`.
     pub(crate) fn add_overlay(&mut self, overlay: &ParametricMapOverlay) -> Option<usize> {
         overlay.layers.iter().try_fold(0usize, |total, layer| {
             let pixels_per_frame = layer.width.checked_mul(layer.height)?;

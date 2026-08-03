@@ -551,6 +551,11 @@ impl DicomViewerApp {
         cancel.load(Ordering::Acquire)
     }
 
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn web_history_preload_pixel_capacity(reserved_pixels: usize) -> Option<usize> {
+        WEB_MAX_RETAINED_PIXELS.checked_sub(reserved_pixels)
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn send_web_history_preload_result(
         cancel: &AtomicBool,
@@ -673,6 +678,7 @@ impl DicomViewerApp {
         prepared: PreparedLoadPaths,
         tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
         cancel: &AtomicBool,
+        preload_pixel_capacity: usize,
     ) {
         if Self::web_history_preload_cancelled(cancel) {
             return;
@@ -742,7 +748,9 @@ impl DicomViewerApp {
                 Self::attach_matching_sr_overlay(&mut image, &sr_overlays);
                 Self::attach_matching_pm_overlay(&mut image, &pm_overlays);
                 let mut pixels = WebRetainedPixelCounter::default();
-                if pixels.add_image(&image).is_none() || pixels.ensure_limit().is_err() {
+                if pixels.add_image(&image).is_none()
+                    || pixels.ensure_limit_with(preload_pixel_capacity).is_err()
+                {
                     let _ = Self::send_web_history_preload_result(
                         cancel,
                         tx,
@@ -779,7 +787,9 @@ impl DicomViewerApp {
                     Self::attach_matching_sr_overlay(&mut image, &sr_overlays);
                     Self::attach_matching_pm_overlay(&mut image, &pm_overlays);
                     if group_pixels.add_image(&image).is_none()
-                        || group_pixels.ensure_limit().is_err()
+                        || group_pixels
+                            .ensure_limit_with(preload_pixel_capacity)
+                            .is_err()
                     {
                         let _ = Self::send_web_history_preload_result(
                             cancel,
@@ -825,6 +835,16 @@ impl DicomViewerApp {
             ctx.request_repaint();
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        let Some(preload_pixel_capacity) =
+            Self::web_history_preload_pixel_capacity(self.web_selection_pixel_reservation)
+        else {
+            log::warn!(
+                "Browser history preload skipped because its pixel reservation exceeded the browser limit."
+            );
+            ctx.request_repaint();
+            return;
+        };
         let job_key = job.preload_key();
 
         let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
@@ -852,6 +872,7 @@ impl DicomViewerApp {
                             prepared,
                             &tx,
                             cancel.as_ref(),
+                            preload_pixel_capacity,
                         )
                         .await;
                     }
@@ -1506,6 +1527,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn web_history_preload_capacity_includes_active_reservation() {
+        let capacity =
+            DicomViewerApp::web_history_preload_pixel_capacity(WEB_MAX_RETAINED_PIXELS - 2)
+                .expect("a valid reservation should leave a preload capacity");
+        let mut pixels = WebRetainedPixelCounter::default();
+        let mut image = DicomImage::test_stub_with_mono_frames(None, 1);
+        image.width = 2;
+
+        pixels
+            .add_image(&image)
+            .expect("the exact-capacity image should be countable");
+        assert_eq!(pixels.ensure_limit_with(capacity), Ok(2));
+
+        let extra = DicomImage::test_stub_with_mono_frames(None, 1);
+        pixels
+            .add_image(&extra)
+            .expect("the over-limit image should still be countable");
+        assert_eq!(
+            pixels.ensure_limit_with(capacity),
+            Err(WEB_PIXEL_LIMIT_MESSAGE.to_string())
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn full_active_reservation_rejects_a_single_preload_pixel() {
+        let capacity = DicomViewerApp::web_history_preload_pixel_capacity(WEB_MAX_RETAINED_PIXELS)
+            .expect("the full reservation should leave zero preload capacity");
+        let mut pixels = WebRetainedPixelCounter::default();
+        let image = DicomImage::test_stub_with_mono_frames(None, 1);
+
+        pixels
+            .add_image(&image)
+            .expect("the image should be countable before applying the capacity");
+        assert_eq!(
+            pixels.ensure_limit_with(capacity),
+            Err(WEB_PIXEL_LIMIT_MESSAGE.to_string())
+        );
+    }
 
     #[test]
     fn web_history_preload_guard_tracks_jobs_until_drop() {

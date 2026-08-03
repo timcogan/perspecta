@@ -13,7 +13,7 @@ Its primary purpose is consistency during development, not full architecture cov
 
 - `src/main.rs`: thin native executable entry point only.
 - `src/lib.rs`: shared crate composition plus native and browser bootstrap wiring.
-- `src/platform.rs`: target-specific task scheduling; native threads and browser macrotasks.
+- `src/platform.rs`: target-specific task scheduling; native threads, deferred browser tasks, and cooperative browser yields.
 - `src/launch.rs`: parse/validate CLI and `perspecta://` launch inputs.
 - `src/dicomweb.rs`: DICOMweb metadata selection and instance download.
 - `src/dicomweb_web.rs`: browser-only unavailable-service shim; the static preview never performs DICOMweb requests.
@@ -57,7 +57,7 @@ Its primary purpose is consistency during development, not full architecture cov
 22. Visible metadata field settings MUST apply only to the summary overlay; the full metadata popup MUST ignore that filter and show all extracted fields for the active object.
 23. Live measurements MUST be stored in image coordinates, not screen coordinates, so zoom and pan do not change their geometry.
 24. Live measurements are transient UI state only; they MUST NOT persist into history entries and MUST clear on frame or study/context changes.
-25. Native and browser builds MUST share the same `DicomViewerApp`. Platform-specific bootstrap, scheduling, file selection, window controls, caching, and unavailable-service behavior belong in target adapters. UI state and texture uploads stay on the egui thread; native targets use workers for expensive preparation, while the browser yields cooperatively between load stages.
+25. Native and browser builds MUST share the same `DicomViewerApp`. Platform-specific bootstrap, scheduling, file selection, window controls, caching, and unavailable-service behavior belong in target adapters. UI state and texture uploads stay on the egui thread; native targets use workers for expensive preparation, while browser load tasks start outside the initiating call stack and yield cooperatively between load stages.
 26. Browser-selected DICOM content MUST remain in local memory as `DicomSource::Memory`; it MUST NOT be uploaded, persisted, imported by URL, or sent to DICOMweb. The `/demo/` surface remains same-origin, analytics-free, third-party-free, and explicitly not for diagnostic use.
 27. The browser preview MUST enforce 512 MiB per file, 1 GiB of uniquely retained input bytes, and 192,000,000 retained decoded pixels using checked preflight accounting. Decode dimensions, caches, and reservations MUST remain bounded by actual resident data, and the active study MUST NOT be evicted implicitly.
 28. Browser builds MUST remain single-threaded on Glow/WebGL, use `platform::MonotonicInstant` for shared elapsed-time state, and exclude browser-incompatible JPEG 2000/JPEG-LS codecs without changing desktop defaults.

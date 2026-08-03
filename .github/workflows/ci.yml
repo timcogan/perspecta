@@ -101,12 +101,14 @@ jobs:
   wasm:
     name: WebAssembly Checks
     needs: [version]
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Resolve Rust toolchain
         id: rust-toolchain
