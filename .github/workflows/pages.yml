@@ -107,11 +107,6 @@ jobs:
           fi
           cargo binstall wasm-bindgen-cli --version "$version" --locked --no-confirm --disable-strategies compile
 
-      - name: Install WASM optimizer
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes binaryen
-
       - name: Setup Hugo
         uses: peaceiris/actions-hugo@v3
         with:
