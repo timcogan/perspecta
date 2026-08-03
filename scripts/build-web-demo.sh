@@ -31,7 +31,7 @@ sha256_file() {
     fi
 }
 
-for command_name in awk cargo cp find git grep install jq mktemp rustup sed wasm-bindgen; do
+for command_name in awk cargo find git grep install jq mktemp rustup sed wasm-bindgen; do
     require_command "$command_name"
 done
 
