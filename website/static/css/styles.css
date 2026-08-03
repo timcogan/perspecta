@@ -604,6 +604,361 @@ a {
   display: none;
 }
 
+/* The browser preview uses a standalone Hugo layout so no analytics or cookie
+   controls from the main site shell are loaded. */
+.demo-page {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  background: #080a0d;
+}
+
+.demo-shell {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+:fullscreen .demo-shell {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+:fullscreen .demo-toolbar {
+  display: none;
+}
+
+:-webkit-full-screen .demo-shell {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+:-webkit-full-screen .demo-toolbar {
+  display: none;
+}
+
+.demo-heading {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.demo-toolbar {
+  position: relative;
+  z-index: 20;
+  min-height: 44px;
+  padding: 7px 12px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-top: 1px solid var(--line);
+  background: #0d1014;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.demo-brand {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.demo-brand img {
+  display: block;
+  width: auto;
+  height: 17px;
+}
+
+.demo-safety {
+  margin: 0;
+}
+
+.demo-safety strong {
+  color: inherit;
+  font-weight: 600;
+}
+
+.demo-safety code {
+  color: inherit;
+  font-size: inherit;
+}
+
+.demo-build-commit {
+  text-decoration: underline;
+  text-decoration-color: #4f5868;
+  text-underline-offset: 2px;
+}
+
+.demo-build-commit:hover,
+.demo-build-commit:focus-visible {
+  color: var(--fg);
+}
+
+.demo-details {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.demo-details summary {
+  list-style: none;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: var(--fg);
+  user-select: none;
+}
+
+.demo-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.demo-details summary:hover,
+.demo-details summary:focus-visible,
+.demo-details[open] summary {
+  border-color: #4f617f;
+  background: rgba(79, 97, 127, 0.12);
+}
+
+.demo-details-panel {
+  position: fixed;
+  z-index: 30;
+  right: 10px;
+  bottom: 52px;
+  width: min(620px, calc(100vw - 20px));
+  max-height: calc(100vh - 64px);
+  max-height: calc(100dvh - 64px);
+  overflow: hidden;
+  border: 1px solid #343b48;
+  border-radius: 14px;
+  background: rgba(14, 17, 22, 0.98);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(12px);
+}
+
+.demo-details-scroll {
+  max-height: inherit;
+  overflow-y: auto;
+  padding: 20px 22px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.demo-details-scroll h2,
+.demo-details-scroll h3 {
+  color: var(--fg);
+}
+
+.demo-details-scroll h2 {
+  margin: 24px 0 10px;
+  font-size: 20px;
+}
+
+.demo-details-scroll h2:first-child {
+  margin-top: 0;
+}
+
+.demo-details-scroll h3 {
+  margin: 18px 0 6px;
+  font-size: 15px;
+}
+
+.demo-details-scroll p {
+  margin: 0 0 10px;
+}
+
+.demo-details-scroll a {
+  color: #9fc0ff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.demo-viewer {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+.demo-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  touch-action: none;
+}
+
+.demo-status,
+.demo-noscript {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  text-align: center;
+  background: #000;
+}
+
+.demo-status[data-state="ready"] {
+  display: none;
+}
+
+.demo-status[data-state="error"] .demo-spinner {
+  display: none;
+}
+
+.demo-status[data-state="loading"] .demo-loading-mark {
+  margin-bottom: 0;
+}
+
+.demo-status[data-state="loading"] h2,
+.demo-status[data-state="loading"] p {
+  display: none;
+}
+
+.demo-loading-mark {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  margin-bottom: 16px;
+  display: grid;
+  place-items: center;
+}
+
+.demo-loading-mark img {
+  display: block;
+  margin: 0;
+}
+
+.demo-status h2,
+.demo-noscript h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: clamp(24px, 4vw, 34px);
+  font-weight: 600;
+}
+
+.demo-status p,
+.demo-noscript p {
+  max-width: 540px;
+  margin: 10px 0 0;
+  color: var(--muted);
+}
+
+.demo-status-note {
+  font-size: 12px;
+}
+
+.demo-notice {
+  position: absolute;
+  z-index: 18;
+  left: 50%;
+  bottom: 18px;
+  width: min(680px, calc(100% - 32px));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px;
+  border: 1px solid #665434;
+  border-radius: 12px;
+  background: rgba(30, 25, 17, 0.97);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+  color: var(--fg);
+  pointer-events: none;
+}
+
+.demo-notice[hidden] {
+  display: none;
+}
+
+.demo-notice h2 {
+  margin: 0;
+  color: #ffd79a;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.demo-notice p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.demo-notice-dismiss {
+  flex: 0 0 auto;
+  border: 1px solid #746344;
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: #211c14;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  pointer-events: auto;
+}
+
+.demo-notice-dismiss:hover,
+.demo-notice-dismiss:focus-visible {
+  border-color: #b89a63;
+  background: #2b2418;
+}
+
+.demo-spinner {
+  position: absolute;
+  inset: 0;
+  width: 80px;
+  height: 80px;
+  margin: 0;
+  border: 2px solid #333a46;
+  border-top-color: #dfe8f7;
+  border-radius: 50%;
+  animation: demo-spin 800ms linear infinite;
+}
+
+@keyframes demo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .demo-spinner {
+    animation: none;
+    border-color: #dfe8f7;
+  }
+}
+
+@media (max-width: 720px) {
+  .demo-toolbar {
+    gap: 8px;
+  }
+
+  .demo-safety {
+    font-size: 10px;
+    line-height: 1.15;
+  }
+
+  .demo-notice {
+    bottom: 8px;
+    width: calc(100% - 16px);
+    align-items: flex-start;
+  }
+}
+
 @media (max-width: 860px) {
   .nav {
     position: relative;

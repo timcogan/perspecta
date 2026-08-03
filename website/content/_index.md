@@ -1,4 +1,4 @@
 +++
 title = "Perspecta DICOM Viewer"
-description = "Open-source desktop DICOM viewer built in Rust for local files, DICOMweb launch, mammography layouts, GSPS overlays, and Structured Reports."
+description = "Open-source DICOM viewer built in Rust, with native desktop releases and a local-only browser technical preview."
 +++

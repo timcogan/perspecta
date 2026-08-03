@@ -16,15 +16,30 @@ default = ["jpeg2000"]
 jpeg_ls = ["dicom-pixeldata/charls"]
 jpeg2000 = ["dicom-pixeldata/openjp2"]
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 anyhow = "1.0"
 dicom-core = "0.10.0"
 dicom-object = "0.10.0"
-dicom-pixeldata = "0.10.0"
+dicom-pixeldata = { version = "0.10.0", default-features = false, features = ["deflate", "jpeg", "rle"] }
 egui = "0.35"
 log = "0.4"
-rfd = "0.17"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dicom-pixeldata = { version = "0.10.0", default-features = false, features = ["rayon"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+rfd = "0.17"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "web_screen_reader"] }
+js-sys = "0.3"
+rfd = { version = "0.17", default-features = false, features = ["file-handle-inner"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Blob", "Document", "Element", "File", "HtmlCanvasElement", "Location", "Window"] }
+web-time = "1.1"
 
 [target.'cfg(windows)'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
@@ -32,7 +47,7 @@ eframe = { version = "0.35", default-features = false, features = ["accesskit", 
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 
-[target.'cfg(not(any(windows, target_os = "linux")))'.dependencies]
+[target.'cfg(not(any(windows, target_os = "linux", target_arch = "wasm32")))'.dependencies]
 eframe = "0.35"
 
 [dev-dependencies]

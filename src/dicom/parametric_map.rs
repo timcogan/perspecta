@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(any(test, target_arch = "wasm32"))]
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -6,7 +8,7 @@ use dicom_object::{DefaultDicomObject, Tag};
 use dicom_pixeldata::PixelDecoder;
 
 use super::{
-    classify_dicom_object, collect_metadata, open_dicom_object, read_int_first,
+    classify_dicom_object, collect_metadata, open_dicom_object, read_frame_count, read_int_first,
     read_item_multi_int, read_item_string, read_laterality, read_pixel_spacing_mm, read_string,
     read_view_position, sequence_items_from_item, sequence_items_from_object, DicomImage,
     DicomPathKind, DicomSource, ImageColorMode, MonoFrames, RgbFrames,
@@ -24,6 +26,29 @@ const PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE: Tag = Tag(0x5200, 0x9230);
 const DEFAULT_OVERLAY_ALPHA: f32 = 0.45;
 
 type SourceFrameRgbaIndices = HashMap<usize, Vec<usize>>;
+
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ParametricMapPixelCounter {
+    seen_rgba_frames: HashSet<(usize, usize)>,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl ParametricMapPixelCounter {
+    pub(crate) fn add_overlay(&mut self, overlay: &ParametricMapOverlay) -> Option<usize> {
+        overlay.layers.iter().try_fold(0usize, |total, layer| {
+            let pixels_per_frame = layer.width.checked_mul(layer.height)?;
+            layer.rgba_frames.iter().try_fold(total, |total, frame| {
+                let identity = (frame.as_ptr() as usize, frame.len());
+                if self.seen_rgba_frames.insert(identity) {
+                    total.checked_add(pixels_per_frame)
+                } else {
+                    Some(total)
+                }
+            })
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ParametricMapOverlayLayer {
@@ -233,11 +258,10 @@ fn parse_parametric_map(
         bail!("Parametric Map Palette Color LUT rendering is not supported");
     }
 
-    let frame_count = match read_int_first(obj, "NumberOfFrames") {
-        Some(value) if value > 0 => value as usize,
-        Some(value) => bail!("Invalid NumberOfFrames={} (must be >= 1)", value),
-        None => 1,
-    };
+    let frame_count = read_frame_count(obj)?;
+
+    #[cfg(target_arch = "wasm32")]
+    super::ensure_web_decode_dimensions(width, height, frame_count)?;
 
     let scalar_frames = decode_parametric_map_frames(obj, width, height, frame_count)?;
     let (min_value, max_value) = scalar_min_max(&scalar_frames)?;
@@ -571,7 +595,7 @@ fn build_reference_maps(
     explicit_mappings
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use dicom_core::{DataElement, PrimitiveValue, VR};
@@ -699,6 +723,11 @@ mod tests {
         assert_eq!(image.color_mode, ImageColorMode::Rgb);
         assert_eq!(image.samples_per_pixel, 3);
         assert!(image.frame_rgb_pixels(0).is_some());
+        assert_eq!(
+            image.web_retained_base_pixel_count(),
+            Some(2),
+            "eager Parametric Map frames must all count toward the web budget"
+        );
     }
 
     #[test]
@@ -875,6 +904,56 @@ mod tests {
         assert_eq!(
             rgba_for_frame_2[0].as_ref(),
             parsed.overlay_layer.rgba_frames[2].as_ref()
+        );
+    }
+
+    #[test]
+    fn parametric_map_pixel_counter_counts_unique_retained_rgba_frames() {
+        let shared_frame = Arc::<[u8]>::from(vec![0; 2 * 3 * 4].into_boxed_slice());
+        let second_frame = Arc::<[u8]>::from(vec![1; 2 * 3 * 4].into_boxed_slice());
+        let overlay = ParametricMapOverlay {
+            layers: vec![ParametricMapOverlayLayer {
+                width: 2,
+                height: 3,
+                rgba_frames: Arc::<[Arc<[u8]>]>::from(
+                    vec![
+                        Arc::clone(&shared_frame),
+                        Arc::clone(&shared_frame),
+                        second_frame,
+                    ]
+                    .into_boxed_slice(),
+                ),
+                source_frame_rgba_indices: None,
+            }],
+        };
+
+        let mut counter = ParametricMapPixelCounter::default();
+        assert_eq!(counter.add_overlay(&overlay), Some(12));
+        assert_eq!(
+            counter.add_overlay(&overlay.clone()),
+            Some(0),
+            "cloned pending, image, and history overlays must not double-count shared RGBA buffers"
+        );
+    }
+
+    #[test]
+    fn parametric_map_pixel_counter_rejects_logical_dimension_overflow() {
+        let overlay = ParametricMapOverlay {
+            layers: vec![ParametricMapOverlayLayer {
+                width: usize::MAX,
+                height: 2,
+                rgba_frames: Arc::<[Arc<[u8]>]>::from(
+                    vec![Arc::<[u8]>::from([0, 0, 0, 0])].into_boxed_slice(),
+                ),
+                source_frame_rgba_indices: None,
+            }],
+        };
+
+        assert!(
+            ParametricMapPixelCounter::default()
+                .add_overlay(&overlay)
+                .is_none(),
+            "overflowing Parametric Map dimensions must be rejected"
         );
     }
 }

@@ -43,6 +43,27 @@ impl HistoryPreloadJob {
     }
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+struct WebHistoryPreloadInFlightGuard {
+    in_flight: Arc<AtomicUsize>,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl WebHistoryPreloadInFlightGuard {
+    fn start(in_flight: Arc<AtomicUsize>) -> Self {
+        in_flight.fetch_add(1, Ordering::AcqRel);
+        Self { in_flight }
+    }
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl Drop for WebHistoryPreloadInFlightGuard {
+    fn drop(&mut self) {
+        let previous = self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "history preload in-flight count underflowed");
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct HistorySingleData {
     pub(super) path: DicomSourceMeta,
@@ -253,6 +274,8 @@ impl DicomViewerApp {
         if self.history_entries.len() > HISTORY_MAX_ENTRIES {
             self.history_entries.truncate(HISTORY_MAX_ENTRIES);
         }
+        #[cfg(target_arch = "wasm32")]
+        self.rebalance_web_history_if_unreserved();
     }
 
     pub(super) fn push_single_history_entry(
@@ -393,6 +416,11 @@ impl DicomViewerApp {
         self.cancel_local_prepare();
         self.pending_history_open_id = None;
         self.pending_history_open_armed = false;
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.web_picker_receiver = None;
+            self.web_preflight_receiver = None;
+        }
         self.dicomweb_receiver = None;
         self.dicomweb_active_path_receiver = None;
         self.dicomweb_active_group_expected = None;
@@ -481,11 +509,16 @@ impl DicomViewerApp {
     }
 
     pub(super) fn clear_history_preload(&mut self) {
+        #[cfg(any(test, target_arch = "wasm32"))]
+        if let Some(cancel) = self.history_preload_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
         self.history_preload_receiver = None;
         self.history_preload_queue.clear();
         self.history_preload_active_key = None;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn preload_report_into_history(
         path: DicomSource,
         tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
@@ -499,6 +532,7 @@ impl DicomViewerApp {
         let _ = tx.send(result);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn preload_parametric_map_into_history(
         path: DicomSource,
         tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
@@ -512,6 +546,57 @@ impl DicomViewerApp {
         let _ = tx.send(result);
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn web_history_preload_cancelled(cancel: &AtomicBool) -> bool {
+        cancel.load(Ordering::Acquire)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn send_web_history_preload_result(
+        cancel: &AtomicBool,
+        tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
+        result: Result<HistoryPreloadResult, String>,
+    ) -> bool {
+        !Self::web_history_preload_cancelled(cancel) && tx.send(result).is_ok()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn preload_report_into_history_cooperative(
+        path: DicomSource,
+        tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
+        cancel: &AtomicBool,
+    ) -> bool {
+        if Self::web_history_preload_cancelled(cancel) {
+            return false;
+        }
+        let result = load_structured_report(&path)
+            .map(|report| HistoryPreloadResult::Report {
+                path: path.clone(),
+                report: Box::new(report),
+            })
+            .map_err(|err| format!("{err:#}"));
+        Self::send_web_history_preload_result(cancel, tx, result)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn preload_parametric_map_into_history_cooperative(
+        path: DicomSource,
+        tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
+        cancel: &AtomicBool,
+    ) -> bool {
+        if Self::web_history_preload_cancelled(cancel) {
+            return false;
+        }
+        let result = load_parametric_map(&path)
+            .map(|image| HistoryPreloadResult::Single {
+                path: path.clone(),
+                image: Box::new(image),
+            })
+            .map_err(|err| format!("{err:#}"));
+        Self::send_web_history_preload_result(cancel, tx, result)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn preload_group_into_history(
         prepared: PreparedLoadPaths,
         tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
@@ -583,6 +668,142 @@ impl DicomViewerApp {
         let _ = tx.send(result);
     }
 
+    #[cfg(target_arch = "wasm32")]
+    async fn preload_group_into_history_cooperative(
+        prepared: PreparedLoadPaths,
+        tx: &mpsc::Sender<Result<HistoryPreloadResult, String>>,
+        cancel: &AtomicBool,
+    ) {
+        if Self::web_history_preload_cancelled(cancel) {
+            return;
+        }
+        let load_paths = prepared.image_paths;
+        let report_paths = prepared.structured_report_paths;
+        let parametric_map_paths = prepared.parametric_map_paths;
+        let gsps_overlays = prepared.gsps_overlays;
+        let sr_overlays = prepared.sr_overlays;
+        let pm_overlays = prepared.pm_overlays;
+
+        if load_paths.is_empty() && report_paths.is_empty() && parametric_map_paths.is_empty() {
+            let _ = Self::send_web_history_preload_result(
+                cancel,
+                tx,
+                Err("Unsupported preload group size".to_string()),
+            );
+            return;
+        }
+        for path in report_paths {
+            if Self::web_history_preload_cancelled(cancel)
+                || !Self::preload_report_into_history_cooperative(path, tx, cancel)
+            {
+                return;
+            }
+            crate::platform::yield_to_browser().await;
+            if Self::web_history_preload_cancelled(cancel) {
+                return;
+            }
+        }
+        for path in parametric_map_paths {
+            if Self::web_history_preload_cancelled(cancel)
+                || !Self::preload_parametric_map_into_history_cooperative(path, tx, cancel)
+            {
+                return;
+            }
+            crate::platform::yield_to_browser().await;
+            if Self::web_history_preload_cancelled(cancel) {
+                return;
+            }
+        }
+        if load_paths.is_empty() {
+            return;
+        }
+
+        let result = match load_paths.len() {
+            1 => {
+                if Self::web_history_preload_cancelled(cancel) {
+                    return;
+                }
+                let path = load_paths[0].clone();
+                let mut image = match load_dicom(&path) {
+                    Ok(image) => image,
+                    Err(err) => {
+                        let _ = Self::send_web_history_preload_result(
+                            cancel,
+                            tx,
+                            Err(format!("{err:#}")),
+                        );
+                        return;
+                    }
+                };
+                if Self::web_history_preload_cancelled(cancel) {
+                    return;
+                }
+                Self::attach_matching_gsps_overlay(&mut image, &gsps_overlays);
+                Self::attach_matching_sr_overlay(&mut image, &sr_overlays);
+                Self::attach_matching_pm_overlay(&mut image, &pm_overlays);
+                let mut pixels = WebRetainedPixelCounter::default();
+                if pixels.add_image(&image).is_none() || pixels.ensure_limit().is_err() {
+                    let _ = Self::send_web_history_preload_result(
+                        cancel,
+                        tx,
+                        Err(WEB_PIXEL_LIMIT_MESSAGE.to_string()),
+                    );
+                    return;
+                }
+                if Self::web_history_preload_cancelled(cancel) {
+                    return;
+                }
+                Ok(HistoryPreloadResult::Single {
+                    path,
+                    image: Box::new(image),
+                })
+            }
+            count if Self::is_supported_multi_view_group_size(count) => {
+                let mut viewports = Vec::with_capacity(load_paths.len());
+                let mut group_pixels = WebRetainedPixelCounter::default();
+                for path in load_paths {
+                    if Self::web_history_preload_cancelled(cancel) {
+                        return;
+                    }
+                    let mut image = match load_dicom(&path).map_err(|err| format!("{err:#}")) {
+                        Ok(image) => image,
+                        Err(err) => {
+                            let _ = Self::send_web_history_preload_result(cancel, tx, Err(err));
+                            return;
+                        }
+                    };
+                    if Self::web_history_preload_cancelled(cancel) {
+                        return;
+                    }
+                    Self::attach_matching_gsps_overlay(&mut image, &gsps_overlays);
+                    Self::attach_matching_sr_overlay(&mut image, &sr_overlays);
+                    Self::attach_matching_pm_overlay(&mut image, &pm_overlays);
+                    if group_pixels.add_image(&image).is_none()
+                        || group_pixels.ensure_limit().is_err()
+                    {
+                        let _ = Self::send_web_history_preload_result(
+                            cancel,
+                            tx,
+                            Err(WEB_PIXEL_LIMIT_MESSAGE.to_string()),
+                        );
+                        return;
+                    }
+                    if Self::web_history_preload_cancelled(cancel) {
+                        return;
+                    }
+                    viewports.push((path, image));
+                    crate::platform::yield_to_browser().await;
+                    if Self::web_history_preload_cancelled(cancel) {
+                        return;
+                    }
+                }
+                Ok(HistoryPreloadResult::Group { viewports })
+            }
+            _ => Err("Unsupported preload group size".to_string()),
+        };
+        let _ = Self::send_web_history_preload_result(cancel, tx, result);
+    }
+
     pub(super) fn start_next_history_preload(&mut self, ctx: &egui::Context) {
         if self.history_preload_receiver.is_some() {
             return;
@@ -591,10 +812,24 @@ impl DicomViewerApp {
         let Some(job) = self.history_preload_queue.pop_front() else {
             return;
         };
+        #[cfg(target_arch = "wasm32")]
+        if self.web_selection_pixel_reservation == 0
+            && matches!(
+                &job,
+                HistoryPreloadJob::Group(_) | HistoryPreloadJob::ParametricMap(_)
+            )
+        {
+            log::warn!(
+                "Browser history preload skipped because no pre-decode pixel reservation was active."
+            );
+            ctx.request_repaint();
+            return;
+        }
         let job_key = job.preload_key();
 
         let (tx, rx) = mpsc::channel::<Result<HistoryPreloadResult, String>>();
-        thread::spawn(move || match job {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::platform::spawn(move || match job {
             HistoryPreloadJob::Group(prepared) => Self::preload_group_into_history(prepared, &tx),
             HistoryPreloadJob::ParametricMap(path) => {
                 Self::preload_parametric_map_into_history(path, &tx);
@@ -603,6 +838,42 @@ impl DicomViewerApp {
                 Self::preload_report_into_history(path, &tx);
             }
         });
+        #[cfg(target_arch = "wasm32")]
+        {
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.history_preload_cancel = Some(Arc::clone(&cancel));
+            let in_flight_guard =
+                WebHistoryPreloadInFlightGuard::start(Arc::clone(&self.history_preload_in_flight));
+            let repaint_ctx = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match job {
+                    HistoryPreloadJob::Group(prepared) => {
+                        Self::preload_group_into_history_cooperative(
+                            prepared,
+                            &tx,
+                            cancel.as_ref(),
+                        )
+                        .await;
+                    }
+                    HistoryPreloadJob::ParametricMap(path) => {
+                        let _ = Self::preload_parametric_map_into_history_cooperative(
+                            path,
+                            &tx,
+                            cancel.as_ref(),
+                        );
+                    }
+                    HistoryPreloadJob::StructuredReport(path) => {
+                        let _ = Self::preload_report_into_history_cooperative(
+                            path,
+                            &tx,
+                            cancel.as_ref(),
+                        );
+                    }
+                }
+                drop(in_flight_guard);
+                repaint_ctx.request_repaint();
+            });
+        }
         self.history_preload_receiver = Some(rx);
         self.history_preload_active_key = Some(job_key);
         ctx.request_repaint_after(Duration::from_millis(16));
@@ -979,6 +1250,10 @@ impl DicomViewerApp {
         }
 
         self.history_preload_active_key = None;
+        #[cfg(any(test, target_arch = "wasm32"))]
+        {
+            self.history_preload_cancel = None;
+        }
         self.start_next_history_preload(ctx);
     }
 
@@ -1050,6 +1325,80 @@ fn history_preload_group_id(prepared: &PreparedLoadPaths) -> String {
     paths.extend(prepared.structured_report_paths.iter().cloned());
     paths.extend(prepared.parametric_map_paths.iter().cloned());
     history_id_from_paths(&paths)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(super) fn web_history_entry_pixel_count(
+    entry: &HistoryEntry,
+    counter: &mut WebRetainedPixelCounter,
+) -> Option<usize> {
+    let initial_total = counter.total();
+    match &entry.kind {
+        HistoryKind::Single(single) => counter.add_image(&single.image)?,
+        HistoryKind::Group(group) => {
+            for viewport in &group.viewports {
+                counter.add_image(&viewport.image)?;
+            }
+        }
+        HistoryKind::Report(_) => {}
+    }
+    counter.total().checked_sub(initial_total)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(super) fn web_history_retained_entry_flags(
+    entries: &[HistoryEntry],
+    current_index: Option<usize>,
+    budget: usize,
+    pending_pm_overlays: &HashMap<String, ParametricMapOverlay>,
+) -> Vec<bool> {
+    let mut counter = WebRetainedPixelCounter::default();
+    if counter.add_pm_overlays(pending_pm_overlays).is_none() {
+        return vec![false; entries.len()];
+    }
+    web_history_retained_entry_flags_with_counter(entries, current_index, budget, counter)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(super) fn web_history_retained_entry_flags_with_counter(
+    entries: &[HistoryEntry],
+    current_index: Option<usize>,
+    budget: usize,
+    mut counter: WebRetainedPixelCounter,
+) -> Vec<bool> {
+    let mut retained = vec![false; entries.len()];
+    let mut used = counter.total();
+    if used > budget {
+        return retained;
+    }
+
+    if let Some(index) = current_index.filter(|index| *index < entries.len()) {
+        let mut prospective = counter.clone();
+        if let Some(pixel_count) = web_history_entry_pixel_count(&entries[index], &mut prospective)
+        {
+            if pixel_count <= budget.saturating_sub(used) {
+                retained[index] = true;
+                counter = prospective;
+                used += pixel_count;
+            }
+        }
+    }
+
+    for (index, entry) in entries.iter().enumerate() {
+        if current_index == Some(index) {
+            continue;
+        }
+        let mut prospective = counter.clone();
+        let Some(pixel_count) = web_history_entry_pixel_count(entry, &mut prospective) else {
+            continue;
+        };
+        if pixel_count <= budget.saturating_sub(used) {
+            retained[index] = true;
+            counter = prospective;
+            used += pixel_count;
+        }
+    }
+    retained
 }
 
 pub(super) fn downsample_color_image(source: &ColorImage, max_dim: usize) -> ColorImage {
@@ -1152,4 +1501,25 @@ where
         history_id.push_str(&format!("{}:{}", identity.len(), identity));
     }
     history_id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn web_history_preload_guard_tracks_jobs_until_drop() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let first = WebHistoryPreloadInFlightGuard::start(Arc::clone(&in_flight));
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+
+        {
+            let _second = WebHistoryPreloadInFlightGuard::start(Arc::clone(&in_flight));
+            assert_eq!(in_flight.load(Ordering::Acquire), 2);
+        }
+        assert_eq!(in_flight.load(Ordering::Acquire), 1);
+
+        drop(first);
+        assert_eq!(in_flight.load(Ordering::Acquire), 0);
+    }
 }

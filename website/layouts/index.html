@@ -10,6 +10,7 @@
     </p>
     <div class="cta">
       {{ partial "download-button.html" (dict "context" . "class" "button primary" "mode" "adaptive" "label" "Download") }}
+      <a class="button" href="{{ "/demo/" | relURL }}">Try in browser</a>
       <a class="button" href="{{ .Site.Params.why_perspecta | relURL }}">Why Perspecta</a>
     </div>
   </section>

@@ -19,15 +19,9 @@
   <a href="https://perspecta.cogan.dev/"><img alt="Website" src="https://img.shields.io/badge/Website-perspecta.cogan.dev-0ea5e9?style=for-the-badge" /></a>
 </p>
 
-Perspecta DICOM Viewer is an open-source Rust desktop DICOM viewer (`egui`/`eframe`) focused on fast loading, responsive interaction, DICOMweb launch, mammography layouts, GSPS/SR/Parametric Map overlays, and simple integration from external systems.
+Perspecta DICOM Viewer is an open-source Rust DICOM viewer (`egui`/`eframe`) available as a native desktop application and a local-only browser technical preview. It focuses on fast loading, responsive interaction, DICOMweb launch, mammography layouts, GSPS/SR/Parametric Map overlays, and simple integration from external systems.
 
-## Citation
-
-If you use Perspecta in academic work, please cite the associated engrXiv preprint:
-
-Cogan, T. C. (2026). _Perspecta: A Minimalist, Launch-Driven Desktop DICOM Viewer for Targeted Review_. engrXiv. https://engrxiv.org/preprint/view/7224
-
-Citation metadata is available in [`CITATION.cff`](CITATION.cff).
+Want to try Perspecta without installing it? [Open the browser demo](https://perspecta.cogan.dev/demo/)—your selected DICOM files are processed locally and are not uploaded. The demo is a technical preview and is not for diagnostic use.
 
 ## Highlights
 
@@ -202,7 +196,8 @@ make dev
 
 ## Project Layout
 
-- `src/main.rs`: app entry point and native window setup
+- `src/main.rs`: thin native executable entry point
+- `src/lib.rs`: shared crate composition and native/browser bootstrap
 - `src/app.rs`: UI, state management, interactions, history/cine workflow
 - `src/dicom.rs`: DICOM parsing and pixel extraction
 - `src/dicomweb.rs`: DICOMweb metadata/download bridge
@@ -215,7 +210,7 @@ make dev
 
 - Some compressed transfer syntaxes still depend on codec availability at build time.
 - DICOMweb launch does not currently attach or open Parametric Map objects; Parametric Map support is for local files.
-- No full study/series stack browser yet.
+- Navigation is limited to loaded history entries; Perspecta does not yet build a hierarchical study/series index.
 - No MPR or advanced annotation workflow yet.
 
 ## Roadmap
@@ -225,6 +220,14 @@ make dev
 3. Background decode + smarter cache strategy for large studies.
 4. Expanded clinical tools (VOI LUT workflows, richer measurements, annotations).
 5. More reader productivity controls and presets.
+
+## Citation
+
+If you use Perspecta in academic work, please cite the associated engrXiv preprint:
+
+Cogan, T. C. (2026). _Perspecta: A Minimalist, Launch-Driven Desktop DICOM Viewer for Targeted Review_. engrXiv. https://engrxiv.org/preprint/view/7224
+
+Citation metadata is available in [`CITATION.cff`](CITATION.cff).
 
 ## License
 

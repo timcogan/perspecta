@@ -476,7 +476,7 @@ fn decode_hex_digit(value: u8) -> Option<u8> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

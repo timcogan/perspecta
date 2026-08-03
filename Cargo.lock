@@ -3285,9 +3285,14 @@ dependencies = [
  "dicom-transfer-syntax-registry",
  "eframe",
  "egui",
+ "js-sys",
  "log",
  "reqwest",
  "rfd",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]

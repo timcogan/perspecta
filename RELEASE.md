@@ -51,3 +51,49 @@ local build ID, set `LOCAL_BUILD_TIMESTAMP=YYYYMMDDHHMMSS`.
   corresponding `vX.Y.Z` release has not already been published.
 - Release automation only supports plain `X.Y.Z` versions (no suffixes).
 - `dist-workspace.toml` does not need a version bump for application releases; it only changes when the dist tool version or release targets change.
+
+## Browser Preview and GitHub Pages
+
+The experimental browser preview is published by the independent `Pages`
+workflow from `master` only. A push that changes the site, Rust application
+code, Cargo metadata, or the web build scripts rebuilds the release WASM module
+and the Hugo site. This deployment does **not** create a tag or GitHub Release
+and does not require a `Cargo.toml` version bump. The workflow verifies that its
+checkout matches the triggering commit, then records the full commit in the
+same-origin asset manifest. The demo footer displays the short commit so the
+development build cannot be confused with a tagged desktop
+release. The viewer title uses the same seven-character commit as SemVer build
+metadata, for example `v0.5.3+web.51e863a`. A manual Pages run selected from
+another ref fails before building.
+
+For a local production-equivalent Pages build:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version "$(awk '/^name = "wasm-bindgen"$/ { found = 1; next } found && /^version = / { gsub(/"/, "", $3); print $3; exit }' Cargo.lock)" --locked
+make web-pages
+```
+
+The local build requires Hugo, `jq`, `strings`, and either `sha256sum` or
+`shasum`. `wasm-opt` from Binaryen is optional locally and is used automatically
+when it is installed. CI installs it for every Pages build. `make web-pages`
+writes only to `website/static/demo/assets`,
+`website/data/demo_assets.json`, and `website/public`; the underlying scripts
+reject command-line arguments and symlinked output locations.
+
+The build emits content-hashed JavaScript and WASM files, builds Hugo, and
+verifies that the published demo contains no source maps, debug sections,
+build-host filesystem paths, Google Analytics or consent bootstrap, enabled
+egui persistence, or externally hosted executable resources. Local builds also
+record their current commit and append `+dirty` in the footer when
+the source tree contains uncommitted changes; their viewer version similarly
+ends in `.dirty`. Pull requests run WASM Clippy with the toolchain pinned in
+`rust-toolchain.toml`; the Pages workflow uses that same toolchain. The web
+build intentionally disables default Cargo features because the native
+`openjp2` JPEG 2000 backend does not link on `wasm32-unknown-unknown`; desktop
+builds keep JPEG 2000 enabled by default.
+
+The demo CSP includes the SHA-256 hash of the inline file-picker stylesheet
+embedded by the exact `rfd` version in `Cargo.lock`. After an `rfd` upgrade,
+exercise the browser picker and update that hash if its embedded CSS changed;
+do not broaden `style-src` to allow arbitrary inline styles.
