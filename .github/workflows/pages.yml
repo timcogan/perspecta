@@ -105,7 +105,8 @@ jobs:
             echo "Could not determine the wasm-bindgen version from Cargo.lock." >&2
             exit 1
           fi
-          cargo binstall wasm-bindgen-cli --version "$version" --locked --no-confirm --disable-strategies compile
+          cargo binstall wasm-bindgen-cli --version "$version" --locked --force --no-confirm --disable-strategies compile
+          wasm-bindgen --version
 
       - name: Setup Hugo
         uses: peaceiris/actions-hugo@v3
