@@ -136,15 +136,7 @@ readonly BINDGEN_WASM="$BINDGEN_DIR/${OUT_NAME}_bg.wasm"
 [[ -f "$BINDGEN_JS" ]] || fail "wasm-bindgen did not emit $OUT_NAME.js"
 [[ -f "$BINDGEN_WASM" ]] || fail "wasm-bindgen did not emit ${OUT_NAME}_bg.wasm"
 
-readonly OPTIMIZED_WASM="$temp_dir/${OUT_NAME}_bg.wasm"
-if command -v wasm-opt >/dev/null 2>&1; then
-    wasm-opt -Oz --strip-debug "$BINDGEN_WASM" -o "$OPTIMIZED_WASM"
-else
-    echo "web asset build: wasm-opt is not installed; continuing without Binaryen optimization" >&2
-    cp -- "$BINDGEN_WASM" "$OPTIMIZED_WASM"
-fi
-
-wasm_sha256="$(sha256_file "$OPTIMIZED_WASM")"
+wasm_sha256="$(sha256_file "$BINDGEN_WASM")"
 wasm_filename="${OUT_NAME}_bg-${wasm_sha256:0:16}.wasm"
 
 readonly PATCHED_JS="$temp_dir/$OUT_NAME.js"
@@ -162,7 +154,7 @@ find "$ASSET_DIR" -maxdepth 1 -type f \
     \( -name "${OUT_NAME}-*.js" -o -name "${OUT_NAME}_bg-*.wasm" -o -name manifest.json \) \
     -delete
 install -m 0644 "$PATCHED_JS" "$ASSET_DIR/$js_filename"
-install -m 0644 "$OPTIMIZED_WASM" "$ASSET_DIR/$wasm_filename"
+install -m 0644 "$BINDGEN_WASM" "$ASSET_DIR/$wasm_filename"
 
 readonly TEMP_MANIFEST="$temp_dir/demo_assets.json"
 jq -n \

@@ -75,9 +75,9 @@ make web-pages
 ```
 
 The local build requires Hugo, `jq`, `strings`, and either `sha256sum` or
-`shasum`. `wasm-opt` from Binaryen is optional locally and is used automatically
-when it is installed. CI installs it for every Pages build. `make web-pages`
-writes only to `website/static/demo/assets`,
+`shasum`. The web package uses the WASM emitted by the matching `wasm-bindgen`
+CLI without a separate Binaryen optimization pass, so local and Pages builds
+produce equivalent modules. `make web-pages` writes only to `website/static/demo/assets`,
 `website/data/demo_assets.json`, and `website/public`; the underlying scripts
 reject command-line arguments and symlinked output locations.
 
