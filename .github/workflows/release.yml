@@ -1,7 +1,7 @@
 # This file is based on the cargo-dist GitHub Actions template.
 # It publishes artifacts to GitHub Releases when a version bump lands on the
-# default branch, pre-creating a draft release/tag before cargo-dist uploads
-# assets and publishes it.
+# default branch, building artifacts before cargo-dist uploads them to a single
+# validated draft release and publishes it.
 name: Release
 
 permissions:
@@ -168,15 +168,15 @@ jobs:
           path: plan-dist-manifest.json
 
   create-release:
-    needs: [plan]
-    if: ${{ needs.plan.outputs.publishing == 'true' && needs.plan.outputs.release_state != 'draft' }}
+    needs: [plan, build-local-artifacts, build-global-artifacts]
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') }}
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     permissions:
       contents: write
     steps:
-      - name: Create draft GitHub Release
+      - name: Create or reuse draft GitHub Release
         shell: bash
         env:
           GH_REPO: ${{ github.repository }}
@@ -190,6 +190,35 @@ jobs:
           printf '%s' "$PLAN_MANIFEST" > plan-dist-manifest.json
           title="$(jq -r '.announcement_title' plan-dist-manifest.json)"
           jq -r '.announcement_github_body' plan-dist-manifest.json > release-notes.md
+
+          gh api --paginate --slurp \
+            "repos/$GH_REPO/releases?per_page=100" > release-pages.json
+          matching_count="$(
+            jq --arg tag "$RELEASE_TAG" \
+              '[.[][] | select(.tag_name == $tag)] | length' \
+              release-pages.json
+          )"
+          if [[ "$matching_count" -gt 1 ]]; then
+            echo "multiple releases found for $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          if [[ "$matching_count" -eq 1 ]]; then
+            jq --arg tag "$RELEASE_TAG" \
+              '.[][] | select(.tag_name == $tag)' \
+              release-pages.json > matching-release.json
+            if ! jq -e '.draft == true' matching-release.json > /dev/null; then
+              echo "release $RELEASE_TAG was published after this workflow started" >&2
+              exit 1
+            fi
+            draft_target="$(jq -r '.target_commitish' matching-release.json)"
+            if [[ "$draft_target" != "$RELEASE_COMMIT" ]]; then
+              echo "draft for $RELEASE_TAG targets $draft_target, expected $RELEASE_COMMIT" >&2
+              exit 1
+            fi
+            echo "reusing draft release for $RELEASE_TAG"
+            exit 0
+          fi
 
           args=(
             release
@@ -209,8 +238,8 @@ jobs:
 
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
-    needs: [plan, create-release]
-    if: ${{ (needs.create-release.result == 'skipped' || needs.create-release.result == 'success') && fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    needs: [plan]
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
@@ -278,8 +307,8 @@ jobs:
             ${{ env.BUILD_MANIFEST_NAME }}
 
   build-global-artifacts:
-    needs: [plan, create-release, build-local-artifacts]
-    if: ${{ (needs.create-release.result == 'skipped' || needs.create-release.result == 'success') && fromJson(needs.plan.outputs.val).ci.github.global_artifacts != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    needs: [plan, build-local-artifacts]
+    if: ${{ always() && needs.plan.result == 'success' && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && fromJson(needs.plan.outputs.val).ci.github.global_artifacts != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
