@@ -2136,13 +2136,17 @@ fn close_defined_containers(
 
 fn should_degrade_private_binary_vr_to_un(vr: [u8; 2], value_len: u32, value_bytes: &[u8]) -> bool {
     match vr {
-        [b'F', b'D'] => value_len % 8 != 0 && bytes_look_like_dicom_numeric_text(value_bytes),
-        [b'F', b'L'] => value_len % 4 != 0 && bytes_look_like_dicom_numeric_text(value_bytes),
-        [b'S', b'S'] | [b'U', b'S'] | [b'O', b'W'] => value_len % 2 != 0,
-        [b'S', b'L'] | [b'U', b'L'] | [b'O', b'L'] | [b'O', b'F'] | [b'A', b'T'] => {
-            value_len % 4 != 0
+        [b'F', b'D'] => {
+            !value_len.is_multiple_of(8) && bytes_look_like_dicom_numeric_text(value_bytes)
         }
-        [b'S', b'V'] | [b'U', b'V'] | [b'O', b'D'] | [b'O', b'V'] => value_len % 8 != 0,
+        [b'F', b'L'] => {
+            !value_len.is_multiple_of(4) && bytes_look_like_dicom_numeric_text(value_bytes)
+        }
+        [b'S', b'S'] | [b'U', b'S'] | [b'O', b'W'] => !value_len.is_multiple_of(2),
+        [b'S', b'L'] | [b'U', b'L'] | [b'O', b'L'] | [b'O', b'F'] | [b'A', b'T'] => {
+            !value_len.is_multiple_of(4)
+        }
+        [b'S', b'V'] | [b'U', b'V'] | [b'O', b'D'] | [b'O', b'V'] => !value_len.is_multiple_of(8),
         _ => false,
     }
 }

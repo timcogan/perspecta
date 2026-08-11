@@ -163,30 +163,13 @@ enum FullMetadataLoadResult {
 #[cfg(any(test, target_arch = "wasm32"))]
 struct WebSelectedFile {
     name: String,
-    bytes: WebSelectedBytes,
-}
-
-#[cfg(any(test, target_arch = "wasm32"))]
-enum WebSelectedBytes {
-    #[cfg(target_arch = "wasm32")]
-    Shared(Arc<[u8]>),
-    Owned(Vec<u8>),
-}
-
-#[cfg(any(test, target_arch = "wasm32"))]
-impl WebSelectedBytes {
-    fn len(&self) -> usize {
-        match self {
-            #[cfg(target_arch = "wasm32")]
-            Self::Shared(bytes) => bytes.len(),
-            Self::Owned(bytes) => bytes.len(),
-        }
-    }
+    bytes: Vec<u8>,
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
 thread_local! {
     static WEB_DROP_BATCH: RefCell<Option<Vec<WebSelectedFile>>> = const { RefCell::new(None) };
+    static WEB_DROP_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
     static WEB_DROP_READ_IN_FLIGHT: Cell<bool> = const { Cell::new(false) };
     static WEB_DROP_REPAINT_CONTEXT: RefCell<Option<egui::Context>> = const { RefCell::new(None) };
 }
@@ -226,7 +209,9 @@ pub(crate) fn begin_web_drop_read() -> Result<WebDropReadGuard, String> {
             true
         }
     });
-    if !started || WEB_DROP_BATCH.with(|batch| batch.borrow().is_some()) {
+    let result_pending = WEB_DROP_BATCH.with(|batch| batch.borrow().is_some())
+        || WEB_DROP_ERROR.with(|error| error.borrow().is_some());
+    if !started || result_pending {
         if started {
             WEB_DROP_READ_IN_FLIGHT.with(|state| state.set(false));
         }
@@ -267,12 +252,18 @@ fn queue_web_selected_files(selected: Vec<WebSelectedFile>) -> Result<(), String
 pub(crate) fn queue_web_dropped_files(files: Vec<(String, Vec<u8>)>) -> Result<(), String> {
     let selected = files
         .into_iter()
-        .map(|(name, bytes)| WebSelectedFile {
-            name,
-            bytes: WebSelectedBytes::Owned(bytes),
-        })
+        .map(|(name, bytes)| WebSelectedFile { name, bytes })
         .collect();
     queue_web_selected_files(selected)
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn queue_web_drop_error(message: impl Into<String>) {
+    let batch_pending = WEB_DROP_BATCH.with(|batch| batch.borrow().is_some());
+    if !batch_pending {
+        WEB_DROP_ERROR.with(|error| error.replace(Some(message.into())));
+        request_web_drop_repaint();
+    }
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -281,8 +272,15 @@ fn take_web_drop_batch() -> Option<Vec<WebSelectedFile>> {
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
+fn take_web_drop_error() -> Option<String> {
+    WEB_DROP_ERROR.with(|error| error.borrow_mut().take())
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
 fn web_drop_busy() -> bool {
-    WEB_DROP_READ_IN_FLIGHT.with(Cell::get) || WEB_DROP_BATCH.with(|batch| batch.borrow().is_some())
+    WEB_DROP_READ_IN_FLIGHT.with(Cell::get)
+        || WEB_DROP_BATCH.with(|batch| batch.borrow().is_some())
+        || WEB_DROP_ERROR.with(|error| error.borrow().is_some())
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -1044,10 +1042,10 @@ impl DicomViewerApp {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn local_paths_from_dropped_files(dropped_files: &[egui::DroppedFile]) -> Vec<PathBuf> {
+    fn local_paths_from_dropped_files(dropped_files: &[egui::DroppedFileHandle]) -> Vec<PathBuf> {
         dropped_files
             .iter()
-            .filter_map(|file| file.path.clone())
+            .map(|file| file.path().to_path_buf())
             .collect()
     }
 
@@ -1077,20 +1075,16 @@ impl DicomViewerApp {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn apply_dropped_files(&mut self, dropped_files: &[egui::DroppedFile], ctx: &egui::Context) {
+    fn apply_dropped_files(
+        &mut self,
+        dropped_files: &[egui::DroppedFileHandle],
+        ctx: &egui::Context,
+    ) {
         if dropped_files.is_empty() {
             return;
         }
 
         let paths = Self::local_paths_from_dropped_files(dropped_files);
-        if paths.is_empty() {
-            let message = "Dropped items did not include readable local file paths.";
-            self.set_load_error(message);
-            log::warn!("{message}");
-            ctx.request_repaint();
-            return;
-        }
-
         log::info!("Opening {} dropped file(s).", paths.len());
         self.clear_load_error();
         self.queue_local_paths_open(paths);
@@ -1099,32 +1093,94 @@ impl DicomViewerApp {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn apply_dropped_files(&mut self, dropped_files: &[egui::DroppedFile], ctx: &egui::Context) {
+    fn apply_dropped_files(
+        &mut self,
+        dropped_files: &[egui::DroppedFileHandle],
+        ctx: &egui::Context,
+    ) {
         if dropped_files.is_empty() {
             return;
         }
 
-        let selected = dropped_files
-            .iter()
-            .filter_map(|file| {
-                file.bytes.as_ref().map(|bytes| WebSelectedFile {
-                    name: file.name.clone(),
-                    bytes: WebSelectedBytes::Shared(Arc::clone(bytes)),
-                })
-            })
-            .collect::<Vec<_>>();
-
-        if selected.is_empty() {
-            self.set_load_error("Dropped items did not include readable local file bytes.");
+        if self.is_loading() {
+            self.set_load_error(
+                "Perspecta is still opening the previous selection. Wait for it to finish, then try again.",
+            );
             ctx.request_repaint();
             return;
         }
 
-        self.open_web_selected_files(selected, ctx);
+        let mut pending = Vec::with_capacity(dropped_files.len());
+        let mut selected_sizes = Vec::with_capacity(dropped_files.len());
+        for dropped_file in dropped_files {
+            let Some(web_file) = dropped_file.web_file() else {
+                self.set_load_error("A dropped item was not a local browser file.");
+                ctx.request_repaint();
+                return;
+            };
+            let byte_len = match checked_web_file_size(web_file.size()) {
+                Ok(byte_len) => byte_len,
+                Err(message) => {
+                    self.set_load_error(message);
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            pending.push((Arc::clone(dropped_file), web_file.name(), byte_len));
+            selected_sizes.push(byte_len);
+        }
+        if let Err(message) =
+            checked_web_session_byte_total(self.web_session_bytes, selected_sizes.iter().copied())
+        {
+            self.set_load_error(message);
+            ctx.request_repaint();
+            return;
+        }
+
+        let drop_guard = match begin_web_drop_read() {
+            Ok(guard) => guard,
+            Err(message) => {
+                self.set_load_error(message);
+                ctx.request_repaint();
+                return;
+            }
+        };
+        self.clear_load_error();
+        ctx.set_cursor_icon(egui::CursorIcon::Progress);
+        wasm_bindgen_futures::spawn_local(async move {
+            let _drop_guard = drop_guard;
+            let mut selected = Vec::with_capacity(pending.len());
+            for (dropped_file, name, expected_len) in pending {
+                let bytes = match dropped_file.bytes_async().await {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        queue_web_drop_error("The browser could not read a dropped file.");
+                        return;
+                    }
+                };
+                if bytes.len() != expected_len {
+                    queue_web_drop_error(
+                        "A dropped file changed size while the browser was reading it.",
+                    );
+                    return;
+                }
+                selected.push((name, bytes));
+                crate::platform::yield_to_browser().await;
+            }
+            if let Err(message) = queue_web_dropped_files(selected) {
+                queue_web_drop_error(message);
+            }
+        });
+        ctx.request_repaint();
     }
 
     #[cfg(target_arch = "wasm32")]
     fn poll_web_drop_batch(&mut self, ctx: &egui::Context) {
+        if let Some(message) = take_web_drop_error() {
+            self.set_load_error(message);
+            ctx.request_repaint();
+            return;
+        }
         if let Some(selected) = take_web_drop_batch() {
             self.open_web_selected_files(selected, ctx);
         }
@@ -1229,7 +1285,7 @@ impl DicomViewerApp {
             let mut selected = Vec::with_capacity(handles.len());
             for handle in handles {
                 let name = handle.file_name();
-                let bytes = WebSelectedBytes::Owned(handle.read().await);
+                let bytes = handle.read().await;
                 selected.push(WebSelectedFile { name, bytes });
             }
             let _ = tx.send(Ok(selected));
@@ -1284,14 +1340,8 @@ impl DicomViewerApp {
             };
             self.web_next_source_id = next_source_id;
             let identity = format!("web-local:{source_id}:{byte_len}");
-            let source = match file.bytes {
-                WebSelectedBytes::Shared(bytes) => {
-                    DicomSource::from_memory_arc_with_identity(&file.name, identity, bytes)
-                }
-                WebSelectedBytes::Owned(bytes) => {
-                    DicomSource::from_memory_vec_with_identity(&file.name, identity, bytes)
-                }
-            };
+            let source =
+                DicomSource::from_memory_vec_with_identity(&file.name, identity, file.bytes);
             sources.push(source);
         }
 
@@ -4036,6 +4086,25 @@ mod tests {
         GSPS_SOP_CLASS_UID, PARAMETRIC_MAP_SOP_CLASS_UID,
     };
 
+    #[derive(Debug)]
+    struct TestDroppedFile {
+        path: PathBuf,
+    }
+
+    impl egui::DroppedFile for TestDroppedFile {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            fs::read(&self.path).map_err(|err| err.to_string())
+        }
+    }
+
+    fn test_dropped_file(path: impl Into<PathBuf>) -> egui::DroppedFileHandle {
+        Arc::new(TestDroppedFile { path: path.into() })
+    }
+
     fn test_texture(ctx: &egui::Context, name: &str) -> TextureHandle {
         ctx.load_texture(
             name,
@@ -4095,6 +4164,7 @@ mod tests {
     #[test]
     fn web_drop_queue_keeps_four_files_as_one_atomic_batch() {
         WEB_DROP_BATCH.with(|batch| batch.replace(None));
+        WEB_DROP_ERROR.with(|error| error.replace(None));
         WEB_DROP_READ_IN_FLIGHT.with(|state| state.set(false));
 
         let guard = begin_web_drop_read().expect("a fresh web drop should start");
@@ -4125,6 +4195,24 @@ mod tests {
             vec!["rcc.dcm", "lcc.dcm", "rmlo.dcm", "lmlo.dcm"]
         );
         assert!(batch.iter().all(|file| file.bytes.len() == 8));
+        assert!(!web_drop_busy());
+    }
+
+    #[test]
+    fn web_drop_error_remains_busy_until_the_app_takes_it() {
+        WEB_DROP_BATCH.with(|batch| batch.replace(None));
+        WEB_DROP_ERROR.with(|error| error.replace(None));
+        WEB_DROP_READ_IN_FLIGHT.with(|state| state.set(false));
+
+        let guard = begin_web_drop_read().expect("a fresh web drop should start");
+        queue_web_drop_error("The browser could not read a dropped file.");
+        drop(guard);
+
+        assert!(web_drop_busy());
+        assert_eq!(
+            take_web_drop_error().as_deref(),
+            Some("The browser could not read a dropped file.")
+        );
         assert!(!web_drop_busy());
     }
 
@@ -4840,20 +4928,10 @@ mod tests {
     }
 
     #[test]
-    fn local_paths_from_dropped_files_ignores_entries_without_paths() {
+    fn local_paths_from_dropped_files_preserves_handle_order() {
         let dropped_files = vec![
-            egui::DroppedFile {
-                path: Some(PathBuf::from("first.dcm")),
-                ..Default::default()
-            },
-            egui::DroppedFile {
-                name: "browser-upload.dcm".to_string(),
-                ..Default::default()
-            },
-            egui::DroppedFile {
-                path: Some(PathBuf::from("second.dcm")),
-                ..Default::default()
-            },
+            test_dropped_file("first.dcm"),
+            test_dropped_file("second.dcm"),
         ];
 
         assert_eq!(
@@ -4967,10 +5045,7 @@ mod tests {
     fn apply_dropped_files_queues_local_paths_for_open() {
         let ctx = egui::Context::default();
         let mut app = DicomViewerApp::default();
-        let dropped_files = vec![egui::DroppedFile {
-            path: Some(PathBuf::from("dropped.dcm")),
-            ..Default::default()
-        }];
+        let dropped_files = vec![test_dropped_file("dropped.dcm")];
 
         app.apply_dropped_files(&dropped_files, &ctx);
 
@@ -5021,24 +5096,6 @@ mod tests {
         assert!(app.mammo_load_receiver.is_none());
         assert!(app.mammo_load_sender.is_none());
         assert!(!app.history_pushed_for_active_group);
-    }
-
-    #[test]
-    fn apply_dropped_files_without_paths_sets_user_visible_error() {
-        let ctx = egui::Context::default();
-        let mut app = DicomViewerApp::default();
-        let dropped_files = vec![egui::DroppedFile {
-            name: "web-upload.dcm".to_string(),
-            ..Default::default()
-        }];
-
-        app.apply_dropped_files(&dropped_files, &ctx);
-
-        assert_eq!(
-            app.load_error_message.as_deref(),
-            Some("Dropped items did not include readable local file paths.")
-        );
-        assert!(app.pending_local_open_paths.is_none());
     }
 
     #[test]

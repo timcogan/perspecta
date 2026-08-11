@@ -6,7 +6,7 @@ resolver = "2"
 name = "perspecta"
 version = "0.5.3"
 edition = "2021"
-rust-version = "1.73"
+rust-version = "1.95"
 repository = "https://github.com/timcogan/perspecta"
 autobins = false
 default-run = "perspecta"
@@ -24,7 +24,6 @@ anyhow = "1.0"
 dicom-core = "0.10.0"
 dicom-object = "0.10.0"
 dicom-pixeldata = { version = "0.10.0", default-features = false, features = ["deflate", "jpeg", "rle"] }
-egui = "0.35"
 log = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -33,7 +32,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 rfd = "0.17"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "web_screen_reader"] }
+eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow", "web_screen_reader"] }
 js-sys = "0.3"
 rfd = { version = "0.17", default-features = false, features = ["file-handle-inner"] }
 wasm-bindgen = "0.2"
@@ -42,13 +41,13 @@ web-sys = { version = "0.3", features = ["Blob", "Document", "Element", "File", 
 web-time = "1.1"
 
 [target.'cfg(windows)'.dependencies]
-eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-eframe = { version = "0.35", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.36.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 
 [target.'cfg(not(any(windows, target_os = "linux", target_arch = "wasm32")))'.dependencies]
-eframe = "0.35"
+eframe = "0.36.1"
 
 [dev-dependencies]
 dicom-encoding = "0.10.0"
