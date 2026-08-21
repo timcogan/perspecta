@@ -2,9 +2,8 @@ use eframe::egui::{self, Align2, FontId, PointerButton};
 
 use crate::dicom::DicomImage;
 
-use super::{DicomViewerApp, PERSPECTA_BRAND_BLUE};
+use super::DicomViewerApp;
 
-const MEASUREMENT_COLOR: egui::Color32 = PERSPECTA_BRAND_BLUE;
 const MEASUREMENT_STROKE_WIDTH: f32 = 2.0;
 const MEASUREMENT_HANDLE_RADIUS: f32 = 4.0;
 const MEASUREMENT_LABEL_OFFSET_X: f32 = 8.0;
@@ -171,14 +170,15 @@ impl DicomViewerApp {
 
         let start = image_to_screen_pos(measurement.anchor_image_pos, image_rect, geometry);
         let end = image_to_screen_pos(measurement.live_image_pos, image_rect, geometry);
-        let stroke = egui::Stroke::new(MEASUREMENT_STROKE_WIDTH, MEASUREMENT_COLOR);
+        let measurement_color = self.secondary_color;
+        let stroke = egui::Stroke::new(MEASUREMENT_STROKE_WIDTH, measurement_color);
         painter.line_segment([start, end], stroke);
-        painter.circle_filled(start, MEASUREMENT_HANDLE_RADIUS, MEASUREMENT_COLOR);
-        painter.circle_filled(end, MEASUREMENT_HANDLE_RADIUS, MEASUREMENT_COLOR);
+        painter.circle_filled(start, MEASUREMENT_HANDLE_RADIUS, measurement_color);
+        painter.circle_filled(end, MEASUREMENT_HANDLE_RADIUS, measurement_color);
 
         let label = measurement_label_text(*measurement, geometry);
         let font_id = FontId::monospace(12.0);
-        let galley = painter.layout_no_wrap(label, font_id, MEASUREMENT_COLOR);
+        let galley = painter.layout_no_wrap(label, font_id, measurement_color);
         let padded_size = galley.size()
             + egui::vec2(
                 2.0 * MEASUREMENT_LABEL_PADDING_X,
@@ -189,7 +189,7 @@ impl DicomViewerApp {
         painter.galley(
             label_rect.min + egui::vec2(MEASUREMENT_LABEL_PADDING_X, MEASUREMENT_LABEL_PADDING_Y),
             galley,
-            MEASUREMENT_COLOR,
+            measurement_color,
         );
     }
 

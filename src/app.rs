@@ -72,7 +72,7 @@ const HISTORY_THUMB_MAX_DIM: usize = 96;
 const HISTORY_LIST_THUMB_MAX_DIM: f32 = 56.0;
 const DEFAULT_CINE_FPS: f32 = 24.0;
 const VALID_GROUP_SIZES: &[usize] = &[1, 2, 3, 4, 8];
-const PERSPECTA_BRAND_BLUE: egui::Color32 = egui::Color32::from_rgb(14, 165, 233);
+const DEFAULT_SECONDARY_COLOR: egui::Color32 = egui::Color32::from_rgb(14, 165, 233);
 const ICON_STROKE_WIDTH: f32 = 1.25;
 const CLOSE_ICON_SIZE_FACTOR: f32 = 0.36;
 #[cfg(not(target_arch = "wasm32"))]
@@ -109,6 +109,20 @@ struct WlOverlayLayout {
     slider_widget_width: f32,
     action_row_width: f32,
     area_width: f32,
+}
+
+struct AppSettings {
+    visible_metadata_fields: HashSet<String>,
+    secondary_color: egui::Color32,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            visible_metadata_fields: default_visible_metadata_fields(),
+            secondary_color: DEFAULT_SECONDARY_COLOR,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,6 +339,8 @@ pub struct DicomViewerApp {
     visible_metadata_fields: HashSet<String>,
     full_metadata_popup_open: bool,
     settings_path: Option<PathBuf>,
+    settings_window_open: bool,
+    secondary_color: egui::Color32,
     history_nonce: u64,
     pending_history_open_id: Option<String>,
     pending_history_open_armed: bool,
@@ -396,12 +412,12 @@ impl Default for DicomViewerApp {
 
 impl DicomViewerApp {
     pub fn new(initial_request: Option<LaunchRequest>) -> Self {
-        let settings_path = metadata_settings_file_path();
+        let settings_path = settings_file_path();
         let (full_metadata_sender, full_metadata_receiver) = mpsc::channel();
-        let visible_metadata_fields = settings_path
+        let settings = settings_path
             .as_deref()
-            .and_then(load_visible_metadata_fields)
-            .unwrap_or_else(default_visible_metadata_fields);
+            .map(load_settings)
+            .unwrap_or_default();
 
         Self {
             image: None,
@@ -411,9 +427,11 @@ impl DicomViewerApp {
             mammo_group: Vec::new(),
             mammo_selected_index: 0,
             history_entries: Vec::new(),
-            visible_metadata_fields,
+            visible_metadata_fields: settings.visible_metadata_fields,
             full_metadata_popup_open: false,
             settings_path,
+            settings_window_open: false,
+            secondary_color: settings.secondary_color,
             history_nonce: 0,
             pending_history_open_id: None,
             pending_history_open_armed: false,
@@ -887,11 +905,102 @@ impl DicomViewerApp {
                 }
             });
         if changed {
-            self.persist_metadata_settings();
+            self.persist_settings();
         }
     }
 
-    fn persist_metadata_settings(&self) {
+    fn with_centered_popup_window(
+        ctx: &egui::Context,
+        popup_open: &mut bool,
+        popup_id: egui::Id,
+        title: &'static str,
+        default_size: egui::Vec2,
+        resizable: bool,
+        add_contents: impl FnOnce(&mut egui::Ui),
+    ) {
+        let previous_visuals = ctx.global_style().visuals.clone();
+        let mut popup_visuals = previous_visuals.clone();
+        popup_visuals.widgets.open.weak_bg_fill = egui::Color32::BLACK;
+        popup_visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+        ctx.set_visuals(popup_visuals);
+
+        egui::Window::new(
+            egui::RichText::new(title)
+                .size(TITLE_TEXT_SIZE)
+                .color(previous_visuals.text_color()),
+        )
+        .id(popup_id)
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .collapsible(false)
+        .default_size(default_size)
+        .open(popup_open)
+        .resizable(resizable)
+        .show(ctx, add_contents);
+        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, popup_id));
+
+        ctx.set_visuals(previous_visuals);
+    }
+
+    fn show_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.settings_window_open {
+            return;
+        }
+
+        let mut window_open = self.settings_window_open;
+        let mut changed = false;
+        Self::with_centered_popup_window(
+            ctx,
+            &mut window_open,
+            egui::Id::new("settings-popup"),
+            "Settings",
+            egui::vec2(252.0, 72.0),
+            false,
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Secondary color");
+                    changed |= egui::color_picker::color_edit_button_srgba(
+                        ui,
+                        &mut self.secondary_color,
+                        egui::color_picker::Alpha::Opaque,
+                    )
+                    .changed();
+                    ui.monospace(secondary_color_hex(self.secondary_color));
+                    let refresh_button_size = ui.spacing().interact_size.y;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_sized(
+                                [refresh_button_size, refresh_button_size],
+                                egui::Button::new(egui::RichText::new("↺").size(14.0))
+                                    .fill(egui::Color32::BLACK)
+                                    .stroke(egui::Stroke::NONE),
+                            )
+                            .on_hover_text("Reset secondary color")
+                            .clicked()
+                        {
+                            changed |= self.reset_secondary_color();
+                        }
+                    });
+                });
+            },
+        );
+        self.settings_window_open = window_open;
+
+        if changed {
+            self.persist_settings();
+            ctx.request_repaint();
+        }
+    }
+
+    fn reset_secondary_color(&mut self) -> bool {
+        if self.secondary_color == DEFAULT_SECONDARY_COLOR {
+            return false;
+        }
+        self.secondary_color = DEFAULT_SECONDARY_COLOR;
+        true
+    }
+
+    fn persist_settings(&self) {
         let Some(path) = self.settings_path.as_ref() else {
             return;
         };
@@ -907,7 +1016,7 @@ impl DicomViewerApp {
         }
 
         let fields = ordered_visible_metadata_fields(&self.visible_metadata_fields);
-        let contents = render_settings_toml(&fields);
+        let contents = render_settings_toml(&fields, self.secondary_color);
         if let Err(err) = fs::write(path, contents) {
             log::warn!("Could not write settings file: {err}");
         }
@@ -1930,6 +2039,7 @@ impl DicomViewerApp {
         image_rect: egui::Rect,
         image: &DicomImage,
         frame_index: usize,
+        secondary_color: egui::Color32,
     ) {
         let Some(overlay) = image.gsps_overlay.as_ref() else {
             return;
@@ -1941,7 +2051,7 @@ impl DicomViewerApp {
             return;
         };
 
-        let stroke = egui::Stroke::new(1.6, PERSPECTA_BRAND_BLUE);
+        let stroke = egui::Stroke::new(1.6, secondary_color);
         let marker_half = (image_rect.width().min(image_rect.height()) * 0.008).clamp(2.0, 5.0);
 
         for graphic in overlay.graphics_for_frame(stored_frame_index) {
@@ -1954,6 +2064,7 @@ impl DicomViewerApp {
         image_rect: egui::Rect,
         image: &DicomImage,
         frame_index: usize,
+        secondary_color: egui::Color32,
     ) {
         let Some(overlay) = image.sr_overlay.as_ref() else {
             return;
@@ -1965,14 +2076,14 @@ impl DicomViewerApp {
             return;
         };
 
-        let stroke = egui::Stroke::new(1.6, PERSPECTA_BRAND_BLUE);
+        let stroke = egui::Stroke::new(1.6, secondary_color);
         let marker_half = (image_rect.width().min(image_rect.height()) * 0.008).clamp(2.0, 5.0);
 
         for graphic in overlay.visible_graphics_for_frame(stored_frame_index) {
             Self::draw_overlay_graphic(painter, image_rect, image, graphic, stroke, marker_half);
         }
         for label in overlay.visible_labels_for_frame(stored_frame_index) {
-            Self::draw_sr_overlay_label(painter, image_rect, image, label);
+            Self::draw_sr_overlay_label(painter, image_rect, image, label, secondary_color);
         }
     }
 
@@ -2074,6 +2185,7 @@ impl DicomViewerApp {
         image_rect: egui::Rect,
         image: &DicomImage,
         label: &SrOverlayLabel,
+        secondary_color: egui::Color32,
     ) {
         if label.lines.is_empty() || image_rect.width() <= 0.0 || image_rect.height() <= 0.0 {
             return;
@@ -2092,14 +2204,7 @@ impl DicomViewerApp {
         let galleys = label
             .lines
             .iter()
-            .map(|line| {
-                painter.layout(
-                    line.clone(),
-                    font_id.clone(),
-                    PERSPECTA_BRAND_BLUE,
-                    wrap_width,
-                )
-            })
+            .map(|line| painter.layout(line.clone(), font_id.clone(), secondary_color, wrap_width))
             .collect::<Vec<_>>();
         let max_width = galleys
             .iter()
@@ -2120,7 +2225,7 @@ impl DicomViewerApp {
         let mut text_pos = label_rect.min + text_padding;
         for galley in galleys {
             let galley_height = galley.size().y;
-            text_painter.galley(text_pos, galley, PERSPECTA_BRAND_BLUE);
+            text_painter.galley(text_pos, galley, secondary_color);
             text_pos.y += SR_OVERLAY_LABEL_LINE_GAP + galley_height;
         }
     }
@@ -2544,7 +2649,7 @@ impl DicomViewerApp {
                                     .is_some();
                                 let stroke_color =
                                     if index == self.mammo_selected_index && has_loaded_image {
-                                        PERSPECTA_BRAND_BLUE
+                                        self.secondary_color
                                     } else {
                                         egui::Color32::BLACK
                                     };
@@ -2769,12 +2874,14 @@ impl DicomViewerApp {
                                                         image_rect,
                                                         &viewport.image,
                                                         viewport.current_frame,
+                                                        self.secondary_color,
                                                     );
                                                     Self::draw_sr_overlay(
                                                         &painter,
                                                         image_rect,
                                                         &viewport.image,
                                                         viewport.current_frame,
+                                                        self.secondary_color,
                                                     );
                                                 }
                                             }
@@ -3051,6 +3158,10 @@ impl eframe::App for DicomViewerApp {
                                         ui.menu_button("Select Metadata Fields", |ui| {
                                             self.show_metadata_field_options_menu(ui);
                                         });
+                                        if ui.button("Settings").clicked() {
+                                            self.settings_window_open = true;
+                                            ui.close();
+                                        }
                                     },
                                 );
                             Self::register_icon_button_accessibility(
@@ -3735,12 +3846,14 @@ impl eframe::App for DicomViewerApp {
                                     image_rect,
                                     image,
                                     self.current_frame,
+                                    self.secondary_color,
                                 );
                                 Self::draw_sr_overlay(
                                     &painter,
                                     image_rect,
                                     image,
                                     self.current_frame,
+                                    self.secondary_color,
                                 );
                             }
                         }
@@ -3771,6 +3884,7 @@ impl eframe::App for DicomViewerApp {
         });
 
         self.show_metadata_ui(ctx);
+        self.show_settings_window(ctx);
 
         if has_history {
             let overlay_height = (ctx.content_rect().height() * 0.62).max(160.0);
@@ -3956,7 +4070,7 @@ fn ordered_visible_metadata_fields(visible: &HashSet<String>) -> Vec<String> {
         .collect()
 }
 
-fn metadata_settings_file_path() -> Option<PathBuf> {
+fn settings_file_path() -> Option<PathBuf> {
     #[cfg(target_arch = "wasm32")]
     {
         None
@@ -3993,33 +4107,67 @@ fn metadata_settings_file_path() -> Option<PathBuf> {
     }
 }
 
-fn load_visible_metadata_fields(path: &Path) -> Option<HashSet<String>> {
-    let text = fs::read_to_string(path).ok()?;
-    let parsed = parse_visible_metadata_fields_from_toml(&text)?;
-    let filtered = parsed
-        .iter()
-        .filter(|field| METADATA_FIELD_NAMES.contains(&field.as_str()))
-        .cloned()
-        .collect::<HashSet<_>>();
-
-    if parsed.is_empty() {
-        return Some(filtered);
-    }
-    if filtered.is_empty() {
-        return None;
-    }
-    Some(filtered)
+fn load_settings(path: &Path) -> AppSettings {
+    let Ok(text) = fs::read_to_string(path) else {
+        return AppSettings::default();
+    };
+    parse_settings_toml(&text)
 }
 
-fn render_settings_toml(fields: &[String]) -> String {
+fn parse_settings_toml(text: &str) -> AppSettings {
+    let mut settings = AppSettings::default();
+    if let Some(parsed) = parse_visible_metadata_fields_from_toml(text) {
+        let filtered = parsed
+            .iter()
+            .filter(|field| METADATA_FIELD_NAMES.contains(&field.as_str()))
+            .cloned()
+            .collect::<HashSet<_>>();
+        if parsed.is_empty() || !filtered.is_empty() {
+            settings.visible_metadata_fields = filtered;
+        }
+    }
+    if let Some(secondary_color) = parse_secondary_color_from_toml(text) {
+        settings.secondary_color = secondary_color;
+    }
+
+    settings
+}
+
+fn render_settings_toml(fields: &[String], secondary_color: egui::Color32) -> String {
     let mut text = String::from("visible_metadata_fields = [\n");
     for field in fields {
         text.push_str("  \"");
         text.push_str(&escape_toml_string(field));
         text.push_str("\",\n");
     }
-    text.push_str("]\n");
+    text.push_str("]\nsecondary_color = \"");
+    text.push_str(&secondary_color_hex(secondary_color));
+    text.push_str("\"\n");
     text
+}
+
+fn parse_secondary_color_from_toml(text: &str) -> Option<egui::Color32> {
+    let value = text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "secondary_color").then_some(value.trim())
+    })?;
+    let value = value.strip_prefix('"')?.strip_suffix('"')?;
+    parse_secondary_color_hex(value)
+}
+
+fn parse_secondary_color_hex(value: &str) -> Option<egui::Color32> {
+    let hex = value.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let red = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let green = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let blue = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(egui::Color32::from_rgb(red, green, blue))
+}
+
+fn secondary_color_hex(color: egui::Color32) -> String {
+    format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())
 }
 
 fn parse_visible_metadata_fields_from_toml(text: &str) -> Option<Vec<String>> {
@@ -4854,19 +5002,25 @@ mod tests {
     }
 
     #[test]
-    fn metadata_settings_toml_roundtrip() {
+    fn settings_toml_roundtrip_preserves_metadata_and_secondary_color() {
         let selected = vec![
             "PatientName".to_string(),
             "StudyDescription".to_string(),
             "Modality".to_string(),
         ];
-        let toml = render_settings_toml(&selected);
+        let secondary_color = egui::Color32::from_rgb(194, 65, 12);
+        let toml = render_settings_toml(&selected, secondary_color);
         let parsed = parse_visible_metadata_fields_from_toml(&toml).expect("TOML should parse");
         assert_eq!(parsed, selected);
+        assert_eq!(
+            parse_secondary_color_from_toml(&toml),
+            Some(secondary_color)
+        );
+        assert!(toml.contains("secondary_color = \"#C2410C\""));
     }
 
     #[test]
-    fn load_visible_metadata_fields_filters_unknown_values() {
+    fn load_settings_filters_unknown_metadata_and_loads_secondary_color() {
         let path = std::env::temp_dir().join(format!(
             "perspecta-settings-test-{}-{}.toml",
             std::process::id(),
@@ -4875,14 +5029,53 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let toml = "visible_metadata_fields = [\"PatientName\", \"UnknownField\"]\n";
+        let toml = concat!(
+            "visible_metadata_fields = [\"PatientName\", \"UnknownField\"]\n",
+            "secondary_color = \"#123ABC\"\n"
+        );
         fs::write(&path, toml).expect("should write temp settings");
 
-        let loaded = load_visible_metadata_fields(&path).expect("settings should load");
-        assert!(loaded.contains("PatientName"));
-        assert!(!loaded.contains("UnknownField"));
+        let loaded = load_settings(&path);
+        assert!(loaded.visible_metadata_fields.contains("PatientName"));
+        assert!(!loaded.visible_metadata_fields.contains("UnknownField"));
+        assert_eq!(
+            loaded.secondary_color,
+            egui::Color32::from_rgb(0x12, 0x3A, 0xBC)
+        );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_or_invalid_secondary_color_uses_default() {
+        let legacy = "visible_metadata_fields = [\"PatientName\"]\n";
+        let invalid = concat!(
+            "visible_metadata_fields = [\"PatientName\"]\n",
+            "secondary_color = \"#12345Z\"\n"
+        );
+
+        let legacy_settings = parse_settings_toml(legacy);
+        let invalid_settings = parse_settings_toml(invalid);
+        assert_eq!(legacy_settings.secondary_color, DEFAULT_SECONDARY_COLOR);
+        assert_eq!(invalid_settings.secondary_color, DEFAULT_SECONDARY_COLOR);
+        assert!(legacy_settings
+            .visible_metadata_fields
+            .contains("PatientName"));
+        assert!(invalid_settings
+            .visible_metadata_fields
+            .contains("PatientName"));
+    }
+
+    #[test]
+    fn reset_secondary_color_restores_default() {
+        let mut app = DicomViewerApp {
+            secondary_color: egui::Color32::from_rgb(255, 0, 0),
+            ..Default::default()
+        };
+
+        assert!(app.reset_secondary_color());
+        assert_eq!(app.secondary_color, DEFAULT_SECONDARY_COLOR);
+        assert!(!app.reset_secondary_color());
     }
 
     #[test]
