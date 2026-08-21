@@ -1296,7 +1296,7 @@ impl DicomViewerApp {
                     for (index, entry) in self.history_entries.iter().enumerate() {
                         let is_current = current_history_id == Some(entry.id.as_str());
                         let stroke_color = if is_current {
-                            PERSPECTA_BRAND_BLUE
+                            self.secondary_color
                         } else {
                             egui::Color32::from_gray(35)
                         };

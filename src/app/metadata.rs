@@ -310,28 +310,15 @@ impl DicomViewerApp {
             (screen_rect.height() * 0.76).clamp(360.0, 760.0),
         );
 
-        let previous_visuals = ctx.global_style().visuals.clone();
-        let mut popup_visuals = previous_visuals.clone();
-        popup_visuals.widgets.open.weak_bg_fill = egui::Color32::BLACK;
-        popup_visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
-        ctx.set_visuals(popup_visuals);
-
-        egui::Window::new(
-            egui::RichText::new("Metadata fields")
-                .size(TITLE_TEXT_SIZE)
-                .color(previous_visuals.text_color()),
-        )
-        .id(popup_id)
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .collapsible(false)
-        .default_size(default_size)
-        .open(popup_open)
-        .resizable(true)
-        .show(ctx, add_contents);
-        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, popup_id));
-
-        ctx.set_visuals(previous_visuals);
+        Self::with_centered_popup_window(
+            ctx,
+            popup_open,
+            popup_id,
+            "Metadata fields",
+            default_size,
+            true,
+            add_contents,
+        );
     }
 
     fn show_full_metadata_fields(

@@ -62,6 +62,7 @@ Its primary purpose is consistency during development, not full architecture cov
 27. The browser preview MUST enforce 512 MiB per file, 1 GiB of uniquely retained input bytes, and 192,000,000 retained decoded pixels using checked preflight accounting. Decode dimensions, caches, and reservations MUST remain bounded by actual resident data, and the active study MUST NOT be evicted implicitly.
 28. Browser builds MUST remain single-threaded on Glow/WebGL, use `platform::MonotonicInstant` for shared elapsed-time state, and exclude browser-incompatible JPEG 2000/JPEG-LS codecs without changing desktop defaults.
 29. GitHub Pages MUST build from the exact triggering `master` commit and publish that commit identity in the artifact, footer, and `+web.<7-hex>` display version. Local builds MUST disclose a dirty source tree instead of presenting it as clean.
+30. The configurable secondary color MUST cover live measurements, selected image/history borders, and GSPS/SR graphics and labels. Desktop builds persist it with the existing user settings; browser builds keep it only for the current session.
 
 ## Change Rules
 
