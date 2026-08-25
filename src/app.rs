@@ -219,8 +219,25 @@ impl KeyboardShortcuts {
 }
 
 fn consume_unmodified_shortcut(input: &mut egui::InputState, key: egui::Key) -> bool {
-    input.modifiers.matches_exact(egui::Modifiers::NONE)
-        && input.consume_key(egui::Modifiers::NONE, key)
+    if !input.modifiers.matches_exact(egui::Modifiers::NONE) {
+        return false;
+    }
+
+    let mut consumed = false;
+    input.events.retain(|event| {
+        let matches = matches!(
+            event,
+            egui::Event::Key {
+                key: event_key,
+                modifiers,
+                pressed: true,
+                ..
+            } if *event_key == key && modifiers.matches_exact(egui::Modifiers::NONE)
+        );
+        consumed |= matches;
+        !matches
+    });
+    consumed
 }
 
 struct AppSettings {
@@ -5667,6 +5684,48 @@ mod tests {
             configurable_shortcut_results(egui::Modifiers::ALT),
             [false; 4]
         );
+    }
+
+    #[test]
+    fn configurable_shortcut_does_not_consume_shifted_event_after_shift_release() {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            events: vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                egui::Event::Key {
+                    key: egui::Key::C,
+                    physical_key: Some(egui::Key::C),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+            ..Default::default()
+        };
+        let mut consumed = false;
+        let mut shifted_event_remains = false;
+
+        ctx.run_ui(raw_input, |ui| {
+            ui.input_mut(|input| {
+                consumed = consume_unmodified_shortcut(input, egui::Key::C);
+                shifted_event_remains = input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::C,
+                            modifiers,
+                            pressed: true,
+                            ..
+                        } if modifiers.matches_exact(egui::Modifiers::SHIFT)
+                    )
+                });
+            });
+        })
+        .drop_without_applying_deltas();
+
+        assert!(!consumed);
+        assert!(shifted_event_remains);
     }
 
     #[test]
