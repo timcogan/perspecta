@@ -225,7 +225,7 @@ make dev
 
 ## Citation
 
-If you use Perspecta in academic work, please cite the associated engrXiv preprint:
+If you use Perspecta in your research, please consider citing the associated engrXiv preprint:
 
 Cogan, T. C. (2026). _Perspecta: A Minimalist, Launch-Driven Desktop DICOM Viewer for Targeted Review_. engrXiv. https://engrxiv.org/preprint/view/7224
 

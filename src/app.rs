@@ -1235,7 +1235,12 @@ impl DicomViewerApp {
             ctx.request_repaint();
             return;
         }
-        if modifiers.alt || modifiers.ctrl || modifiers.command || modifiers.mac_cmd {
+        if modifiers.alt
+            || modifiers.ctrl
+            || modifiers.shift
+            || modifiers.command
+            || modifiers.mac_cmd
+        {
             self.shortcut_capture_error =
                 Some("Modifier combinations are not supported; press one key.".to_string());
             ctx.request_repaint();
@@ -5571,6 +5576,40 @@ mod tests {
         );
         assert_eq!(app.shortcut_capture, None);
         assert_eq!(app.shortcut_capture_error, None);
+    }
+
+    #[test]
+    fn shortcut_capture_rejects_shifted_keys() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            settings_path: None,
+            keyboard_shortcuts: KeyboardShortcuts::default(),
+            shortcut_capture: Some(ShortcutAction::ToggleCine),
+            ..Default::default()
+        };
+        let raw_input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::P,
+                physical_key: Some(egui::Key::P),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+            ..Default::default()
+        };
+
+        ctx.run_ui(raw_input, |ui| app.process_shortcut_capture(ui.ctx()))
+            .drop_without_applying_deltas();
+
+        assert_eq!(
+            app.keyboard_shortcuts.key(ShortcutAction::ToggleCine),
+            egui::Key::C
+        );
+        assert_eq!(app.shortcut_capture, Some(ShortcutAction::ToggleCine));
+        assert_eq!(
+            app.shortcut_capture_error.as_deref(),
+            Some("Modifier combinations are not supported; press one key.")
+        );
     }
 
     #[test]
