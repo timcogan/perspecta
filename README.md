@@ -30,15 +30,15 @@ Want to try Perspecta without installing it? [Open the browser demo](https://per
 - Decode DICOM `PixelData` through `dicom-pixeldata` (including encapsulated data).
 - JPEG 2000 support by default via `openjp2`; optional JPEG-LS support via the `jpeg_ls` feature and `charls`.
 - Real-time window/level controls for grayscale workflows.
-- Multi-frame cine playback (`C` key or UI control).
-- GSPS (Grayscale Softcopy Presentation State) overlay support with manual toggle (`G` key, off by default).
+- Multi-frame cine playback (`C` by default, configurable in Settings, or UI control).
+- GSPS (Grayscale Softcopy Presentation State) overlay support with manual toggle (`G` by default, configurable in Settings, and off by default).
 - Mammography CAD SR overlay support on matching images when the SR provides vector marks, with short finding text rendered alongside visible geometry.
 - DICOM Parametric Map support for local files, including heatmap overlay on matching source images and standalone opening when no explicit source match is present.
 - Structured Report (SR) DICOM support with a dedicated text/document view.
 - Live distance measurement with DICOM pixel spacing support when available (`mm`, fallback to `px`).
 - Mouse-wheel zoom + drag pan in single-image and multi-view (`1x2` / `1x3` / `2x2` / `2x4`) mammo views.
 - Typical DICOM mouse conventions (single modifier): `Shift + wheel` for frame navigation and `Shift + drag` for window/level in multi-view layouts.
-- Metadata side panel for quick inspection, with a full-field popup for the active object (`V`).
+- Metadata side panel for quick inspection, with a full-field popup for the active object (`V` by default, configurable in Settings).
 - Launch through a custom URL scheme (`perspecta://...`).
 - Launch directly from DICOMweb (study/series/instance aware).
 
@@ -152,10 +152,12 @@ This writes a desktop entry under `~/.local/share/applications`.
 
 ## Keyboard Shortcuts
 
-- `C`: toggle cine mode
-- `G`: toggle image overlay (GSPS, Mammography CAD SR marks, or a matching Parametric Map, when available)
-- `N`: jump to the next image/frame with an overlay
-- `V`: open or close the full metadata field popup for the active object
+The single-key shortcuts below are defaults. Change or individually reset them in **Settings**, or use **Reset all** to restore both the shortcuts and secondary color. Reserved navigation and close shortcuts cannot be reassigned.
+
+- `C` (default): toggle cine mode
+- `G` (default): toggle image overlay (GSPS, Mammography CAD SR marks, or a matching Parametric Map, when available)
+- `N` (default): jump to the next image/frame with an overlay
+- `V` (default): open or close the full metadata field popup for the active object
 - `Esc`: exit live measurement mode; if no measurement is active, close the full metadata popup
 - `Tab`: next history item
 - `Shift+Tab`: previous history item
