@@ -218,6 +218,11 @@ impl KeyboardShortcuts {
     }
 }
 
+fn consume_unmodified_shortcut(input: &mut egui::InputState, key: egui::Key) -> bool {
+    input.modifiers.matches_exact(egui::Modifiers::NONE)
+        && input.consume_key(egui::Modifiers::NONE, key)
+}
+
 struct AppSettings {
     visible_metadata_fields: HashSet<String>,
     secondary_color: egui::Color32,
@@ -3329,21 +3334,21 @@ impl eframe::App for DicomViewerApp {
             } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
                 history_cycle_direction = Some(1);
             }
-            toggle_cine_pressed = input.consume_key(
-                egui::Modifiers::NONE,
+            toggle_cine_pressed = consume_unmodified_shortcut(
+                input,
                 self.keyboard_shortcuts.key(ShortcutAction::ToggleCine),
             );
-            toggle_overlay_pressed = input.consume_key(
-                egui::Modifiers::NONE,
+            toggle_overlay_pressed = consume_unmodified_shortcut(
+                input,
                 self.keyboard_shortcuts.key(ShortcutAction::ToggleOverlay),
             );
-            next_overlay_pressed = input.consume_key(
-                egui::Modifiers::NONE,
+            next_overlay_pressed = consume_unmodified_shortcut(
+                input,
                 self.keyboard_shortcuts.key(ShortcutAction::NextOverlay),
             );
             if self.can_toggle_full_metadata_popup() {
-                toggle_metadata_pressed = input.consume_key(
-                    egui::Modifiers::NONE,
+                toggle_metadata_pressed = consume_unmodified_shortcut(
+                    input,
                     self.keyboard_shortcuts.key(ShortcutAction::ToggleMetadata),
                 );
             }
@@ -4646,6 +4651,42 @@ mod tests {
         );
     }
 
+    fn configurable_shortcut_results(modifiers: egui::Modifiers) -> [bool; 4] {
+        let ctx = egui::Context::default();
+        let shortcuts = KeyboardShortcuts {
+            toggle_cine: egui::Key::P,
+            toggle_overlay: egui::Key::O,
+            next_overlay: egui::Key::N,
+            toggle_metadata: egui::Key::M,
+        };
+        let raw_input = egui::RawInput {
+            events: std::iter::once(egui::Event::ModifiersChanged(modifiers))
+                .chain(
+                    ShortcutAction::ALL
+                        .into_iter()
+                        .map(|action| egui::Event::Key {
+                            key: shortcuts.key(action),
+                            physical_key: Some(shortcuts.key(action)),
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                        }),
+                )
+                .collect(),
+            ..Default::default()
+        };
+        let mut results = [false; 4];
+
+        ctx.run_ui(raw_input, |ui| {
+            results = ShortcutAction::ALL.map(|action| {
+                ui.input_mut(|input| consume_unmodified_shortcut(input, shortcuts.key(action)))
+            });
+        })
+        .drop_without_applying_deltas();
+
+        results
+    }
+
     #[test]
     fn web_byte_limits_accept_exact_file_and_session_boundaries() {
         assert_eq!(
@@ -5609,6 +5650,22 @@ mod tests {
         assert_eq!(
             app.shortcut_capture_error.as_deref(),
             Some("Modifier combinations are not supported; press one key.")
+        );
+    }
+
+    #[test]
+    fn configurable_shortcuts_require_exactly_no_modifiers() {
+        assert_eq!(
+            configurable_shortcut_results(egui::Modifiers::NONE),
+            [true; 4]
+        );
+        assert_eq!(
+            configurable_shortcut_results(egui::Modifiers::SHIFT),
+            [false; 4]
+        );
+        assert_eq!(
+            configurable_shortcut_results(egui::Modifiers::ALT),
+            [false; 4]
         );
     }
 
