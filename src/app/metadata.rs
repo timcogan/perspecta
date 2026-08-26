@@ -64,6 +64,7 @@ impl DicomViewerApp {
     pub(super) fn show_metadata_ui(&mut self, ctx: &egui::Context) {
         let has_full_metadata = self.has_active_full_metadata();
         let toggle_enabled = has_full_metadata && self.can_toggle_full_metadata_popup();
+        let toggle_shortcut = self.keyboard_shortcuts.key(ShortcutAction::ToggleMetadata);
         let open_requested = self
             .active_metadata()
             .map(|metadata| {
@@ -72,6 +73,7 @@ impl DicomViewerApp {
                     metadata,
                     &self.visible_metadata_fields,
                     toggle_enabled,
+                    toggle_shortcut,
                 )
             })
             .unwrap_or(false);
@@ -193,6 +195,7 @@ impl DicomViewerApp {
         metadata: &[(String, String)],
         visible_metadata_fields: &HashSet<String>,
         toggle_enabled: bool,
+        toggle_shortcut: egui::Key,
     ) -> bool {
         let overlay_height = (ctx.content_rect().height() * 0.62).max(180.0);
         let mut open_requested = false;
@@ -222,7 +225,9 @@ impl DicomViewerApp {
                         }
 
                         ui.add_space(ui.spacing().item_spacing.y);
-                        if Self::metadata_overlay_action(ui, "View all fields (V)", toggle_enabled)
+                        let action_label =
+                            format!("View all fields ({})", toggle_shortcut.symbol_or_name());
+                        if Self::metadata_overlay_action(ui, &action_label, toggle_enabled)
                             .clicked()
                         {
                             open_requested = true;

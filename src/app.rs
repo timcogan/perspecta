@@ -111,9 +111,139 @@ struct WlOverlayLayout {
     area_width: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShortcutAction {
+    ToggleCine,
+    ToggleOverlay,
+    NextOverlay,
+    ToggleMetadata,
+}
+
+impl ShortcutAction {
+    const ALL: [Self; 4] = [
+        Self::ToggleCine,
+        Self::ToggleOverlay,
+        Self::NextOverlay,
+        Self::ToggleMetadata,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ToggleCine => "Toggle cine mode",
+            Self::ToggleOverlay => "Toggle image overlay",
+            Self::NextOverlay => "Next image/frame with overlay",
+            Self::ToggleMetadata => "Toggle full metadata",
+        }
+    }
+
+    const fn setting_name(self) -> &'static str {
+        match self {
+            Self::ToggleCine => "shortcut_toggle_cine",
+            Self::ToggleOverlay => "shortcut_toggle_overlay",
+            Self::NextOverlay => "shortcut_next_overlay",
+            Self::ToggleMetadata => "shortcut_toggle_metadata",
+        }
+    }
+
+    const fn default_key(self) -> egui::Key {
+        match self {
+            Self::ToggleCine => egui::Key::C,
+            Self::ToggleOverlay => egui::Key::G,
+            Self::NextOverlay => egui::Key::N,
+            Self::ToggleMetadata => egui::Key::V,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyboardShortcuts {
+    toggle_cine: egui::Key,
+    toggle_overlay: egui::Key,
+    next_overlay: egui::Key,
+    toggle_metadata: egui::Key,
+}
+
+impl Default for KeyboardShortcuts {
+    fn default() -> Self {
+        Self {
+            toggle_cine: ShortcutAction::ToggleCine.default_key(),
+            toggle_overlay: ShortcutAction::ToggleOverlay.default_key(),
+            next_overlay: ShortcutAction::NextOverlay.default_key(),
+            toggle_metadata: ShortcutAction::ToggleMetadata.default_key(),
+        }
+    }
+}
+
+impl KeyboardShortcuts {
+    const fn key(self, action: ShortcutAction) -> egui::Key {
+        match action {
+            ShortcutAction::ToggleCine => self.toggle_cine,
+            ShortcutAction::ToggleOverlay => self.toggle_overlay,
+            ShortcutAction::NextOverlay => self.next_overlay,
+            ShortcutAction::ToggleMetadata => self.toggle_metadata,
+        }
+    }
+
+    fn set(&mut self, action: ShortcutAction, key: egui::Key) -> Result<bool, ShortcutAction> {
+        if let Some(conflict) = ShortcutAction::ALL
+            .into_iter()
+            .find(|candidate| *candidate != action && self.key(*candidate) == key)
+        {
+            return Err(conflict);
+        }
+
+        let changed = self.key(action) != key;
+        self.set_unchecked(action, key);
+        Ok(changed)
+    }
+
+    fn reset(&mut self, action: ShortcutAction) -> Result<bool, ShortcutAction> {
+        self.set(action, action.default_key())
+    }
+
+    fn set_unchecked(&mut self, action: ShortcutAction, key: egui::Key) {
+        match action {
+            ShortcutAction::ToggleCine => self.toggle_cine = key,
+            ShortcutAction::ToggleOverlay => self.toggle_overlay = key,
+            ShortcutAction::NextOverlay => self.next_overlay = key,
+            ShortcutAction::ToggleMetadata => self.toggle_metadata = key,
+        }
+    }
+
+    fn has_unique_keys(self) -> bool {
+        let mut keys = HashSet::new();
+        ShortcutAction::ALL
+            .into_iter()
+            .all(|action| keys.insert(self.key(action)))
+    }
+}
+
+fn consume_unmodified_shortcut(input: &mut egui::InputState, key: egui::Key) -> bool {
+    if !input.modifiers.matches_exact(egui::Modifiers::NONE) {
+        return false;
+    }
+
+    let mut consumed = false;
+    input.events.retain(|event| {
+        let matches = matches!(
+            event,
+            egui::Event::Key {
+                key: event_key,
+                modifiers,
+                pressed: true,
+                ..
+            } if *event_key == key && modifiers.matches_exact(egui::Modifiers::NONE)
+        );
+        consumed |= matches;
+        !matches
+    });
+    consumed
+}
+
 struct AppSettings {
     visible_metadata_fields: HashSet<String>,
     secondary_color: egui::Color32,
+    keyboard_shortcuts: KeyboardShortcuts,
 }
 
 impl Default for AppSettings {
@@ -121,6 +251,7 @@ impl Default for AppSettings {
         Self {
             visible_metadata_fields: default_visible_metadata_fields(),
             secondary_color: DEFAULT_SECONDARY_COLOR,
+            keyboard_shortcuts: KeyboardShortcuts::default(),
         }
     }
 }
@@ -341,6 +472,9 @@ pub struct DicomViewerApp {
     settings_path: Option<PathBuf>,
     settings_window_open: bool,
     secondary_color: egui::Color32,
+    keyboard_shortcuts: KeyboardShortcuts,
+    shortcut_capture: Option<ShortcutAction>,
+    shortcut_capture_error: Option<String>,
     history_nonce: u64,
     pending_history_open_id: Option<String>,
     pending_history_open_armed: bool,
@@ -432,6 +566,9 @@ impl DicomViewerApp {
             settings_path,
             settings_window_open: false,
             secondary_color: settings.secondary_color,
+            keyboard_shortcuts: settings.keyboard_shortcuts,
+            shortcut_capture: None,
+            shortcut_capture_error: None,
             history_nonce: 0,
             pending_history_open_id: None,
             pending_history_open_armed: false,
@@ -954,18 +1091,11 @@ impl DicomViewerApp {
             &mut window_open,
             egui::Id::new("settings-popup"),
             "Settings",
-            egui::vec2(252.0, 72.0),
+            egui::vec2(420.0, 250.0),
             false,
             |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Secondary color");
-                    changed |= egui::color_picker::color_edit_button_srgba(
-                        ui,
-                        &mut self.secondary_color,
-                        egui::color_picker::Alpha::Opaque,
-                    )
-                    .changed();
-                    ui.monospace(secondary_color_hex(self.secondary_color));
                     let refresh_button_size = ui.spacing().interact_size.y;
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
@@ -980,11 +1110,94 @@ impl DicomViewerApp {
                         {
                             changed |= self.reset_secondary_color();
                         }
+
+                        changed |= egui::color_picker::color_edit_button_srgba(
+                            ui,
+                            &mut self.secondary_color,
+                            egui::color_picker::Alpha::Opaque,
+                        )
+                        .changed();
+                        ui.monospace(secondary_color_hex(self.secondary_color));
                     });
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                for action in ShortcutAction::ALL {
+                    ui.horizontal(|ui| {
+                        ui.label(action.label());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_sized(
+                                    [24.0, 24.0],
+                                    egui::Button::new(egui::RichText::new("↺").size(14.0))
+                                        .fill(egui::Color32::BLACK)
+                                        .stroke(egui::Stroke::NONE),
+                                )
+                                .on_hover_text(format!(
+                                    "Reset to {}",
+                                    action.default_key().symbol_or_name()
+                                ))
+                                .clicked()
+                            {
+                                self.shortcut_capture = None;
+                                match self.keyboard_shortcuts.reset(action) {
+                                    Ok(action_changed) => {
+                                        changed |= action_changed;
+                                        self.shortcut_capture_error = None;
+                                    }
+                                    Err(conflict) => {
+                                        self.shortcut_capture_error = Some(format!(
+                                            "{} is already assigned to {}.",
+                                            action.default_key().symbol_or_name(),
+                                            conflict.label()
+                                        ));
+                                    }
+                                }
+                            }
+
+                            let capturing = self.shortcut_capture == Some(action);
+                            let button_text = if capturing {
+                                "…"
+                            } else {
+                                self.keyboard_shortcuts.key(action).symbol_or_name()
+                            };
+                            if ui
+                                .add_sized([40.0, 24.0], egui::Button::new(button_text))
+                                .on_hover_text(if capturing {
+                                    "Press a key..."
+                                } else {
+                                    "Select a new shortcut"
+                                })
+                                .clicked()
+                            {
+                                self.shortcut_capture = Some(action);
+                                self.shortcut_capture_error = None;
+                            }
+                        });
+                    });
+                }
+
+                if let Some(error) = self.shortcut_capture_error.as_deref() {
+                    ui.add_space(4.0);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    if ui.button("Reset all").clicked() {
+                        changed |= self.reset_all_settings();
+                    }
                 });
             },
         );
         self.settings_window_open = window_open;
+        if !window_open {
+            self.shortcut_capture = None;
+            self.shortcut_capture_error = None;
+        }
 
         if changed {
             self.persist_settings();
@@ -998,6 +1211,94 @@ impl DicomViewerApp {
         }
         self.secondary_color = DEFAULT_SECONDARY_COLOR;
         true
+    }
+
+    fn reset_all_settings(&mut self) -> bool {
+        let mut changed = self.reset_secondary_color();
+        let default_visible_metadata_fields = default_visible_metadata_fields();
+        if self.visible_metadata_fields != default_visible_metadata_fields {
+            self.visible_metadata_fields = default_visible_metadata_fields;
+            changed = true;
+        }
+        let default_shortcuts = KeyboardShortcuts::default();
+        if self.keyboard_shortcuts != default_shortcuts {
+            self.keyboard_shortcuts = default_shortcuts;
+            changed = true;
+        }
+        self.shortcut_capture = None;
+        self.shortcut_capture_error = None;
+        changed
+    }
+
+    fn process_shortcut_capture(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.shortcut_capture else {
+            return;
+        };
+
+        let captured = ctx.input_mut(|input| {
+            let event_index = input.events.iter().position(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } if !is_modifier_key(*key)
+                )
+            })?;
+            match input.events.remove(event_index) {
+                egui::Event::Key { key, modifiers, .. } => Some((key, modifiers)),
+                _ => None,
+            }
+        });
+        let Some((key, modifiers)) = captured else {
+            return;
+        };
+
+        if key == egui::Key::Escape {
+            self.shortcut_capture = None;
+            self.shortcut_capture_error = None;
+            ctx.request_repaint();
+            return;
+        }
+        if modifiers.alt
+            || modifiers.ctrl
+            || modifiers.shift
+            || modifiers.command
+            || modifiers.mac_cmd
+        {
+            self.shortcut_capture_error =
+                Some("Modifier combinations are not supported; press one key.".to_string());
+            ctx.request_repaint();
+            return;
+        }
+        if !is_assignable_shortcut_key(key) {
+            self.shortcut_capture_error = Some(format!(
+                "{} is reserved for another viewer action.",
+                key.symbol_or_name()
+            ));
+            ctx.request_repaint();
+            return;
+        }
+
+        match self.keyboard_shortcuts.set(action, key) {
+            Ok(changed) => {
+                self.shortcut_capture = None;
+                self.shortcut_capture_error = None;
+                if changed {
+                    self.persist_settings();
+                }
+            }
+            Err(conflict) => {
+                self.shortcut_capture_error = Some(format!(
+                    "{} is already assigned to {}.",
+                    key.symbol_or_name(),
+                    conflict.label()
+                ));
+            }
+        }
+        ctx.request_repaint();
     }
 
     fn persist_settings(&self) {
@@ -1016,7 +1317,7 @@ impl DicomViewerApp {
         }
 
         let fields = ordered_visible_metadata_fields(&self.visible_metadata_fields);
-        let contents = render_settings_toml(&fields, self.secondary_color);
+        let contents = render_settings_toml(&fields, self.secondary_color, self.keyboard_shortcuts);
         if let Err(err) = fs::write(path, contents) {
             log::warn!("Could not write settings file: {err}");
         }
@@ -3032,14 +3333,15 @@ impl eframe::App for DicomViewerApp {
         }
         self.advance_cine_if_needed(ctx);
         self.sync_measurement_primary_interaction_block(ctx);
+        self.process_shortcut_capture(ctx);
 
         let mut history_cycle_direction = None;
         let mut close_app_requested = false;
         let mut close_group_requested = false;
-        let mut c_pressed = false;
-        let mut g_pressed = false;
-        let mut n_pressed = false;
-        let mut v_pressed = false;
+        let mut toggle_cine_pressed = false;
+        let mut toggle_overlay_pressed = false;
+        let mut next_overlay_pressed = false;
+        let mut toggle_metadata_pressed = false;
         let mut escape_pressed = false;
         ctx.input_mut(|input| {
             if input.consume_key(
@@ -3054,11 +3356,23 @@ impl eframe::App for DicomViewerApp {
             } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
                 history_cycle_direction = Some(1);
             }
-            c_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::C);
-            g_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::G);
-            n_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::N);
+            toggle_cine_pressed = consume_unmodified_shortcut(
+                input,
+                self.keyboard_shortcuts.key(ShortcutAction::ToggleCine),
+            );
+            toggle_overlay_pressed = consume_unmodified_shortcut(
+                input,
+                self.keyboard_shortcuts.key(ShortcutAction::ToggleOverlay),
+            );
+            next_overlay_pressed = consume_unmodified_shortcut(
+                input,
+                self.keyboard_shortcuts.key(ShortcutAction::NextOverlay),
+            );
             if self.can_toggle_full_metadata_popup() {
-                v_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::V);
+                toggle_metadata_pressed = consume_unmodified_shortcut(
+                    input,
+                    self.keyboard_shortcuts.key(ShortcutAction::ToggleMetadata),
+                );
             }
             if self.has_live_measurement() || self.full_metadata_popup_open {
                 escape_pressed = input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
@@ -3090,16 +3404,16 @@ impl eframe::App for DicomViewerApp {
             #[cfg(target_arch = "wasm32")]
             let _ = close_window;
         }
-        if c_pressed && !history_transition_pending {
+        if toggle_cine_pressed && !history_transition_pending {
             self.toggle_cine_mode();
         }
-        if g_pressed && !history_transition_pending && self.toggle_overlay() {
+        if toggle_overlay_pressed && !history_transition_pending && self.toggle_overlay() {
             self.refresh_active_textures(ctx);
         }
-        if n_pressed && !history_transition_pending {
+        if next_overlay_pressed && !history_transition_pending {
             self.jump_to_next_overlay(ctx);
         }
-        if v_pressed {
+        if toggle_metadata_pressed {
             self.toggle_full_metadata_popup();
         }
         if escape_pressed {
@@ -3599,17 +3913,22 @@ impl eframe::App for DicomViewerApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
+                                        let shortcut = self
+                                            .keyboard_shortcuts
+                                            .key(ShortcutAction::ToggleCine)
+                                            .symbol_or_name();
+                                        let label = if self.cine_mode {
+                                            format!("Stop Cine ({shortcut})")
+                                        } else {
+                                            format!("Start Cine ({shortcut})")
+                                        };
                                         if Self::add_action_control_button_no_border(
                                             ui,
                                             [
                                                 CONTROL_ACTION_BUTTON_WIDTH,
                                                 ui.spacing().interact_size.y,
                                             ],
-                                            if self.cine_mode {
-                                                "Stop Cine (C)"
-                                            } else {
-                                                "Start Cine (C)"
-                                            },
+                                            label,
                                         )
                                         .clicked()
                                         {
@@ -3622,17 +3941,22 @@ impl eframe::App for DicomViewerApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
+                                        let shortcut = self
+                                            .keyboard_shortcuts
+                                            .key(ShortcutAction::ToggleOverlay)
+                                            .symbol_or_name();
+                                        let label = if self.overlay_visible {
+                                            format!("Hide Overlay ({shortcut})")
+                                        } else {
+                                            format!("Show Overlay ({shortcut})")
+                                        };
                                         if Self::add_action_control_button_no_border(
                                             ui,
                                             [
                                                 CONTROL_ACTION_BUTTON_WIDTH,
                                                 ui.spacing().interact_size.y,
                                             ],
-                                            if self.overlay_visible {
-                                                "Hide Overlay (G)"
-                                            } else {
-                                                "Show Overlay (G)"
-                                            },
+                                            label,
                                         )
                                         .clicked()
                                         {
@@ -3645,13 +3969,17 @@ impl eframe::App for DicomViewerApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
+                                        let shortcut = self
+                                            .keyboard_shortcuts
+                                            .key(ShortcutAction::NextOverlay)
+                                            .symbol_or_name();
                                         if Self::add_action_control_button_no_border(
                                             ui,
                                             [
                                                 CONTROL_ACTION_BUTTON_WIDTH,
                                                 ui.spacing().interact_size.y,
                                             ],
-                                            "Next Overlay (N)",
+                                            format!("Next Overlay ({shortcut})"),
                                         )
                                         .on_hover_text(
                                             "Jump to the next overlay and corresponding frame.",
@@ -4070,6 +4398,33 @@ fn ordered_visible_metadata_fields(visible: &HashSet<String>) -> Vec<String> {
         .collect()
 }
 
+fn is_modifier_key(key: egui::Key) -> bool {
+    matches!(
+        key,
+        egui::Key::ShiftLeft
+            | egui::Key::ShiftRight
+            | egui::Key::ControlLeft
+            | egui::Key::ControlRight
+            | egui::Key::AltLeft
+            | egui::Key::AltRight
+            | egui::Key::SuperLeft
+            | egui::Key::SuperRight
+    )
+}
+
+fn is_assignable_shortcut_key(key: egui::Key) -> bool {
+    !matches!(
+        key,
+        egui::Key::Escape
+            | egui::Key::Tab
+            | egui::Key::Copy
+            | egui::Key::Cut
+            | egui::Key::Paste
+            | egui::Key::BrowserBack
+            | egui::Key::IntlBackslash
+    ) && !is_modifier_key(key)
+}
+
 fn settings_file_path() -> Option<PathBuf> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -4129,11 +4484,16 @@ fn parse_settings_toml(text: &str) -> AppSettings {
     if let Some(secondary_color) = parse_secondary_color_from_toml(text) {
         settings.secondary_color = secondary_color;
     }
+    settings.keyboard_shortcuts = parse_keyboard_shortcuts_from_toml(text);
 
     settings
 }
 
-fn render_settings_toml(fields: &[String], secondary_color: egui::Color32) -> String {
+fn render_settings_toml(
+    fields: &[String],
+    secondary_color: egui::Color32,
+    keyboard_shortcuts: KeyboardShortcuts,
+) -> String {
     let mut text = String::from("visible_metadata_fields = [\n");
     for field in fields {
         text.push_str("  \"");
@@ -4143,15 +4503,46 @@ fn render_settings_toml(fields: &[String], secondary_color: egui::Color32) -> St
     text.push_str("]\nsecondary_color = \"");
     text.push_str(&secondary_color_hex(secondary_color));
     text.push_str("\"\n");
+    for action in ShortcutAction::ALL {
+        text.push_str(action.setting_name());
+        text.push_str(" = \"");
+        text.push_str(keyboard_shortcuts.key(action).name());
+        text.push_str("\"\n");
+    }
     text
 }
 
-fn parse_secondary_color_from_toml(text: &str) -> Option<egui::Color32> {
+fn parse_keyboard_shortcuts_from_toml(text: &str) -> KeyboardShortcuts {
+    let mut shortcuts = KeyboardShortcuts::default();
+    for action in ShortcutAction::ALL {
+        let Some(key_name) = parse_string_setting_from_toml(text, action.setting_name()) else {
+            continue;
+        };
+        let Some(key) =
+            egui::Key::from_name(key_name).filter(|key| is_assignable_shortcut_key(*key))
+        else {
+            continue;
+        };
+        shortcuts.set_unchecked(action, key);
+    }
+
+    if shortcuts.has_unique_keys() {
+        shortcuts
+    } else {
+        KeyboardShortcuts::default()
+    }
+}
+
+fn parse_string_setting_from_toml<'a>(text: &'a str, setting_name: &str) -> Option<&'a str> {
     let value = text.lines().find_map(|line| {
         let (key, value) = line.split_once('=')?;
-        (key.trim() == "secondary_color").then_some(value.trim())
+        (key.trim() == setting_name).then_some(value.trim())
     })?;
-    let value = value.strip_prefix('"')?.strip_suffix('"')?;
+    value.strip_prefix('"')?.strip_suffix('"')
+}
+
+fn parse_secondary_color_from_toml(text: &str) -> Option<egui::Color32> {
+    let value = parse_string_setting_from_toml(text, "secondary_color")?;
     parse_secondary_color_hex(value)
 }
 
@@ -4280,6 +4671,42 @@ mod tests {
             (actual - expected).abs() < 0.001,
             "expected {expected}, got {actual}"
         );
+    }
+
+    fn configurable_shortcut_results(modifiers: egui::Modifiers) -> [bool; 4] {
+        let ctx = egui::Context::default();
+        let shortcuts = KeyboardShortcuts {
+            toggle_cine: egui::Key::P,
+            toggle_overlay: egui::Key::O,
+            next_overlay: egui::Key::N,
+            toggle_metadata: egui::Key::M,
+        };
+        let raw_input = egui::RawInput {
+            events: std::iter::once(egui::Event::ModifiersChanged(modifiers))
+                .chain(
+                    ShortcutAction::ALL
+                        .into_iter()
+                        .map(|action| egui::Event::Key {
+                            key: shortcuts.key(action),
+                            physical_key: Some(shortcuts.key(action)),
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                        }),
+                )
+                .collect(),
+            ..Default::default()
+        };
+        let mut results = [false; 4];
+
+        ctx.run_ui(raw_input, |ui| {
+            results = ShortcutAction::ALL.map(|action| {
+                ui.input_mut(|input| consume_unmodified_shortcut(input, shortcuts.key(action)))
+            });
+        })
+        .drop_without_applying_deltas();
+
+        results
     }
 
     #[test]
@@ -5009,14 +5436,23 @@ mod tests {
             "Modality".to_string(),
         ];
         let secondary_color = egui::Color32::from_rgb(194, 65, 12);
-        let toml = render_settings_toml(&selected, secondary_color);
+        let mut keyboard_shortcuts = KeyboardShortcuts::default();
+        keyboard_shortcuts
+            .set(ShortcutAction::ToggleCine, egui::Key::P)
+            .expect("P should not conflict with a default shortcut");
+        let toml = render_settings_toml(&selected, secondary_color, keyboard_shortcuts);
         let parsed = parse_visible_metadata_fields_from_toml(&toml).expect("TOML should parse");
         assert_eq!(parsed, selected);
         assert_eq!(
             parse_secondary_color_from_toml(&toml),
             Some(secondary_color)
         );
+        assert_eq!(
+            parse_keyboard_shortcuts_from_toml(&toml),
+            keyboard_shortcuts
+        );
         assert!(toml.contains("secondary_color = \"#C2410C\""));
+        assert!(toml.contains("shortcut_toggle_cine = \"P\""));
     }
 
     #[test]
@@ -5031,7 +5467,8 @@ mod tests {
         ));
         let toml = concat!(
             "visible_metadata_fields = [\"PatientName\", \"UnknownField\"]\n",
-            "secondary_color = \"#123ABC\"\n"
+            "secondary_color = \"#123ABC\"\n",
+            "shortcut_toggle_overlay = \"O\"\n"
         );
         fs::write(&path, toml).expect("should write temp settings");
 
@@ -5041,6 +5478,10 @@ mod tests {
         assert_eq!(
             loaded.secondary_color,
             egui::Color32::from_rgb(0x12, 0x3A, 0xBC)
+        );
+        assert_eq!(
+            loaded.keyboard_shortcuts.key(ShortcutAction::ToggleOverlay),
+            egui::Key::O
         );
 
         let _ = fs::remove_file(path);
@@ -5076,6 +5517,225 @@ mod tests {
         assert!(app.reset_secondary_color());
         assert_eq!(app.secondary_color, DEFAULT_SECONDARY_COLOR);
         assert!(!app.reset_secondary_color());
+    }
+
+    #[test]
+    fn reset_all_settings_restores_color_metadata_and_keyboard_shortcuts() {
+        let mut keyboard_shortcuts = KeyboardShortcuts::default();
+        keyboard_shortcuts
+            .set(ShortcutAction::ToggleCine, egui::Key::P)
+            .expect("P should not conflict with a default shortcut");
+        let mut app = DicomViewerApp {
+            secondary_color: egui::Color32::from_rgb(255, 0, 0),
+            visible_metadata_fields: HashSet::new(),
+            keyboard_shortcuts,
+            shortcut_capture: Some(ShortcutAction::ToggleOverlay),
+            shortcut_capture_error: Some("shortcut error".to_string()),
+            ..Default::default()
+        };
+
+        assert!(app.reset_all_settings());
+        assert_eq!(app.secondary_color, DEFAULT_SECONDARY_COLOR);
+        assert_eq!(
+            app.visible_metadata_fields,
+            default_visible_metadata_fields()
+        );
+        assert_eq!(app.keyboard_shortcuts, KeyboardShortcuts::default());
+        assert_eq!(app.shortcut_capture, None);
+        assert_eq!(app.shortcut_capture_error, None);
+        assert!(!app.reset_all_settings());
+    }
+
+    #[test]
+    fn keyboard_shortcuts_reject_conflicts() {
+        let mut shortcuts = KeyboardShortcuts::default();
+
+        assert_eq!(
+            shortcuts.set(ShortcutAction::ToggleCine, egui::Key::G),
+            Err(ShortcutAction::ToggleOverlay)
+        );
+        assert_eq!(shortcuts.key(ShortcutAction::ToggleCine), egui::Key::C);
+    }
+
+    #[test]
+    fn keyboard_shortcuts_reset_one_action_without_changing_others() {
+        let mut shortcuts = KeyboardShortcuts::default();
+        assert_eq!(
+            shortcuts.set(ShortcutAction::ToggleCine, egui::Key::P),
+            Ok(true)
+        );
+        assert_eq!(
+            shortcuts.set(ShortcutAction::ToggleOverlay, egui::Key::O),
+            Ok(true)
+        );
+
+        assert_eq!(shortcuts.reset(ShortcutAction::ToggleCine), Ok(true));
+        assert_eq!(shortcuts.key(ShortcutAction::ToggleCine), egui::Key::C);
+        assert_eq!(shortcuts.key(ShortcutAction::ToggleOverlay), egui::Key::O);
+        assert_eq!(shortcuts.reset(ShortcutAction::ToggleCine), Ok(false));
+    }
+
+    #[test]
+    fn keyboard_shortcut_reset_rejects_a_default_key_conflict() {
+        let mut shortcuts = KeyboardShortcuts::default();
+        shortcuts
+            .set(ShortcutAction::ToggleCine, egui::Key::P)
+            .expect("P should not conflict with a default shortcut");
+        shortcuts
+            .set(ShortcutAction::ToggleOverlay, egui::Key::C)
+            .expect("C should be available after changing the cine shortcut");
+
+        assert_eq!(
+            shortcuts.reset(ShortcutAction::ToggleCine),
+            Err(ShortcutAction::ToggleOverlay)
+        );
+        assert_eq!(shortcuts.key(ShortcutAction::ToggleCine), egui::Key::P);
+    }
+
+    #[test]
+    fn invalid_or_conflicting_shortcut_settings_use_safe_defaults() {
+        let invalid = concat!(
+            "shortcut_toggle_cine = \"Escape\"\n",
+            "shortcut_toggle_overlay = \"O\"\n"
+        );
+        let conflicting = "shortcut_toggle_cine = \"G\"\n";
+
+        let invalid_shortcuts = parse_keyboard_shortcuts_from_toml(invalid);
+        assert_eq!(
+            invalid_shortcuts.key(ShortcutAction::ToggleCine),
+            egui::Key::C
+        );
+        assert_eq!(
+            invalid_shortcuts.key(ShortcutAction::ToggleOverlay),
+            egui::Key::O
+        );
+        assert_eq!(
+            parse_keyboard_shortcuts_from_toml(conflicting),
+            KeyboardShortcuts::default()
+        );
+    }
+
+    #[test]
+    fn shortcut_capture_updates_the_selected_action() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            settings_path: None,
+            keyboard_shortcuts: KeyboardShortcuts::default(),
+            shortcut_capture: Some(ShortcutAction::ToggleCine),
+            ..Default::default()
+        };
+        let raw_input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::P,
+                physical_key: Some(egui::Key::P),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+
+        ctx.run_ui(raw_input, |ui| app.process_shortcut_capture(ui.ctx()))
+            .drop_without_applying_deltas();
+
+        assert_eq!(
+            app.keyboard_shortcuts.key(ShortcutAction::ToggleCine),
+            egui::Key::P
+        );
+        assert_eq!(app.shortcut_capture, None);
+        assert_eq!(app.shortcut_capture_error, None);
+    }
+
+    #[test]
+    fn shortcut_capture_rejects_shifted_keys() {
+        let ctx = egui::Context::default();
+        let mut app = DicomViewerApp {
+            settings_path: None,
+            keyboard_shortcuts: KeyboardShortcuts::default(),
+            shortcut_capture: Some(ShortcutAction::ToggleCine),
+            ..Default::default()
+        };
+        let raw_input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::P,
+                physical_key: Some(egui::Key::P),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            }],
+            ..Default::default()
+        };
+
+        ctx.run_ui(raw_input, |ui| app.process_shortcut_capture(ui.ctx()))
+            .drop_without_applying_deltas();
+
+        assert_eq!(
+            app.keyboard_shortcuts.key(ShortcutAction::ToggleCine),
+            egui::Key::C
+        );
+        assert_eq!(app.shortcut_capture, Some(ShortcutAction::ToggleCine));
+        assert_eq!(
+            app.shortcut_capture_error.as_deref(),
+            Some("Modifier combinations are not supported; press one key.")
+        );
+    }
+
+    #[test]
+    fn configurable_shortcuts_require_exactly_no_modifiers() {
+        assert_eq!(
+            configurable_shortcut_results(egui::Modifiers::NONE),
+            [true; 4]
+        );
+        assert_eq!(
+            configurable_shortcut_results(egui::Modifiers::SHIFT),
+            [false; 4]
+        );
+        assert_eq!(
+            configurable_shortcut_results(egui::Modifiers::ALT),
+            [false; 4]
+        );
+    }
+
+    #[test]
+    fn configurable_shortcut_does_not_consume_shifted_event_after_shift_release() {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput {
+            events: vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                egui::Event::Key {
+                    key: egui::Key::C,
+                    physical_key: Some(egui::Key::C),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+            ..Default::default()
+        };
+        let mut consumed = false;
+        let mut shifted_event_remains = false;
+
+        ctx.run_ui(raw_input, |ui| {
+            ui.input_mut(|input| {
+                consumed = consume_unmodified_shortcut(input, egui::Key::C);
+                shifted_event_remains = input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::C,
+                            modifiers,
+                            pressed: true,
+                            ..
+                        } if modifiers.matches_exact(egui::Modifiers::SHIFT)
+                    )
+                });
+            });
+        })
+        .drop_without_applying_deltas();
+
+        assert!(!consumed);
+        assert!(shifted_event_remains);
     }
 
     #[test]
