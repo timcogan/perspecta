@@ -152,7 +152,7 @@ This writes a desktop entry under `~/.local/share/applications`.
 
 ## Keyboard Shortcuts
 
-The single-key shortcuts below are defaults. Change or individually reset them in **Settings**, or use **Reset all** to restore both the shortcuts and secondary color. Reserved navigation and close shortcuts cannot be reassigned.
+The single-key shortcuts below are defaults. Change or individually reset them in **Settings**, or use **Reset all** to restore the shortcuts, secondary color, and visible metadata field selection. Reserved navigation and close shortcuts cannot be reassigned.
 
 - `C` (default): toggle cine mode
 - `G` (default): toggle image overlay (GSPS, Mammography CAD SR marks, or a matching Parametric Map, when available)
