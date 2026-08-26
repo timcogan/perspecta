@@ -1215,6 +1215,11 @@ impl DicomViewerApp {
 
     fn reset_all_settings(&mut self) -> bool {
         let mut changed = self.reset_secondary_color();
+        let default_visible_metadata_fields = default_visible_metadata_fields();
+        if self.visible_metadata_fields != default_visible_metadata_fields {
+            self.visible_metadata_fields = default_visible_metadata_fields;
+            changed = true;
+        }
         let default_shortcuts = KeyboardShortcuts::default();
         if self.keyboard_shortcuts != default_shortcuts {
             self.keyboard_shortcuts = default_shortcuts;
@@ -5515,13 +5520,14 @@ mod tests {
     }
 
     #[test]
-    fn reset_all_settings_restores_color_and_keyboard_shortcuts() {
+    fn reset_all_settings_restores_color_metadata_and_keyboard_shortcuts() {
         let mut keyboard_shortcuts = KeyboardShortcuts::default();
         keyboard_shortcuts
             .set(ShortcutAction::ToggleCine, egui::Key::P)
             .expect("P should not conflict with a default shortcut");
         let mut app = DicomViewerApp {
             secondary_color: egui::Color32::from_rgb(255, 0, 0),
+            visible_metadata_fields: HashSet::new(),
             keyboard_shortcuts,
             shortcut_capture: Some(ShortcutAction::ToggleOverlay),
             shortcut_capture_error: Some("shortcut error".to_string()),
@@ -5530,6 +5536,10 @@ mod tests {
 
         assert!(app.reset_all_settings());
         assert_eq!(app.secondary_color, DEFAULT_SECONDARY_COLOR);
+        assert_eq!(
+            app.visible_metadata_fields,
+            default_visible_metadata_fields()
+        );
         assert_eq!(app.keyboard_shortcuts, KeyboardShortcuts::default());
         assert_eq!(app.shortcut_capture, None);
         assert_eq!(app.shortcut_capture_error, None);
