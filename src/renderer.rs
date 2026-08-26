@@ -52,7 +52,13 @@ pub fn render_rgb(
 
 pub fn blend_rgba_overlay(base: &mut ColorImage, overlay_rgba: &[u8]) {
     let pixel_count = base.pixels.len();
-    for (index, chunk) in overlay_rgba.chunks_exact(4).take(pixel_count).enumerate() {
+    for (index, chunk) in overlay_rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .take(pixel_count)
+        .enumerate()
+    {
         let alpha = f32::from(chunk[3]) / 255.0;
         if alpha <= f32::EPSILON {
             continue;

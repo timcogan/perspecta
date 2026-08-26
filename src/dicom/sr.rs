@@ -662,7 +662,7 @@ fn graphics_from_spatial_coordinates(
 
 fn parse_graphic_points(values: Vec<f32>) -> Vec<(f32, f32)> {
     let mut points = Vec::with_capacity(values.len() / 2);
-    for pair in values.chunks_exact(2) {
+    for pair in values.as_chunks::<2>().0 {
         points.push((pair[0], pair[1]));
     }
     points

@@ -1190,12 +1190,10 @@ impl DicomViewerApp {
                             && (!active_group_is_multi_view || self.mammo_load_receiver.is_none());
                         let active_group_is_displayed =
                             self.displayed_study_matches_paths(active_group_paths.as_slice());
-                        let grouped_ready;
 
-                        if !streamed_active_complete && !streaming_started {
+                        let grouped_ready = if !streamed_active_complete && !streaming_started {
                             self.load_local_groups(groups, validated_open_group, ctx);
-                            grouped_ready =
-                                self.displayed_study_matches_paths(active_group_paths.as_slice());
+                            self.displayed_study_matches_paths(active_group_paths.as_slice())
                         } else {
                             let completed_background_groups =
                                 self.dicomweb_completed_background_groups.clone();
@@ -1235,12 +1233,12 @@ impl DicomViewerApp {
                                 self.history_pushed_for_active_group = true;
                             }
                             self.move_current_history_to_front();
-                            grouped_ready = if active_group_is_multi_view {
+                            if active_group_is_multi_view {
                                 active_group_is_displayed && self.mammo_group_complete()
                             } else {
                                 active_group_is_displayed
-                            };
-                        }
+                            }
+                        };
                         self.set_authoritative_pending_gsps_overlays(grouped_gsps_overlays);
                         self.set_authoritative_pending_sr_overlays(grouped_sr_overlays);
                         self.set_authoritative_pending_pm_overlays(grouped_pm_overlays);
