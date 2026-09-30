@@ -30,11 +30,16 @@
     <meta property="og:title" content="{{ .Title }}">
     <meta property="og:description" content="{{ .Params.description }}">
     <meta property="og:url" content="{{ .Permalink }}">
-    <meta property="og:image" content="{{ "/brand/perspecta.svg" | absURL }}">
-    <meta property="og:image:alt" content="Perspecta DICOM Viewer logo">
-    <meta name="twitter:card" content="summary">
+    <meta property="og:image" content="{{ "/brand/perspecta-social.png" | absURL }}">
+    <meta property="og:image:secure_url" content="{{ "/brand/perspecta-social.png" | absURL }}">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Perspecta DICOM Viewer branded preview">
+    <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="{{ .Title }}">
     <meta name="twitter:description" content="{{ .Params.description }}">
+    <meta name="twitter:image" content="{{ "/brand/perspecta-social.png" | absURL }}">
 
   </head>
   <body class="demo-page">
