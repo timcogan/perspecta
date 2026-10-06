@@ -23,6 +23,8 @@ use dicom_object::{
 use dicom_pixeldata::PixelDecoder;
 
 mod gsps;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod inspect;
 mod parametric_map;
 mod sr;
 

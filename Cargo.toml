@@ -30,6 +30,8 @@ log = "0.4"
 dicom-pixeldata = { version = "0.10.0", default-features = false, features = ["rayon"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rfd = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow", "web_screen_reader"] }
@@ -52,6 +54,9 @@ eframe = "0.36.1"
 [dev-dependencies]
 dicom-encoding = "0.10.0"
 dicom-transfer-syntax-registry = "0.10.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = "3"
 
 [[bin]]
 name = "perspecta"
