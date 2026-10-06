@@ -70,6 +70,14 @@ fn inspect(path: &Path) -> Output {
         .expect("inspect executable must run")
 }
 
+fn inspect_with_limit(path: &Path, limit: &str) -> Output {
+    command()
+        .args(["inspect", "--max-file-mib", limit])
+        .arg(path)
+        .output()
+        .expect("inspect executable must run")
+}
+
 fn summary(output: Output) -> Value {
     assert_eq!(
         output.status.code(),
@@ -287,6 +295,122 @@ fn read_errors_do_not_expose_the_input_path_or_file_contents() {
 }
 
 #[test]
+fn oversized_files_fail_before_parsing_without_exposing_the_input_path() {
+    let directory = tempfile::tempdir().expect("temporary directory must exist");
+    let path = directory.path().join("SYNTHETIC-EXCLUDED-FILENAME.dcm");
+    // Extend an empty file without a large buffer or a stored fixture.
+    let file = std::fs::File::create(&path).expect("synthetic file must be writable");
+    let size = 4096 * 1024 * 1024 + 1;
+    file.set_len(size).expect("synthetic file size must be set");
+    drop(file);
+
+    assert_eq!(
+        error(inspect(&path), 1, "file_too_large"),
+        json!({
+            "schema_version": 1,
+            "error": {
+                "code": "file_too_large",
+                "message": "DICOM file size is 4294967297 bytes (4097 MiB rounded up). \
+                            This exceeds the configured limit of 4096 MiB (4294967296 bytes). \
+                            Retry with --max-file-mib 4097 or higher. \
+                            Inspection loads the complete file into memory. Parsing and repairs can require additional memory."
+            }
+        })
+    );
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("synthetic file must still exist")
+            .len(),
+        size
+    );
+}
+
+#[test]
+fn custom_file_limit_accepts_its_boundary_and_can_be_raised() {
+    let directory = tempfile::tempdir().expect("temporary directory must exist");
+    let path = directory.path().join("SYNTHETIC-EXCLUDED-FILENAME.dcm");
+    let mut object = image("1");
+    let padding_tag = Tag(0xFFFC, 0xFFFC);
+    object.put(DataElement::new(padding_tag, VR::OB, PrimitiveValue::Empty));
+    let mut bytes = Vec::new();
+    object
+        .write_all(&mut bytes)
+        .expect("synthetic image must serialize");
+    let boundary = 1024 * 1024;
+    let padding_length = boundary - bytes.len();
+
+    for extra_bytes in [0, 2] {
+        object.put(DataElement::new(
+            padding_tag,
+            VR::OB,
+            PrimitiveValue::U8(vec![0; padding_length + extra_bytes].into()),
+        ));
+        object
+            .write_to_file(&path)
+            .expect("synthetic image must be writable");
+        assert_eq!(
+            std::fs::metadata(&path).expect("fixture must exist").len(),
+            (boundary + extra_bytes) as u64
+        );
+
+        if extra_bytes == 0 {
+            assert_eq!(summary(inspect_with_limit(&path, "1"))["kind"], "image");
+        } else {
+            let actual = error(inspect_with_limit(&path, "1"), 1, "file_too_large");
+            let message = actual["error"]["message"]
+                .as_str()
+                .expect("error must have a message");
+            assert!(message.contains("1048578 bytes (2 MiB rounded up)"));
+            assert!(message.contains("limit of 1 MiB (1048576 bytes)"));
+            assert!(message.contains("--max-file-mib 2 or higher"));
+            assert!(!message.contains("SYNTHETIC"));
+            assert!(!message.contains(&path.to_string_lossy().to_string()));
+        }
+        assert_eq!(summary(inspect_with_limit(&path, "2"))["kind"], "image");
+    }
+    assert_eq!(
+        summary(inspect_with_limit(&path, "17592186044415"))["kind"],
+        "image"
+    );
+}
+
+#[test]
+fn invalid_file_limits_fail_with_usage_without_echoing_the_value() {
+    for value in [
+        "",
+        "0",
+        "-1",
+        "+1",
+        "1.5",
+        "1MiB",
+        " 1",
+        "1 ",
+        "SYNTHETIC-EXCLUDED",
+        "18446744073709551616",
+        "17592186044416",
+    ] {
+        let actual = error(
+            inspect_with_limit(Path::new("synthetic.dcm"), value),
+            2,
+            "invalid_arguments",
+        );
+        assert_eq!(actual["error"]["message"], "--max-file-mib requires an integer from 1 to 17592186044415 (MiB). Example: --max-file-mib 8192.");
+    }
+    let actual = error(
+        command()
+            .args(["inspect", "--max-file-mib"])
+            .output()
+            .expect("CLI must run"),
+        2,
+        "invalid_arguments",
+    );
+    assert!(actual["error"]["message"]
+        .as_str()
+        .expect("error must have a message")
+        .contains("--max-file-mib"));
+}
+
+#[test]
 fn invalid_arguments_and_help_do_not_start_the_viewer() {
     for args in [
         vec!["inspect"],
@@ -296,6 +420,16 @@ fn invalid_arguments_and_help_do_not_start_the_viewer() {
         vec!["inspect", "--"],
         vec!["inspect", "--", ""],
         vec!["inspect", "--help", "extra"],
+        vec!["inspect", "--max-file-mib", "1"],
+        vec!["inspect", "--max-file-mib", "1", "one.dcm", "two.dcm"],
+        vec![
+            "inspect",
+            "--max-file-mib",
+            "1",
+            "--max-file-mib",
+            "2",
+            "one.dcm",
+        ],
     ] {
         error(
             command().args(args).output().expect("CLI must run"),
@@ -307,11 +441,14 @@ fn invalid_arguments_and_help_do_not_start_the_viewer() {
         vec!["inspect", "--help"],
         vec!["--help"],
         vec!["inspect", "-h"],
+        vec!["inspect", "--max-file-mib", "1", "--help"],
     ] {
         let output = command().args(args).output().expect("CLI help must run");
         assert_eq!(output.status.code(), Some(0));
         assert!(output.stderr.is_empty());
         assert!(String::from_utf8_lossy(&output.stdout).contains("perspecta inspect <file>"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("4096 MiB (4 GiB)"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("--max-file-mib"));
     }
 }
 
@@ -322,12 +459,17 @@ fn separator_allows_a_file_named_like_a_flag() {
     image("1")
         .write_to_file(&path)
         .expect("synthetic object must be writable");
-    let output = command()
-        .current_dir(directory.path())
-        .args(["inspect", "--", "--help"])
-        .output()
-        .expect("CLI must run");
-    assert_eq!(summary(output)["kind"], "image");
+    for args in [
+        vec!["inspect", "--", "--help"],
+        vec!["inspect", "--max-file-mib", "1", "--", "--help"],
+    ] {
+        let output = command()
+            .current_dir(directory.path())
+            .args(args)
+            .output()
+            .expect("CLI must run");
+        assert_eq!(summary(output)["kind"], "image");
+    }
 }
 
 #[cfg(unix)]
@@ -343,4 +485,15 @@ fn native_paths_need_not_be_utf8() {
         .write_to_file(&path)
         .expect("synthetic object must be writable");
     assert_eq!(summary(inspect(&path))["kind"], "image");
+    assert_eq!(summary(inspect_with_limit(&path, "1"))["kind"], "image");
+    error(
+        command()
+            .args(["inspect", "--max-file-mib"])
+            .arg(OsStr::from_bytes(b"\xff"))
+            .arg(&path)
+            .output()
+            .expect("CLI must run"),
+        2,
+        "invalid_arguments",
+    );
 }

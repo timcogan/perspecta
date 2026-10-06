@@ -1,23 +1,28 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use serde::Serialize;
 
-use crate::dicom::inspect::{inspect_file, InspectError};
+use crate::dicom::inspect::{inspect_file, InspectError, MIB_BYTES};
+
+const DEFAULT_MAX_FILE_MIB: u64 = 4096;
 
 const HELP: &str = "Perspecta DICOM Viewer
 
 Usage:
   perspecta inspect <file>
-  perspecta inspect -- <file>
+  perspecta inspect [--max-file-mib <MiB>] [--] <file>
   perspecta inspect --help
   perspecta [--open] <file>...
   perspecta <perspecta:// URL>
 
 Inspect one local DICOM file without a window or pixel decoding.
+The default file size limit is 4096 MiB (4 GiB).
+Use --max-file-mib before the file name to set a positive whole number of MiB.
 The complete file is read into memory. This is not full DICOM validation.
+Parsing and repairs can require memory beyond the file size.
 Success writes schema_version 1 JSON to stdout. Errors write JSON to stderr.
 Exit codes: 0 success, 1 file/data/output error, 2 invalid arguments.
 Use -- before a file name that starts with a hyphen.
@@ -27,13 +32,14 @@ To open a file named inspect in the viewer, use --open inspect or ./inspect.
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Viewer,
-    Inspect(PathBuf),
+    Inspect { path: PathBuf, limit_bytes: u64 },
     Help,
 }
 
 #[derive(Debug)]
 enum CliError {
     Arguments,
+    FileLimit,
     Inspect(InspectError),
     Output,
 }
@@ -41,8 +47,9 @@ enum CliError {
 impl CliError {
     fn code(&self) -> &'static str {
         match self {
-            Self::Arguments => "invalid_arguments",
+            Self::Arguments | Self::FileLimit => "invalid_arguments",
             Self::Inspect(InspectError::Read) => "read_error",
+            Self::Inspect(InspectError::FileTooLarge { .. }) => "file_too_large",
             Self::Inspect(InspectError::InvalidMetadata(_)) => "invalid_metadata",
             Self::Output => "output_error",
         }
@@ -53,6 +60,10 @@ impl CliError {
             Self::Arguments => {
                 "Expected one local file. Use 'perspecta inspect --help' for usage.".to_owned()
             }
+            Self::FileLimit => format!(
+                "--max-file-mib requires an integer from 1 to {} (MiB). Example: --max-file-mib 8192.",
+                u64::MAX / MIB_BYTES
+            ),
             Self::Inspect(error) => error.to_string(),
             Self::Output => {
                 "Could not write command output. Check the output destination.".to_owned()
@@ -61,7 +72,7 @@ impl CliError {
     }
 
     fn exit_code(&self) -> ExitCode {
-        if matches!(self, Self::Arguments) {
+        if matches!(self, Self::Arguments | Self::FileLimit) {
             ExitCode::from(2)
         } else {
             ExitCode::FAILURE
@@ -95,16 +106,35 @@ fn parse_args(args: &[OsString]) -> Result<Command, CliError> {
     if first != "inspect" {
         return Ok(Command::Viewer);
     }
-    match &args[1..] {
+    let (args, limit_bytes) = match &args[1..] {
+        [flag, value, rest @ ..] if flag == "--max-file-mib" => (rest, parse_file_limit(value)?),
+        [flag] if flag == "--max-file-mib" => return Err(CliError::FileLimit),
+        rest => (rest, DEFAULT_MAX_FILE_MIB * MIB_BYTES),
+    };
+    match args {
         [arg] if arg == "--help" || arg == "-h" => Ok(Command::Help),
-        [separator, path] if separator == "--" && !path.is_empty() => {
-            Ok(Command::Inspect(path.into()))
-        }
+        [separator, path] if separator == "--" && !path.is_empty() => Ok(Command::Inspect {
+            path: path.into(),
+            limit_bytes,
+        }),
         [path] if !path.is_empty() && !path.as_encoded_bytes().starts_with(b"-") => {
-            Ok(Command::Inspect(path.into()))
+            Ok(Command::Inspect {
+                path: path.into(),
+                limit_bytes,
+            })
         }
         _ => Err(CliError::Arguments),
     }
+}
+
+fn parse_file_limit(value: &OsStr) -> Result<u64, CliError> {
+    value
+        .to_str()
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .and_then(|value| value.checked_mul(MIB_BYTES))
+        .ok_or(CliError::FileLimit)
 }
 
 /// Return None when the existing viewer launch path should handle the arguments.
@@ -119,7 +149,7 @@ pub(crate) fn run(
             .write_all(HELP.as_bytes())
             .and_then(|()| stdout.flush())
             .map_err(|_| CliError::Output),
-        Ok(Command::Inspect(path)) => inspect_file(&path)
+        Ok(Command::Inspect { path, limit_bytes }) => inspect_file(&path, limit_bytes)
             .map_err(CliError::Inspect)
             .and_then(|inspection| write_json(stdout, &inspection).map_err(|_| CliError::Output)),
         Err(error) => Err(error),

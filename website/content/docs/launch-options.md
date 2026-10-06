@@ -2,7 +2,7 @@
 title = "Launch Options"
 description = "Open local files, grouped studies, reports, and custom launch URLs in Perspecta."
 weight = 20
-last_updated = "2026-10-05"
+last_updated = "2026-10-06"
 +++
 
 This page covers how Perspecta opens local files, grouped review sets, reports, and `perspecta://` URLs from external systems.
@@ -18,8 +18,23 @@ perspecta inspect example-data/image.dcm
 perspecta inspect --help
 ```
 
-The command runs without a graphical display. It reads the complete file into memory through the viewer's reader, including its existing repairs.
+The command runs without a graphical display. The default file size limit is **4096 MiB (4 GiB)**.
+It rejects files above the selected limit before it calls the reader.
+For files within this limit, it reads the complete file into memory through the viewer's reader, including its existing repairs.
 It does not modify the file or decode pixels. Successful inspection does not confirm that the pixels can be decoded or validate DICOM conformance.
+
+An [NHS evaluation (Table 3)](https://assets.publishing.service.gov.uk/government/uploads/system/uploads/attachment_data/file/998318/Practical_evaluation_3Dimensions_tomo.pdf#page=47) reports uncompressed HD tomosynthesis files up to 2835.4 MB.
+The default leaves room above that example. Larger objects require an explicit limit.
+
+Use `--max-file-mib` before the file name to set a different limit, such as 8 GiB:
+
+```sh
+perspecta inspect --max-file-mib 8192 example-data/image.dcm
+```
+
+The value must be a positive whole number of MiB (1 MiB = 1048576 bytes).
+Zero, fractions, duplicate options, and values that overflow the byte count produce `invalid_arguments`.
+The limit applies to the file size. Parsing and repairs can require additional memory beyond that size.
 
 ### JSON Output
 
@@ -62,11 +77,14 @@ File, data, and argument errors leave standard output empty. Standard error cont
 | --- | --- | --- |
 | `0` | None | Success or help |
 | `1` | `read_error` | The input is not a readable regular DICOM file, or its encoding cannot be read |
+| `1` | `file_too_large` | The input exceeds the selected file size limit |
 | `1` | `invalid_metadata` | A selected field has an invalid value |
 | `1` | `output_error` | The command could not write or flush its output |
-| `2` | `invalid_arguments` | The command needs exactly one local file or a help option |
+| `2` | `invalid_arguments` | Invalid syntax or file size limit, or the command needs exactly one local file |
 
 Use `error.code` for programmatic decisions. Error messages exclude input paths and raw DICOM values.
+For `file_too_large`, the message gives the file size in bytes, the active limit, and the minimum required `--max-file-mib` value.
+This required value rounds up to the next whole MiB when necessary. The message also explains that memory use can exceed the file size.
 An output error can leave a partial result. Discard output when the exit code is not `0`.
 If standard error is unavailable, the command still returns a failure code.
 

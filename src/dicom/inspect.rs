@@ -6,6 +6,8 @@ use serde::Serialize;
 
 use super::{classify_dicom_object, open_dicom_object, DicomPathKind};
 
+pub(crate) const MIB_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Serialize)]
 pub(crate) struct Inspection {
     schema_version: u8,
@@ -31,6 +33,7 @@ enum InspectionKind {
 #[derive(Debug)]
 pub(crate) enum InspectError {
     Read,
+    FileTooLarge { size_bytes: u64, limit_bytes: u64 },
     InvalidMetadata(&'static str),
 }
 
@@ -39,6 +42,16 @@ impl fmt::Display for InspectError {
         match self {
             Self::Read => f.write_str(
                 "Could not read the DICOM file. Check the file, its permissions, and its encoding.",
+            ),
+            Self::FileTooLarge { size_bytes, limit_bytes } => write!(
+                f,
+                "DICOM file size is {size_bytes} bytes ({} MiB rounded up). \
+                 This exceeds the configured limit of {} MiB ({limit_bytes} bytes). \
+                 Retry with --max-file-mib {} or higher. \
+                 Inspection loads the complete file into memory. Parsing and repairs can require additional memory.",
+                size_bytes.div_ceil(MIB_BYTES),
+                limit_bytes / MIB_BYTES,
+                size_bytes.div_ceil(MIB_BYTES),
             ),
             Self::InvalidMetadata(field) => {
                 write!(f, "Invalid {field} value in the DICOM dataset.")
@@ -49,10 +62,17 @@ impl fmt::Display for InspectError {
 
 impl std::error::Error for InspectError {}
 
-pub(crate) fn inspect_file(path: &Path) -> Result<Inspection, InspectError> {
+pub(crate) fn inspect_file(path: &Path, limit_bytes: u64) -> Result<Inspection, InspectError> {
     // Only regular files are inputs. In particular, do not block on a pipe or device.
-    if !path.metadata().map_err(|_| InspectError::Read)?.is_file() {
+    let metadata = path.metadata().map_err(|_| InspectError::Read)?;
+    if !metadata.is_file() {
         return Err(InspectError::Read);
+    }
+    if metadata.len() > limit_bytes {
+        return Err(InspectError::FileTooLarge {
+            size_bytes: metadata.len(),
+            limit_bytes,
+        });
     }
     // Reuse the viewer's reader and repairs, but never decode pixels. Do not expose
     // reader errors: they can contain a file path or values outside this summary.

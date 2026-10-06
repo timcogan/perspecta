@@ -66,9 +66,9 @@ Its primary purpose is consistency during development, not full architecture cov
 29. GitHub Pages MUST build from the exact triggering `master` commit and publish that commit identity in the artifact, footer, and `+web.<7-hex>` display version. Local builds MUST disclose a dirty source tree instead of presenting it as clean.
 30. The configurable secondary color MUST cover live measurements, selected image/history borders, and GSPS/SR graphics and labels. Desktop builds persist it with the existing user settings; browser builds keep it only for the current session.
 31. Configurable single-key shortcuts MUST remain unique, MUST NOT replace reserved navigation/close keys, and MUST persist alongside existing desktop settings. Invalid or conflicting persisted shortcut sets MUST fall back to safe defaults; browser changes remain session-only.
-32. Native `inspect` MUST run before GUI or logger initialization. It MUST read one regular local file through the existing reader and repairs, without pixel decoding or file changes.
+32. Native `inspect` MUST run before GUI or logger initialization. Its file size limit MUST default to 4096 MiB (4 GiB). `--max-file-mib` MUST accept only positive whole MiB values with checked conversion to bytes. Inspection MUST reject files above the selected limit before it calls the reader. It MUST read one regular local file through the existing reader and repairs, without pixel decoding or file changes.
 
-33. Inspection JSON MUST use an explicit field list and schema version. It MUST exclude patient fields, instance identifiers, paths, and free-text descriptions. Errors MUST exclude raw input values and reader diagnostics.
+33. Inspection JSON MUST use an explicit field list and schema version. It MUST exclude patient fields, instance identifiers, paths, and free-text descriptions. Errors MUST exclude raw input values and reader diagnostics. Size errors MUST report the file size, active limit, and minimum required `--max-file-mib` value, rounded up to whole MiB.
 
 34. Inspection MUST report missing fields as null. Applicable numeric fields MUST contain one positive integer within their documented range. Non-applicable dimensions and frame counts MUST remain null.
 
