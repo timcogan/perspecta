@@ -295,37 +295,6 @@ fn read_errors_do_not_expose_the_input_path_or_file_contents() {
 }
 
 #[test]
-fn oversized_files_fail_before_parsing_without_exposing_the_input_path() {
-    let directory = tempfile::tempdir().expect("temporary directory must exist");
-    let path = directory.path().join("SYNTHETIC-EXCLUDED-FILENAME.dcm");
-    // Extend an empty file without a large buffer or a stored fixture.
-    let file = std::fs::File::create(&path).expect("synthetic file must be writable");
-    let size = 4096 * 1024 * 1024 + 1;
-    file.set_len(size).expect("synthetic file size must be set");
-    drop(file);
-
-    assert_eq!(
-        error(inspect(&path), 1, "file_too_large"),
-        json!({
-            "schema_version": 1,
-            "error": {
-                "code": "file_too_large",
-                "message": "DICOM file size is 4294967297 bytes (4097 MiB rounded up). \
-                            This exceeds the configured limit of 4096 MiB (4294967296 bytes). \
-                            Retry with --max-file-mib 4097 or higher. \
-                            Inspection loads the complete file into memory. Parsing and repairs can require additional memory."
-            }
-        })
-    );
-    assert_eq!(
-        std::fs::metadata(&path)
-            .expect("synthetic file must still exist")
-            .len(),
-        size
-    );
-}
-
-#[test]
 fn custom_file_limit_accepts_its_boundary_and_can_be_raised() {
     let directory = tempfile::tempdir().expect("temporary directory must exist");
     let path = directory.path().join("SYNTHETIC-EXCLUDED-FILENAME.dcm");

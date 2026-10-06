@@ -183,6 +183,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inspect_defaults_to_a_four_gib_file_limit() {
+        let args = ["inspect".into(), "synthetic.dcm".into()];
+        assert_eq!(
+            parse_args(&args).expect("inspect with one file must parse"),
+            Command::Inspect {
+                path: "synthetic.dcm".into(),
+                limit_bytes: 4096 * MIB_BYTES,
+            }
+        );
+    }
+
+    #[test]
     fn existing_launches_bypass_cli_dispatch() {
         for args in [
             vec![],
