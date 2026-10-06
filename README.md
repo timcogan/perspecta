@@ -71,6 +71,21 @@ make run-release
 
 ## Opening Studies
 
+### Inspect a Local File from the CLI
+
+Use `inspect` to get a technical summary without a window or pixel decoding:
+
+```bash
+perspecta inspect example-data/image.dcm
+perspecta inspect --help
+```
+
+The command reads the complete file into memory and writes a technical summary as JSON.
+It excludes patient fields, instance identifiers, file paths, and free-text descriptions.
+It does not modify the file or validate the complete DICOM object.
+
+See the [CLI contract](website/content/docs/launch-options.md#cli-inspection) for field types, error codes, and file-name handling.
+
 ### 1. Local Files (CLI)
 
 ```bash

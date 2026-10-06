@@ -1,4 +1,6 @@
 mod app;
+#[cfg(not(target_arch = "wasm32"))]
+mod cli;
 mod dicom;
 #[cfg(not(target_arch = "wasm32"))]
 mod dicomweb;
@@ -15,6 +17,16 @@ mod renderer;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::io;
+
+/// Run a native command or open the desktop viewer.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run() -> eframe::Result<std::process::ExitCode> {
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if let Some(code) = cli::run(&args, &mut io::stdout().lock(), &mut io::stderr().lock()) {
+        return Ok(code);
+    }
+    run_native().map(|()| std::process::ExitCode::SUCCESS)
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result<()> {
