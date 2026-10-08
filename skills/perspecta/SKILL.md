@@ -34,7 +34,7 @@ Inspection reads the complete file into memory. Parsing and repairs can require 
 
 ## Interpret the Result
 
-On exit `0`, parse standard output as one JSON object. This skill supports `schema_version: 1`.
+When `perspecta inspect` exits with status `0`, parse standard output as one JSON object. This skill supports `schema_version: 1`.
 If the schema version differs, report that compatibility is unknown before interpreting fields.
 
 - `kind` identifies `image`, `structured_report`, `gsps`, `parametric_map`, or `other`.
