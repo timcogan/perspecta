@@ -14,6 +14,7 @@ Its primary purpose is consistency during development, not full architecture cov
 - `src/main.rs`: thin native executable entry point only.
 - `src/lib.rs`: shared crate composition plus native and browser bootstrap wiring.
 - `src/cli.rs`: native command dispatch, help, JSON output, and exit codes before GUI or logger initialization.
+- `skills/perspecta/SKILL.md`: portable agent instructions for the native inspection CLI.
 - `src/platform.rs`: target-specific task scheduling; native threads, deferred browser tasks, and cooperative browser yields.
 - `src/launch.rs`: parse/validate CLI and `perspecta://` launch inputs.
 - `src/dicomweb.rs`: DICOMweb metadata selection and instance download.
@@ -72,7 +73,7 @@ Its primary purpose is consistency during development, not full architecture cov
 
 34. Inspection MUST report missing fields as null. Applicable numeric fields MUST contain one positive integer within their documented range. Non-applicable dimensions and frame counts MUST remain null.
 
-35. CLI responses MUST use standard output for results or help and standard error for structured errors. These responses are protocol output, separate from production diagnostic logging.
+35. CLI responses MUST use standard output for results, help, or version and standard error for structured errors. These responses are protocol output, separate from production diagnostic logging. `--version` MUST report `PERSPECTA_DISPLAY_VERSION`, including build suffixes, before GUI or logger initialization.
 
 ## Change Rules
 

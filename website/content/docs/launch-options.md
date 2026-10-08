@@ -2,7 +2,7 @@
 title = "Launch Options"
 description = "Open local files, grouped studies, reports, and custom launch URLs in Perspecta."
 weight = 20
-last_updated = "2026-10-06"
+last_updated = "2026-10-08"
 +++
 
 This page covers how Perspecta opens local files, grouped review sets, reports, and `perspecta://` URLs from external systems.
@@ -10,6 +10,9 @@ This page covers how Perspecta opens local files, grouped review sets, reports, 
 For keyboard, mouse, layout, and overlay behavior after content opens, see [Viewer Basics](/docs/viewer-basics/).
 
 ## CLI Inspection
+
+Run `perspecta --version` to print `perspecta <version>` and exit without a graphical display or log output.
+The version includes any local build suffix, as in the viewer.
 
 Use `inspect` to read a technical summary of one local DICOM file:
 

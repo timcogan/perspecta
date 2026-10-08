@@ -76,6 +76,7 @@ make run-release
 Use `inspect` to get a technical summary without a window or pixel decoding:
 
 ```bash
+perspecta --version
 perspecta inspect example-data/image.dcm
 perspecta inspect --help
 ```
@@ -85,6 +86,10 @@ It excludes patient fields, instance identifiers, file paths, and free-text desc
 It does not modify the file or validate the complete DICOM object.
 
 See the [CLI contract](website/content/docs/launch-options.md#cli-inspection) for field types, error codes, and file-name handling.
+
+Agents with terminal access can use the [Perspecta skill](skills/perspecta/SKILL.md).
+Copy the `skills/perspecta` directory into a skill location supported by your agent.
+The skill requires a native Perspecta executable on `PATH` with `--version` and `inspect` support.
 
 ### 1. Local Files (CLI)
 

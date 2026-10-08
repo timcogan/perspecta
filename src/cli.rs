@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::dicom::inspect::{inspect_file, InspectError, MIB_BYTES};
 
 const DEFAULT_MAX_FILE_MIB: u64 = 4096;
+const VERSION: &str = concat!("perspecta ", env!("PERSPECTA_DISPLAY_VERSION"), "\n");
 
 const HELP: &str = "Perspecta DICOM Viewer
 
@@ -15,6 +16,7 @@ Usage:
   perspecta inspect <file>
   perspecta inspect [--max-file-mib <MiB>] [--] <file>
   perspecta inspect --help
+  perspecta --version
   perspecta [--open] <file>...
   perspecta <perspecta:// URL>
 
@@ -24,6 +26,7 @@ Use --max-file-mib before the file name to set a positive whole number of MiB.
 The complete file is read into memory. This is not full DICOM validation.
 Parsing and repairs can require memory beyond the file size.
 Success writes schema_version 1 JSON to stdout. Errors write JSON to stderr.
+--version prints the application version and exits without a window.
 Exit codes: 0 success, 1 file/data/output error, 2 invalid arguments.
 Use -- before a file name that starts with a hyphen.
 To open a file named inspect in the viewer, use --open inspect or ./inspect.
@@ -34,6 +37,7 @@ enum Command {
     Viewer,
     Inspect { path: PathBuf, limit_bytes: u64 },
     Help,
+    Version,
 }
 
 #[derive(Debug)]
@@ -96,6 +100,13 @@ fn parse_args(args: &[OsString]) -> Result<Command, CliError> {
     let Some(first) = args.first() else {
         return Ok(Command::Viewer);
     };
+    if first == "--version" {
+        return if args.len() == 1 {
+            Ok(Command::Version)
+        } else {
+            Err(CliError::Arguments)
+        };
+    }
     if first == "--help" || first == "-h" {
         return if args.len() == 1 {
             Ok(Command::Help)
@@ -147,6 +158,10 @@ pub(crate) fn run(
         Ok(Command::Viewer) => return None,
         Ok(Command::Help) => stdout
             .write_all(HELP.as_bytes())
+            .and_then(|()| stdout.flush())
+            .map_err(|_| CliError::Output),
+        Ok(Command::Version) => stdout
+            .write_all(VERSION.as_bytes())
             .and_then(|()| stdout.flush())
             .map_err(|_| CliError::Output),
         Ok(Command::Inspect { path, limit_bytes }) => inspect_file(&path, limit_bytes)
@@ -201,6 +216,7 @@ mod tests {
             vec!["example.dcm"],
             vec!["one.dcm", "two.dcm"],
             vec!["--open", "inspect"],
+            vec!["--open", "--version"],
             vec!["./inspect"],
             vec!["perspecta://open?path=example.dcm"],
             vec!["perspecta://open?group=one.dcm|two.dcm&open_group=0"],
@@ -229,11 +245,13 @@ mod tests {
 
     #[test]
     fn failed_output_returns_an_error_instead_of_success() {
-        let mut stderr = Vec::new();
-        let code = run(&["--help".into()], &mut BrokenOutput, &mut stderr);
-        assert_eq!(code, Some(ExitCode::FAILURE));
-        let error: serde_json::Value =
-            serde_json::from_slice(&stderr).expect("error output must be JSON");
-        assert_eq!(error["error"]["code"], "output_error");
+        for flag in ["--help", "--version"] {
+            let mut stderr = Vec::new();
+            let code = run(&[flag.into()], &mut BrokenOutput, &mut stderr);
+            assert_eq!(code, Some(ExitCode::FAILURE));
+            let error: serde_json::Value =
+                serde_json::from_slice(&stderr).expect("error output must be JSON");
+            assert_eq!(error["error"]["code"], "output_error");
+        }
     }
 }

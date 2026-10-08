@@ -380,12 +380,29 @@ fn invalid_file_limits_fail_with_usage_without_echoing_the_value() {
 }
 
 #[test]
+fn version_reports_the_display_version_without_a_display_or_logs() {
+    let output = command()
+        .arg("--version")
+        .output()
+        .expect("CLI version must run");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        output.stdout,
+        format!("perspecta {}\n", env!("PERSPECTA_DISPLAY_VERSION")).as_bytes()
+    );
+}
+
+#[test]
 fn invalid_arguments_and_help_do_not_start_the_viewer() {
     for args in [
         vec!["inspect"],
         vec!["inspect", ""],
         vec!["inspect", "one.dcm", "two.dcm"],
         vec!["inspect", "--unknown"],
+        vec!["--version", "extra"],
+        vec!["--version", "--help"],
+        vec!["inspect", "--version"],
         vec!["inspect", "--"],
         vec!["inspect", "--", ""],
         vec!["inspect", "--help", "extra"],
