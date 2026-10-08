@@ -91,6 +91,21 @@ Agents with terminal access can use the [Perspecta skill](skills/perspecta/SKILL
 Copy the `skills/perspecta` directory into a skill location supported by your agent.
 The skill requires a native Perspecta executable on `PATH` with `--version` and `inspect` support.
 
+### Export a PNG from the CLI
+
+Use `render` to export one stored DICOM frame without a window:
+
+```bash
+perspecta render --output png --frame 1 -- example-data/image.dcm > preview.png
+```
+
+The default frame is `1`. Frame numbers follow stored DICOM order, which can differ from the viewer's display order.
+The command uses the same file size limit as `inspect` and writes errors as JSON to standard error.
+It supports 8-bit and 16-bit monochrome and RGB images, with the existing pixel decoders and render functions.
+
+The PNG contains no added DICOM metadata or overlays. Pixels can still contain identifying text, so export does not anonymize the image.
+See [PNG export](website/content/docs/launch-options.md#cli-png-export) for defaults, limits, and errors.
+
 ### 1. Local Files (CLI)
 
 ```bash

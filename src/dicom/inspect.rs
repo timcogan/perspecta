@@ -48,7 +48,7 @@ impl fmt::Display for InspectError {
                 "DICOM file size is {size_bytes} bytes ({} MiB rounded up). \
                  This exceeds the configured limit of {} MiB ({limit_bytes} bytes). \
                  Retry with --max-file-mib {} or higher. \
-                 Inspection loads the complete file into memory. Parsing and repairs can require additional memory.",
+                 The complete file is read into memory. Parsing and repairs can require additional memory.",
                 size_bytes.div_ceil(MIB_BYTES),
                 limit_bytes / MIB_BYTES,
                 size_bytes.div_ceil(MIB_BYTES),
@@ -63,6 +63,14 @@ impl fmt::Display for InspectError {
 impl std::error::Error for InspectError {}
 
 pub(crate) fn inspect_file(path: &Path, limit_bytes: u64) -> Result<Inspection, InspectError> {
+    let object = open_file_with_limit(path, limit_bytes)?;
+    inspect_object(&object)
+}
+
+pub(super) fn open_file_with_limit(
+    path: &Path,
+    limit_bytes: u64,
+) -> Result<DefaultDicomObject, InspectError> {
     // Only regular files are inputs. In particular, do not block on a pipe or device.
     let metadata = path.metadata().map_err(|_| InspectError::Read)?;
     if !metadata.is_file() {
@@ -74,10 +82,9 @@ pub(crate) fn inspect_file(path: &Path, limit_bytes: u64) -> Result<Inspection, 
             limit_bytes,
         });
     }
-    // Reuse the viewer's reader and repairs, but never decode pixels. Do not expose
+    // Reuse the viewer's reader and repairs. Do not expose
     // reader errors: they can contain a file path or values outside this summary.
-    let object = open_dicom_object(path).map_err(|_| InspectError::Read)?;
-    inspect_object(&object)
+    open_dicom_object(path).map_err(|_| InspectError::Read)
 }
 
 fn inspect_object(object: &DefaultDicomObject) -> Result<Inspection, InspectError> {
@@ -135,7 +142,7 @@ fn read_text(
     Ok(nonempty(&value))
 }
 
-fn read_positive_integer(
+pub(super) fn read_positive_integer(
     object: &DefaultDicomObject,
     tag: Tag,
     field: &'static str,

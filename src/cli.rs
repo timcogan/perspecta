@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use serde::Serialize;
 
 use crate::dicom::inspect::{inspect_file, InspectError, MIB_BYTES};
+use crate::dicom::render::{render_file, RenderError};
 
 const DEFAULT_MAX_FILE_MIB: u64 = 4096;
 const VERSION: &str = concat!("perspecta ", env!("PERSPECTA_DISPLAY_VERSION"), "\n");
@@ -16,6 +17,8 @@ Usage:
   perspecta inspect <file>
   perspecta inspect [--max-file-mib <MiB>] [--] <file>
   perspecta inspect --help
+  perspecta render [--output png] [--frame <N>] [--max-file-mib <MiB>] [--] <file>
+  perspecta render --help
   perspecta --version
   perspecta [--open] <file>...
   perspecta <perspecta:// URL>
@@ -25,17 +28,31 @@ The default file size limit is 4096 MiB (4 GiB).
 Use --max-file-mib before the file name to set a positive whole number of MiB.
 The complete file is read into memory. This is not full DICOM validation.
 Parsing and repairs can require memory beyond the file size.
-Success writes schema_version 1 JSON to stdout. Errors write JSON to stderr.
+Inspect writes schema_version 1 JSON to stdout. Errors write JSON to stderr.
+Render writes one PNG to stdout. Redirect it to a file, for example:
+  perspecta render --output png -- example-data/image.dcm > preview.png
+--frame selects a stored DICOM frame, starting at 1 (default: 1).
+Render uses the same file size limit. Pixel decoding requires additional memory.
+PNG export supports 8-bit and 16-bit monochrome and RGB images.
+It adds no DICOM metadata or overlays. Pixels can still contain identifying text.
 --version prints the application version and exits without a window.
 Exit codes: 0 success, 1 file/data/output error, 2 invalid arguments.
 Use -- before a file name that starts with a hyphen.
-To open a file named inspect in the viewer, use --open inspect or ./inspect.
+To open a file named inspect or render in the viewer, use --open or a ./ prefix.
 ";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Viewer,
-    Inspect { path: PathBuf, limit_bytes: u64 },
+    Inspect {
+        path: PathBuf,
+        limit_bytes: u64,
+    },
+    Render {
+        path: PathBuf,
+        limit_bytes: u64,
+        frame: u32,
+    },
     Help,
     Version,
 }
@@ -44,31 +61,45 @@ enum Command {
 enum CliError {
     Arguments,
     FileLimit,
+    Frame,
     Inspect(InspectError),
+    Render(RenderError),
     Output,
 }
 
 impl CliError {
     fn code(&self) -> &'static str {
         match self {
-            Self::Arguments | Self::FileLimit => "invalid_arguments",
-            Self::Inspect(InspectError::Read) => "read_error",
-            Self::Inspect(InspectError::FileTooLarge { .. }) => "file_too_large",
-            Self::Inspect(InspectError::InvalidMetadata(_)) => "invalid_metadata",
-            Self::Output => "output_error",
+            Self::Arguments | Self::FileLimit | Self::Frame => "invalid_arguments",
+            Self::Inspect(InspectError::Read)
+            | Self::Render(RenderError::Inspect(InspectError::Read)) => "read_error",
+            Self::Inspect(InspectError::FileTooLarge { .. })
+            | Self::Render(RenderError::Inspect(InspectError::FileTooLarge { .. })) => {
+                "file_too_large"
+            }
+            Self::Inspect(InspectError::InvalidMetadata(_))
+            | Self::Render(RenderError::Inspect(InspectError::InvalidMetadata(_))) => {
+                "invalid_metadata"
+            }
+            Self::Render(RenderError::Unsupported) => "unsupported_image",
+            Self::Render(RenderError::FrameOutOfRange { .. }) => "frame_out_of_range",
+            Self::Render(RenderError::Decode) => "decode_error",
+            Self::Output | Self::Render(RenderError::Output) => "output_error",
         }
     }
 
     fn message(&self) -> String {
         match self {
             Self::Arguments => {
-                "Expected one local file. Use 'perspecta inspect --help' for usage.".to_owned()
+                "Expected one local file and valid options. Use 'perspecta --help' for usage.".to_owned()
             }
             Self::FileLimit => format!(
                 "--max-file-mib requires an integer from 1 to {} (MiB). Example: --max-file-mib 8192.",
                 u64::MAX / MIB_BYTES
             ),
             Self::Inspect(error) => error.to_string(),
+            Self::Render(error) => error.to_string(),
+            Self::Frame => "--frame requires an integer from 1 to 4294967295 in stored DICOM order. Example: --frame 1.".to_owned(),
             Self::Output => {
                 "Could not write command output. Check the output destination.".to_owned()
             }
@@ -76,7 +107,7 @@ impl CliError {
     }
 
     fn exit_code(&self) -> ExitCode {
-        if matches!(self, Self::Arguments | Self::FileLimit) {
+        if matches!(self, Self::Arguments | Self::FileLimit | Self::Frame) {
             ExitCode::from(2)
         } else {
             ExitCode::FAILURE
@@ -114,6 +145,9 @@ fn parse_args(args: &[OsString]) -> Result<Command, CliError> {
             Err(CliError::Arguments)
         };
     }
+    if first == "render" {
+        return parse_render_args(&args[1..]);
+    }
     if first != "inspect" {
         return Ok(Command::Viewer);
     }
@@ -136,6 +170,51 @@ fn parse_args(args: &[OsString]) -> Result<Command, CliError> {
         }
         _ => Err(CliError::Arguments),
     }
+}
+
+fn parse_render_args(mut args: &[OsString]) -> Result<Command, CliError> {
+    let mut limit_bytes = None;
+    let mut frame = None;
+    let mut output_seen = false;
+    loop {
+        match args {
+            [flag, value, rest @ ..] if flag == "--max-file-mib" && limit_bytes.is_none() => {
+                limit_bytes = Some(parse_file_limit(value)?);
+                args = rest;
+            }
+            [flag] if flag == "--max-file-mib" => return Err(CliError::FileLimit),
+            [flag, value, rest @ ..] if flag == "--frame" && frame.is_none() => {
+                frame = Some(
+                    value
+                        .to_str()
+                        .filter(|value| {
+                            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+                        })
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .filter(|value| *value > 0)
+                        .ok_or(CliError::Frame)?,
+                );
+                args = rest;
+            }
+            [flag] if flag == "--frame" => return Err(CliError::Frame),
+            [flag, value, rest @ ..] if flag == "--output" && value == "png" && !output_seen => {
+                output_seen = true;
+                args = rest;
+            }
+            [flag] if flag == "--help" || flag == "-h" => return Ok(Command::Help),
+            _ => break,
+        }
+    }
+    let path = match args {
+        [separator, path] if separator == "--" && !path.is_empty() => path,
+        [path] if !path.is_empty() && !path.as_encoded_bytes().starts_with(b"-") => path,
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(Command::Render {
+        path: path.into(),
+        limit_bytes: limit_bytes.unwrap_or(DEFAULT_MAX_FILE_MIB * MIB_BYTES),
+        frame: frame.unwrap_or(1),
+    })
 }
 
 fn parse_file_limit(value: &OsStr) -> Result<u64, CliError> {
@@ -167,6 +246,18 @@ pub(crate) fn run(
         Ok(Command::Inspect { path, limit_bytes }) => inspect_file(&path, limit_bytes)
             .map_err(CliError::Inspect)
             .and_then(|inspection| write_json(stdout, &inspection).map_err(|_| CliError::Output)),
+        Ok(Command::Render {
+            path,
+            limit_bytes,
+            frame,
+        }) => render_file(&path, limit_bytes, frame)
+            .map_err(CliError::Render)
+            .and_then(|png| {
+                stdout
+                    .write_all(&png)
+                    .and_then(|()| stdout.flush())
+                    .map_err(|_| CliError::Output)
+            }),
         Err(error) => Err(error),
     };
     Some(match result {
@@ -210,14 +301,29 @@ mod tests {
     }
 
     #[test]
+    fn render_defaults_to_the_first_frame_and_a_four_gib_file_limit() {
+        let args = ["render".into(), "synthetic.dcm".into()];
+        assert_eq!(
+            parse_args(&args).expect("render with one file must parse"),
+            Command::Render {
+                path: "synthetic.dcm".into(),
+                limit_bytes: 4096 * MIB_BYTES,
+                frame: 1,
+            }
+        );
+    }
+
+    #[test]
     fn existing_launches_bypass_cli_dispatch() {
         for args in [
             vec![],
             vec!["example.dcm"],
             vec!["one.dcm", "two.dcm"],
             vec!["--open", "inspect"],
+            vec!["--open", "render"],
             vec!["--open", "--version"],
             vec!["./inspect"],
+            vec!["./render"],
             vec!["perspecta://open?path=example.dcm"],
             vec!["perspecta://open?group=one.dcm|two.dcm&open_group=0"],
             vec!["perspecta://open?dicomweb=https%3A%2F%2Fexample.invalid&study=1.2.3"],

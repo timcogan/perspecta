@@ -28,6 +28,7 @@ log = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dicom-pixeldata = { version = "0.10.0", default-features = false, features = ["rayon"] }
+png = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rfd = "0.17"
 serde = { version = "1.0", features = ["derive"] }
