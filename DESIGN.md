@@ -13,14 +13,15 @@ Its primary purpose is consistency during development, not full architecture cov
 
 - `src/main.rs`: thin native executable entry point only.
 - `src/lib.rs`: shared crate composition plus native and browser bootstrap wiring.
-- `src/cli.rs`: native command dispatch, help, JSON output, and exit codes before GUI or logger initialization.
-- `skills/perspecta/SKILL.md`: portable agent instructions for the native inspection CLI.
+- `src/cli.rs`: native command dispatch, help, JSON/PNG output, and exit codes before GUI or logger initialization.
+- `skills/perspecta/SKILL.md`: portable agent instructions for native inspection and PNG export.
 - `src/platform.rs`: target-specific task scheduling; native threads, deferred browser tasks, and cooperative browser yields.
 - `src/launch.rs`: parse/validate CLI and `perspecta://` launch inputs.
 - `src/dicomweb.rs`: DICOMweb metadata selection and instance download.
 - `src/dicomweb_web.rs`: browser-only unavailable-service shim; the static preview never performs DICOMweb requests.
 - `src/dicom.rs`, `src/dicom/*`: DICOM facade, shared object open/classify/decode helpers, pixel spacing extraction, and format-specific parsers.
 - `src/dicom/inspect.rs`: native technical summary extraction and typed errors, using the shared reader and classification without pixel decoding.
+- `src/dicom/render.rs`: native export of one stored frame through the shared reader, pixel decoders, and render functions.
 - `src/mammo.rs`: mammography ordering/alignment helpers.
 - `src/renderer.rs`: pixel buffer to `egui::ColorImage` rendering helpers.
 - `src/logging.rs`: logging setup and log-level configuration.
@@ -74,6 +75,8 @@ Its primary purpose is consistency during development, not full architecture cov
 34. Inspection MUST report missing fields as null. Applicable numeric fields MUST contain one positive integer within their documented range. Non-applicable dimensions and frame counts MUST remain null.
 
 35. CLI responses MUST use standard output for results, help, or version and standard error for structured errors. These responses are protocol output, separate from production diagnostic logging. `--version` MUST report `PERSPECTA_DISPLAY_VERSION`, including build suffixes, before GUI or logger initialization.
+
+36. Native `render` MUST check file size before the shared reader runs, without GUI, logger, or preload initialization. It MUST decode one stored frame, with frame 1 as the default, and reject unsupported objects and pixel layouts. Frame numbers MUST follow stored DICOM order and start at 1. It MUST use the existing window/level and RGB functions and complete PNG encoding before output. Export MUST exclude metadata and overlays, preserve source files, and document that pixels can retain identifiers.
 
 ## Change Rules
 

@@ -26,6 +26,8 @@ mod gsps;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod inspect;
 mod parametric_map;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod render;
 mod sr;
 
 #[allow(unused_imports)]

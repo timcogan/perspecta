@@ -103,6 +103,67 @@ perspecta inspect -- -example.dcm
 To open a file named `inspect` in the viewer, use `perspecta --open inspect` or `perspecta ./inspect`.
 Existing file, grouped, and `perspecta://` launches continue to open the viewer.
 
+## CLI PNG Export
+
+Use `render` to export one frame from one local DICOM image without a graphical display:
+
+```sh
+perspecta render --output png --frame 1 -- example-data/image.dcm > preview.png
+perspecta render --max-file-mib 8192 --frame 2 -- example-data/multiframe.dcm > frame-2.png
+perspecta render --help
+```
+
+The output format defaults to PNG. `--output png` makes this choice explicit. Other formats are not supported.
+`--frame` accepts a positive whole number and defaults to `1`. Frame numbers follow stored DICOM order.
+The viewer can reverse its display order based on patient position, so its frame numbers can differ.
+
+An absent `NumberOfFrames` means one frame for export. `inspect` continues to report the absent field as `null`.
+
+Options must precede the file name and can appear in any order. Duplicate options produce `invalid_arguments`.
+Use `--` before a file name that starts with a hyphen. Native file names do not need UTF-8 encoding.
+To open a file named `render` in the viewer, use `perspecta --open render` or `perspecta ./render`.
+
+Export shares the inspection limit of **4096 MiB (4 GiB)** and accepts `--max-file-mib` to change it.
+It reads the complete file, with the same repairs, and decodes only the selected frame.
+The file size limit does not bound total memory use. Repairs, pixel decoding, and PNG encoding require additional memory.
+
+### Pixels and Metadata
+
+Export supports 8-bit and 16-bit monochrome and RGB images. Compressed images require a decoder supported by the installed build.
+The selected frame keeps its stored dimensions and orientation. Export adds no zoom, crop, rotation, or supplemental overlays.
+
+Monochrome export applies the modality rescale and the viewer's window/level render function, including MONOCHROME1 inversion.
+It uses the first root `WindowCenter` and `WindowWidth` values when available.
+Otherwise, it derives the window from the selected frame's minimum and maximum rescaled samples.
+
+RGB export uses the viewer's RGB render function. For 16-bit color, it shifts samples to retain the highest eight stored bits.
+The PNG has eight bits per channel.
+
+Structured Reports, presentation states, Parametric Maps, and unsupported pixel layouts produce errors.
+The PNG contains only image dimensions and rendered pixels, without DICOM metadata or text chunks.
+Export does not anonymize pixel content. Identifying text already present in pixels remains visible.
+
+### Output and Errors
+
+Success writes PNG bytes to standard output, leaves standard error empty, and exits with `0`.
+Help prints usage text instead of PNG. Redirect PNG output to a file or capture it as binary data.
+Shell redirection can overwrite an existing destination. Use a new destination when you need to preserve an existing file.
+
+Failures use the same versioned JSON error envelope and exit codes as `inspect`.
+Read, file size, metadata, and output errors keep their existing error codes.
+PNG encoding failures also use `output_error`. These additional errors use exit code `1`:
+
+| Error code | Meaning |
+| --- | --- |
+| `unsupported_image` | The object type, sample depth, or photometric interpretation is not supported |
+| `frame_out_of_range` | The selected frame exceeds the frame count. The message gives the valid `--frame` range |
+| `decode_error` | Pixel data is incomplete or invalid, or its codec or layout is not supported by this build |
+
+An invalid `--frame` value, unsupported output format, or invalid option syntax uses `invalid_arguments` and exit code `2`.
+Errors exclude source paths, raw metadata values, and decoder diagnostics.
+File and decode failures leave standard output empty. Output failures can leave a partial PNG.
+Discard the output file or captured bytes when the command exits with a nonzero status.
+
 ## Local Files
 
 Open one or more DICOM files from the UI menu.
