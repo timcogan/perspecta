@@ -108,8 +108,9 @@ Existing file, grouped, and `perspecta://` launches continue to open the viewer.
 Use `render` to export one frame from one local DICOM image without a graphical display:
 
 ```sh
-perspecta render --output png --frame 1 -- example-data/image.dcm > preview.png
-perspecta render --max-file-mib 8192 --frame 2 -- example-data/multiframe.dcm > frame-2.png
+perspecta render --output-file preview.png --frame 1 -- example-data/image.dcm
+perspecta render --max-file-mib 8192 --frame 2 --output-file frame-2.png -- example-data/multiframe.dcm
+perspecta render --window-center 40 --window-width 400 --max-dimension 2048 -- example-data/image.dcm > windowed-preview.png
 perspecta render --help
 ```
 
@@ -127,14 +128,28 @@ Export shares the inspection limit of **4096 MiB (4 GiB)** and accepts `--max-fi
 It reads the complete file, with the same repairs, and decodes only the selected frame.
 The file size limit does not bound total memory use. Repairs, pixel decoding, and PNG encoding require additional memory.
 
+`--max-pixels` limits the selected frame's declared `Rows × Columns` before pixel decoding. The default is **192,000,000 pixels per frame**.
+Use a positive whole number, for example `--max-pixels 240000000`, when the frame and available memory require a larger limit.
+The error reports the declared pixel count, active limit, and minimum required value.
+This limit is not a hard RAM bound or validation of dimensions inside compressed data.
+
 ### Pixels and Metadata
 
 Export supports 8-bit and 16-bit monochrome and RGB images. Compressed images require a decoder supported by the installed build.
-The selected frame keeps its stored dimensions and orientation. Export adds no zoom, crop, rotation, or supplemental overlays.
+The selected frame keeps its stored dimensions by default, and always keeps its stored orientation.
+
+`--max-dimension` reduces the longest PNG side to the given positive number of pixels, without upscaling.
+It preserves the aspect ratio within integer pixel rounding, with at least one pixel per side.
+Resizing uses triangle filtering after decoding and windowing. It does not reduce the input pixel requirement or bypass `--max-pixels`.
+Export adds no crop, rotation, or supplemental overlays.
 
 Monochrome export applies the modality rescale and the viewer's window/level render function, including MONOCHROME1 inversion.
 It uses the first root `WindowCenter` and `WindowWidth` values when available.
 Otherwise, it derives the window from the selected frame's minimum and maximum rescaled samples.
+
+Set both `--window-center` and `--window-width` to override these defaults in rescaled sample units.
+Center must be finite. Width must be finite and at least 1. Values must produce finite window endpoints.
+These options apply only to monochrome images. Supplying them for color images produces `invalid_arguments`.
 
 RGB export uses the viewer's RGB render function. For 16-bit color, it shifts samples to retain the highest eight stored bits.
 The PNG has eight bits per channel.
@@ -145,9 +160,14 @@ Export does not anonymize pixel content. Identifying text already present in pix
 
 ### Output and Errors
 
-Success writes PNG bytes to standard output, leaves standard error empty, and exits with `0`.
+Success leaves standard error empty and exits with `0`.
+By default, or with `--output-file -`, it writes PNG bytes to standard output.
 Help prints usage text instead of PNG. Redirect PNG output to a file or capture it as binary data.
 Shell redirection can overwrite an existing destination. Use a new destination when you need to preserve an existing file.
+
+`--output-file <file>` saves the complete PNG to a new file and leaves stdout empty.
+It refuses existing destinations, including symbolic links, and never overwrites them. The parent directory must already exist.
+The command writes a temporary file in that directory before installing the completed output without overwriting a concurrently created destination.
 
 Failures use the same versioned JSON error envelope and exit codes as `inspect`.
 Read, file size, metadata, and output errors keep their existing error codes.
@@ -155,14 +175,16 @@ PNG encoding failures also use `output_error`. These additional errors use exit 
 
 | Error code | Meaning |
 | --- | --- |
-| `unsupported_image` | The object type, sample depth, or photometric interpretation is not supported |
-| `frame_out_of_range` | The selected frame exceeds the frame count. The message gives the valid `--frame` range |
-| `decode_error` | Pixel data is incomplete or invalid, or its codec or layout is not supported by this build |
+| `unsupported_image` | The object type, sample depth, or photometric interpretation is not supported. |
+| `frame_out_of_range` | The selected frame exceeds the frame count, with the valid `--frame` range in the message. |
+| `frame_too_large` | Declared pixels exceed `--max-pixels`, with the pixel count, active limit, and minimum required value in the message. |
+| `decode_error` | Pixel data is incomplete or invalid, or its codec or layout is not supported by this build. |
+| `output_exists` | The output destination already exists and is preserved, so choose a new destination. |
 
-An invalid `--frame` value, unsupported output format, or invalid option syntax uses `invalid_arguments` and exit code `2`.
-Errors exclude source paths, raw metadata values, and decoder diagnostics.
-File and decode failures leave standard output empty. Output failures can leave a partial PNG.
-Discard the output file or captured bytes when the command exits with a nonzero status.
+Invalid option values, incomplete window pairs, unsupported output formats, or invalid option syntax use `invalid_arguments` and exit code `2`.
+Errors exclude source and destination paths, raw metadata values, and decoder diagnostics.
+File and decode failures leave standard output empty. Output failures can leave partial bytes on stdout.
+Discard captured stdout after a nonzero exit. With `--output-file`, preserve any destination that existed before the command.
 
 ## Local Files
 

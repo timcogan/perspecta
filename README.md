@@ -96,12 +96,20 @@ The skill requires a native Perspecta executable on `PATH` with `--version` and 
 Use `render` to export one stored DICOM frame without a window:
 
 ```bash
-perspecta render --output png --frame 1 -- example-data/image.dcm > preview.png
+perspecta render --output-file preview.png --frame 1 -- example-data/image.dcm
+perspecta render --max-dimension 2048 --window-center 40 --window-width 400 -- example-data/image.dcm > windowed-preview.png
 ```
 
 The default frame is `1`. Frame numbers follow stored DICOM order, which can differ from the viewer's display order.
 The command uses the same file size limit as `inspect` and writes errors as JSON to standard error.
 It supports 8-bit and 16-bit monochrome and RGB images, with the existing pixel decoders and render functions.
+
+`--output-file` saves a complete PNG to a new file and refuses to overwrite an existing destination.
+Without this option, PNG bytes go to standard output.
+Use `--window-center` and `--window-width` together to set monochrome contrast, or `--max-dimension` to reduce the preview size.
+
+`--max-pixels` limits declared pixels per frame before decoding, with a default of 192,000,000.
+This is not a hard memory limit. Resizing happens after decoding.
 
 The PNG contains no added DICOM metadata or overlays. Pixels can still contain identifying text, so export does not anonymize the image.
 See [PNG export](website/content/docs/launch-options.md#cli-png-export) for defaults, limits, and errors.

@@ -67,6 +67,10 @@ fn render(path: &Path, options: &[&str]) -> Output {
 }
 
 fn rgba(output: Output) -> Vec<[u8; 4]> {
+    rendered_rgba(output, (2, 2))
+}
+
+fn rendered_rgba(output: Output, dimensions: (u32, u32)) -> Vec<[u8; 4]> {
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -77,16 +81,20 @@ fn rgba(output: Output) -> Vec<[u8; 4]> {
         output.stderr.is_empty(),
         "success must not emit diagnostics"
     );
-    assert_eq!(&output.stdout[..8], b"\x89PNG\r\n\x1a\n");
+    decode_png(&output.stdout, dimensions)
+}
+
+fn decode_png(png: &[u8], dimensions: (u32, u32)) -> Vec<[u8; 4]> {
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
     // Permit only required image chunks, so metadata cannot leak through ancillary chunks.
-    let mut chunks = &output.stdout[8..];
+    let mut chunks = &png[8..];
     while !chunks.is_empty() {
         let length =
             u32::from_be_bytes(chunks[..4].try_into().expect("chunk length must exist")) as usize;
         assert!(matches!(&chunks[4..8], b"IHDR" | b"IDAT" | b"IEND"));
         chunks = &chunks[length + 12..];
     }
-    let mut reader = png::Decoder::new(Cursor::new(output.stdout))
+    let mut reader = png::Decoder::new(Cursor::new(png))
         .read_info()
         .expect("PNG must decode");
     let mut bytes = vec![
@@ -98,7 +106,7 @@ fn rgba(output: Output) -> Vec<[u8; 4]> {
     let info = reader
         .next_frame(&mut bytes)
         .expect("PNG must contain a frame");
-    assert_eq!((info.width, info.height), (2, 2));
+    assert_eq!((info.width, info.height), dimensions);
     assert_eq!(info.color_type, png::ColorType::Rgba);
     assert_eq!(info.bit_depth, png::BitDepth::Eight);
     bytes[..info.buffer_size()].as_chunks::<4>().0.to_vec()
@@ -150,6 +158,306 @@ fn exports_the_requested_stored_frame_without_metadata_logs_or_source_changes() 
         std::fs::read(path).expect("source must remain readable"),
         original
     );
+}
+
+#[test]
+fn saves_a_complete_png_without_overwriting_a_destination_or_source() {
+    let directory = tempfile::tempdir().expect("temporary directory must exist");
+    let path = directory.path().join("SYNTHETIC source.dcm");
+    let destination = directory.path().join("SYNTHETIC preview.png");
+    mono()
+        .write_to_file(&path)
+        .expect("synthetic image must be writable");
+    let original = std::fs::read(&path).expect("source must be readable");
+    let output = command()
+        .current_dir(directory.path())
+        .args([
+            "--output-file",
+            "SYNTHETIC preview.png",
+            "--frame",
+            "2",
+            "--",
+        ])
+        .arg(&path)
+        .output()
+        .expect("CLI must run");
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    let png = std::fs::read(&destination).expect("PNG must be saved");
+    assert_eq!(decode_png(&png, (2, 2)), gray(&[255, 128, 64, 0]));
+    assert_eq!(png, render(&path, &["--frame", "2"]).stdout);
+    for existing in [&destination, &path] {
+        error(
+            command()
+                .arg("--output-file")
+                .arg(existing)
+                .arg("--")
+                .arg(&path)
+                .output()
+                .expect("CLI must run"),
+            1,
+            "output_exists",
+        );
+    }
+    assert_eq!(std::fs::read(&path).expect("source must remain"), original);
+    assert_eq!(std::fs::read(destination).expect("PNG must remain"), png);
+    assert_eq!(
+        rgba(render(&path, &["--output-file", "-"])),
+        gray(&[0, 64, 128, 255])
+    );
+    assert_eq!(
+        std::fs::read_dir(directory.path())
+            .expect("directory must be readable")
+            .count(),
+        2,
+        "temporary output files must not remain"
+    );
+}
+
+#[test]
+fn failed_export_leaves_no_output_file_and_sanitizes_destination_errors() {
+    let directory = tempfile::tempdir().expect("temporary directory must exist");
+    let path = directory.path().join("SYNTHETIC source.dcm");
+    let destination = directory.path().join("SYNTHETIC preview.png");
+    let run = |destination: &Path| {
+        command()
+            .arg("--output-file")
+            .arg(destination)
+            .arg("--")
+            .arg(&path)
+            .output()
+            .expect("CLI must run")
+    };
+    error(run(&destination), 1, "read_error");
+    assert!(!destination.exists());
+    mono()
+        .write_to_file(&path)
+        .expect("synthetic image must be writable");
+    error(
+        run(&directory.path().join("SYNTHETIC missing/preview.png")),
+        1,
+        "output_error",
+    );
+    error(run(directory.path()), 1, "output_exists");
+    assert_eq!(
+        std::fs::read_dir(directory.path())
+            .expect("directory must be readable")
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_a_dangling_output_symlink() {
+    let directory = tempfile::tempdir().expect("temporary directory must exist");
+    let path = directory.path().join("SYNTHETIC source.dcm");
+    let destination = directory.path().join("SYNTHETIC preview.png");
+    let target = directory.path().join("SYNTHETIC missing.png");
+    mono()
+        .write_to_file(&path)
+        .expect("synthetic image must be writable");
+    std::os::unix::fs::symlink(&target, &destination).expect("symlink must be created");
+    error(
+        command()
+            .arg("--output-file")
+            .arg(&destination)
+            .arg(&path)
+            .output()
+            .expect("CLI must run"),
+        1,
+        "output_exists",
+    );
+    assert_eq!(
+        std::fs::read_link(destination).expect("symlink must remain"),
+        target
+    );
+    assert!(!target.exists());
+}
+
+#[test]
+fn checks_the_pixel_limit_before_decoding_even_when_resizing() {
+    let directory = tempfile::tempdir().expect("temporary directory must exist");
+    let path = directory.path().join("SYNTHETIC.dcm");
+    mono()
+        .write_to_file(&path)
+        .expect("synthetic image must be writable");
+    assert_eq!(
+        rgba(render(&path, &["--max-pixels", "4"])),
+        gray(&[0, 64, 128, 255])
+    );
+    let truncated = image("MONOCHROME2", "1", dicom_value!(U8, [0, 1]));
+    truncated
+        .write_to_file(&path)
+        .expect("truncated image must be writable");
+    let response = error(
+        render(&path, &["--max-pixels", "3", "--max-dimension", "1"]),
+        1,
+        "frame_too_large",
+    );
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("message must be text");
+    assert!(message.contains("4 pixels"));
+    assert!(message.contains("limit of 3"));
+    assert!(message.contains("--max-pixels 4 or higher"));
+    assert!(message.contains("resizing happens after decoding"));
+    error(render(&path, &["--max-pixels", "4"]), 1, "decode_error");
+}
+
+#[test]
+fn resizes_with_aspect_ratio_and_never_upscales() {
+    let directory = tempfile::tempdir().expect("temporary directory must exist");
+    let path = directory.path().join("synthetic.dcm");
+    for (rows, columns) in [(2, 4), (4, 2)] {
+        let mut object = image(
+            "MONOCHROME2",
+            "1",
+            dicom_value!(U8, [64, 64, 64, 64, 64, 64, 64, 64]),
+        );
+        for (tag, value) in [(0x0010, rows), (0x0011, columns)] {
+            object.put(DataElement::new(
+                Tag(0x0028, tag),
+                VR::US,
+                dicom_value!(U16, [value]),
+            ));
+        }
+        object
+            .write_to_file(&path)
+            .expect("synthetic image must be writable");
+        for (limit, dimensions) in [
+            ("8", (u32::from(columns), u32::from(rows))),
+            ("2", (u32::from(columns / 2), u32::from(rows / 2))),
+            ("1", (1, 1)),
+        ] {
+            let pixels = rendered_rgba(render(&path, &["--max-dimension", limit]), dimensions);
+            assert_eq!(
+                pixels,
+                gray(&vec![64; (dimensions.0 * dimensions.1) as usize])
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_window_overrides_metadata_and_preserves_monochrome_inversion() {
+    let directory = tempfile::tempdir().expect("temporary directory must exist");
+    let path = directory.path().join("synthetic.dcm");
+    for (photometric, expected) in [
+        ("MONOCHROME2", gray(&[0, 128, 255, 255])),
+        ("MONOCHROME1", gray(&[255, 127, 0, 0])),
+    ] {
+        image(photometric, "1", dicom_value!(U8, [0, 64, 128, 255]))
+            .write_to_file(&path)
+            .expect("synthetic image must be writable");
+        assert_eq!(
+            rgba(render(
+                &path,
+                &["--window-width", "128", "--window-center", "64"]
+            )),
+            expected
+        );
+    }
+    mono()
+        .write_to_file(&path)
+        .expect("synthetic image must be writable");
+    assert_eq!(
+        rgba(render(
+            &path,
+            &["--window-center", "-32", "--window-width", "64"]
+        )),
+        gray(&[255, 255, 255, 255])
+    );
+    image(
+        "RGB",
+        "1",
+        dicom_value!(U8, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    )
+    .write_to_file(&path)
+    .expect("synthetic image must be writable");
+    error(
+        render(&path, &["--window-center", "64", "--window-width", "128"]),
+        2,
+        "invalid_arguments",
+    );
+}
+
+#[test]
+fn rejects_invalid_export_controls_without_echoing_values() {
+    for flag in ["--max-pixels", "--max-dimension"] {
+        for value in [
+            "0",
+            "-1",
+            "+1",
+            "1.5",
+            "18446744073709551616",
+            "SYNTHETIC",
+            "",
+        ] {
+            error(
+                render(Path::new("SYNTHETIC.dcm"), &[flag, value]),
+                2,
+                "invalid_arguments",
+            );
+        }
+    }
+    for value in ["NaN", "inf", "-inf", "1e40", "SYNTHETIC", ""] {
+        for pair in [
+            ["--window-center", value, "--window-width", "128"],
+            ["--window-width", value, "--window-center", "64"],
+        ] {
+            error(
+                render(Path::new("SYNTHETIC.dcm"), &pair),
+                2,
+                "invalid_arguments",
+            );
+        }
+    }
+    for args in [
+        vec!["--max-pixels"],
+        vec!["--max-dimension"],
+        vec!["--window-center"],
+        vec!["--window-width"],
+        vec!["--output-file"],
+        vec!["--max-dimension", "4294967296", "SYNTHETIC.dcm"],
+        vec!["--window-center", "64", "SYNTHETIC.dcm"],
+        vec!["--window-width", "128", "SYNTHETIC.dcm"],
+        vec![
+            "--window-center",
+            "64",
+            "--window-width",
+            "0.5",
+            "SYNTHETIC.dcm",
+        ],
+        vec![
+            "--window-center",
+            "3e38",
+            "--window-width",
+            "3e38",
+            "SYNTHETIC.dcm",
+        ],
+        vec!["--output-file", "", "SYNTHETIC.dcm"],
+    ] {
+        error(
+            command().args(args).output().expect("CLI must run"),
+            2,
+            "invalid_arguments",
+        );
+    }
+    for (flag, value) in [
+        ("--max-pixels", "4"),
+        ("--max-dimension", "2"),
+        ("--window-center", "64"),
+        ("--window-width", "128"),
+        ("--output-file", "SYNTHETIC.png"),
+    ] {
+        error(
+            render(Path::new("SYNTHETIC.dcm"), &[flag, value, flag, value]),
+            2,
+            "invalid_arguments",
+        );
+    }
 }
 
 #[test]
@@ -217,6 +525,13 @@ fn applies_signed_sixteen_bit_rescale_and_window() {
         .write_to_file(&path)
         .expect("synthetic image must be writable");
     assert_eq!(rgba(render(&path, &[])), gray(&[0, 64, 191, 255]));
+    assert_eq!(
+        rgba(render(
+            &path,
+            &["--window-center", "-50", "--window-width", "400"]
+        )),
+        gray(&[0, 128, 255, 255])
+    );
 }
 
 #[test]
@@ -444,4 +759,23 @@ fn accepts_native_paths_without_utf8() {
         .write_to_file(&path)
         .expect("synthetic image must be writable");
     assert_eq!(rgba(render(&path, &[])), gray(&[0, 64, 128, 255]));
+    let destination = directory
+        .path()
+        .join(OsStr::from_bytes(b"synthetic-\xff.png"));
+    let output = command()
+        .arg("--output-file")
+        .arg(&destination)
+        .arg(&path)
+        .output()
+        .expect("CLI must run");
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        decode_png(
+            &std::fs::read(destination).expect("PNG must be saved"),
+            (2, 2)
+        ),
+        gray(&[0, 64, 128, 255])
+    );
 }

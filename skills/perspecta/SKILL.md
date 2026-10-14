@@ -15,6 +15,7 @@ Run `perspecta --version` to identify the installed build.
 If the executable is unavailable or this command fails, report the requirement before proceeding.
 Use `perspecta inspect --help` for the installed command syntax.
 Before PNG export, check that `perspecta --help` lists `render`. Older builds can support inspection without export.
+Check `perspecta render --help` for the available export options before using them.
 
 ## Inspect a File
 
@@ -48,10 +49,10 @@ The summary excludes patient fields and instance identifiers. It does not anonym
 
 ## Export a Frame
 
-Use `render` for a local PNG preview. Select a new output file because shell redirection can overwrite an existing file:
+Use `render` for a local PNG preview. Select a new output file:
 
 ```sh
-perspecta render --output png --frame 1 -- "example-data/image.dcm" > preview.png
+perspecta render --output-file preview.png --frame 1 -- "example-data/image.dcm"
 ```
 
 Frame numbers start at `1` in stored DICOM order. The default is frame `1`.
@@ -60,12 +61,19 @@ Export supports 8-bit and 16-bit monochrome and RGB images. It uses the existing
 
 The command shares the inspection file size limit and accepts `--max-file-mib` before `--`.
 Decode and export buffers require memory beyond the file size.
+`--max-pixels` limits declared pixels per frame before decoding. Its default is 192,000,000. It is not a hard memory limit.
 
-On successful export, treat stdout as PNG bytes. Do not parse it as JSON.
+Use `--max-dimension 2048` when a smaller preview is suitable. Resizing happens after decoding and does not lower the input pixel requirement.
+Use `--window-center` and `--window-width` together when the user requests a particular monochrome window.
+Center must be finite. Width must be finite and at least 1. Color images do not accept these window options.
+
+With `--output-file`, successful export saves a complete PNG and leaves stdout empty. Existing destinations are never overwritten.
+Without this option, or with `--output-file -`, successful export writes PNG bytes to stdout. Do not parse them as JSON.
+If an older build lacks `--output-file`, capture stdout as binary data and save it to a new file without overwriting existing files.
 Open the saved PNG with the agent's local image tool when a preview is needed.
 
 The PNG includes no added DICOM metadata or overlays. Identifying text in pixels remains, so export does not anonymize the image.
-Use `perspecta render --help` for the installed syntax. Discard the output file when export fails.
+Discard captured stdout when export fails. Preserve any destination that existed before the command.
 
 ## Handle Errors
 
@@ -74,6 +82,8 @@ Use `error.code` to identify the failure and `error.message` to explain it.
 
 - `file_too_large`: report the file size, active limit, and suggested minimum `--max-file-mib` value from the message.
   Increase the limit only when the user's instructions allow the higher value.
+- `frame_too_large`: report the pixel count, active limit, and suggested minimum `--max-pixels` value.
+  Preserve user limits. Increase the limit only when the user's instructions allow it and sufficient memory is available.
 - `read_error`: explain that the file must be a readable regular DICOM file with supported encoding.
 - `invalid_metadata`: report the invalid field without inventing a replacement value.
 - `invalid_arguments`: correct the invocation using the installed help. This error uses exit code `2`.
@@ -81,6 +91,7 @@ Use `error.code` to identify the failure and `error.message` to explain it.
 - `unsupported_image`: explain that the object type or pixel format cannot be exported as PNG.
 - `decode_error`: report that the selected frame cannot be decoded with the current build.
 - `output_error`: explain that the command could not write or flush its output. Discard any partial result.
+- `output_exists`: select a new output destination. Preserve the existing file.
 
 File, metadata, size, frame, decode, and output failures use exit code `1`.
 If the process fails without a JSON error, report the execution failure without claiming an inspection result.
