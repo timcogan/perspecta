@@ -89,7 +89,12 @@ fn rgba(output: Output) -> Vec<[u8; 4]> {
     let mut reader = png::Decoder::new(Cursor::new(output.stdout))
         .read_info()
         .expect("PNG must decode");
-    let mut bytes = vec![0; reader.output_buffer_size()];
+    let mut bytes = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("synthetic PNG buffer size must fit in memory")
+    ];
     let info = reader
         .next_frame(&mut bytes)
         .expect("PNG must contain a frame");
