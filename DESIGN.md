@@ -74,9 +74,13 @@ Its primary purpose is consistency during development, not full architecture cov
 
 34. Inspection MUST report missing fields as null. Applicable numeric fields MUST contain one positive integer within their documented range. Non-applicable dimensions and frame counts MUST remain null.
 
-35. CLI responses MUST use standard output for results, help, or version and standard error for structured errors. These responses are protocol output, separate from production diagnostic logging. `--version` MUST report `PERSPECTA_DISPLAY_VERSION`, including build suffixes, before GUI or logger initialization.
+35. CLI responses MUST use standard output for results, help, or version and standard error for structured errors. PNG export with `--output-file` MUST leave stdout empty. These responses are protocol output, separate from production diagnostic logging. `--version` MUST report `PERSPECTA_DISPLAY_VERSION`, including build suffixes, before GUI or logger initialization.
 
 36. Native `render` MUST check file size before the shared reader runs, without GUI, logger, or preload initialization. It MUST decode one stored frame, with frame 1 as the default, and reject unsupported objects and pixel layouts. Frame numbers MUST follow stored DICOM order and start at 1. It MUST use the existing window/level and RGB functions and complete PNG encoding before output. Export MUST exclude metadata and overlays, preserve source files, and document that pixels can retain identifiers.
+
+37. Native `render` MUST check declared `Rows × Columns` against `--max-pixels` before decoding, with a default of 192,000,000 pixels per frame. This limit MUST NOT be described as a hard memory bound. Manual window values MUST be finite, paired, and restricted to monochrome images, with width at least 1. Optional resizing MUST preserve aspect ratio within integer pixel rounding, avoid upscaling, and occur after decoding.
+
+38. `--output-file` MUST refuse existing destinations, including symbolic links, and install the completed PNG without overwriting a concurrently created destination. File output MUST use a temporary file in the destination directory. Output errors MUST exclude destination paths. An omitted destination or `-` MUST retain the stdout PNG contract.
 
 ## Change Rules
 

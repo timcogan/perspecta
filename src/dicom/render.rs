@@ -8,11 +8,29 @@ use super::inspect::{open_file_with_limit, read_positive_integer, InspectError};
 use super::{classify_dicom_object, min_max, read_float_first, DicomPathKind};
 use crate::renderer::{render_rgb, render_window_level};
 
+pub(crate) const DEFAULT_MAX_PIXELS: u64 = 192_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Window {
+    pub center: f32,
+    pub width: f32,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct RenderOptions {
+    pub frame: u32,
+    pub max_pixels: u64,
+    pub max_dimension: Option<u32>,
+    pub window: Option<Window>,
+}
+
 #[derive(Debug)]
 pub(crate) enum RenderError {
     Inspect(InspectError),
     Unsupported,
     FrameOutOfRange { frame: u32, frame_count: u32 },
+    PixelLimit { pixels: u64, limit: u64 },
+    ColorWindow,
     Decode,
     Output,
 }
@@ -28,6 +46,11 @@ impl fmt::Display for RenderError {
                 f,
                 "Requested frame {frame}, but the DICOM contains {frame_count} frames. Use --frame from 1 to {frame_count} in stored DICOM order.",
             ),
+            Self::PixelLimit { pixels, limit } => write!(
+                f,
+                "The DICOM frame contains {pixels} pixels, above the configured limit of {limit}. Retry with --max-pixels {pixels} or higher if enough memory is available. PNG resizing happens after decoding and does not reduce this requirement.",
+            ),
+            Self::ColorWindow => f.write_str("Window center and width apply only to monochrome images. Remove both window options for color export."),
             Self::Decode => f.write_str(
                 "Could not decode the requested DICOM frame. Check the pixel data and whether this build supports its transfer syntax and pixel layout.",
             ),
@@ -48,7 +71,7 @@ impl From<InspectError> for RenderError {
 pub(crate) fn render_file(
     path: &Path,
     limit_bytes: u64,
-    frame: u32,
+    options: &RenderOptions,
 ) -> Result<Vec<u8>, RenderError> {
     let object = open_file_with_limit(path, limit_bytes)?;
     if !matches!(classify_dicom_object(&object), DicomPathKind::Image) {
@@ -57,16 +80,27 @@ pub(crate) fn render_file(
     let frame_count =
         read_positive_integer(&object, Tag(0x0028, 0x0008), "NumberOfFrames", u32::MAX)?
             .unwrap_or(1);
+    let frame = options.frame;
     if frame == 0 || frame > frame_count {
         return Err(RenderError::FrameOutOfRange { frame, frame_count });
     }
     let rows = required_u16(&object, Tag(0x0028, 0x0010), "Rows")?;
     let columns = required_u16(&object, Tag(0x0028, 0x0011), "Columns")?;
+    let pixels = u64::from(rows) * u64::from(columns);
+    if pixels > options.max_pixels {
+        return Err(RenderError::PixelLimit {
+            pixels,
+            limit: options.max_pixels,
+        });
+    }
     let samples = required_u16(&object, Tag(0x0028, 0x0002), "SamplesPerPixel")?;
     let bits = required_u16(&object, Tag(0x0028, 0x0100), "BitsAllocated")?;
     let stored = required_u16(&object, Tag(0x0028, 0x0101), "BitsStored")?;
     if !matches!(samples, 1 | 3) || !matches!(bits, 8 | 16) {
         return Err(RenderError::Unsupported);
+    }
+    if samples != 1 && options.window.is_some() {
+        return Err(RenderError::ColorWindow);
     }
     if stored > bits {
         return Err(InspectError::InvalidMetadata("BitsStored").into());
@@ -99,10 +133,16 @@ pub(crate) fn render_file(
                 return Err(RenderError::Decode);
             }
             let (min, max) = min_max(&pixels).ok_or(RenderError::Decode)?;
-            let center = read_float_first(&object, "WindowCenter")
+            let center = options
+                .window
+                .map(|window| window.center)
+                .or_else(|| read_float_first(&object, "WindowCenter"))
                 .filter(|value| value.is_finite())
                 .unwrap_or((min as f32 + max as f32) / 2.0);
-            let window = read_float_first(&object, "WindowWidth")
+            let window = options
+                .window
+                .map(|window| window.width)
+                .or_else(|| read_float_first(&object, "WindowWidth"))
                 .filter(|value| value.is_finite())
                 .unwrap_or((max as f32 - min as f32).max(1.0));
             render_window_level(
@@ -136,9 +176,29 @@ pub(crate) fn render_file(
         .iter()
         .flat_map(|pixel| pixel.to_array())
         .collect();
+    // Release the DICOM and full-size render buffers before resizing and encoding.
+    drop(image);
+    drop(decoded);
+    drop(object);
+    let mut pixels = image::RgbaImage::from_raw(columns.into(), rows.into(), pixels)
+        .ok_or(RenderError::Output)?;
+    if let Some(maximum) = options.max_dimension.filter(|maximum| *maximum > 0) {
+        let largest = pixels.width().max(pixels.height());
+        if largest > maximum {
+            let scaled = |side: u32| {
+                (u64::from(side) * u64::from(maximum) / u64::from(largest)).max(1) as u32
+            };
+            pixels = image::imageops::resize(
+                &pixels,
+                scaled(pixels.width()),
+                scaled(pixels.height()),
+                image::imageops::FilterType::Triangle,
+            );
+        }
+    }
     let mut png = Vec::new();
     // Only dimensions and rendered pixels enter the PNG, never DICOM metadata.
-    let mut encoder = png::Encoder::new(&mut png, columns.into(), rows.into());
+    let mut encoder = png::Encoder::new(&mut png, pixels.width(), pixels.height());
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().map_err(|_| RenderError::Output)?;

@@ -3278,6 +3278,7 @@ dependencies = [
  "dicom-pixeldata",
  "dicom-transfer-syntax-registry",
  "eframe",
+ "image",
  "js-sys",
  "log",
  "png 0.18.1",
