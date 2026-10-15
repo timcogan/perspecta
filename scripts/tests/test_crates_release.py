@@ -28,6 +28,46 @@ def workflow_script(step_name):
 
 
 class CratesReleaseCheckTests(unittest.TestCase):
+    def test_publishing_job_requires_a_new_release_or_manual_retry(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        job = workflow.split("\n  publish-crate:\n", 1)[1]
+        condition = re.search(r"(?m)^    if: \$\{\{ (.+) \}\}$", job).group(1)
+        condition = condition.replace("always()", "true == true")
+        contexts = {
+            "github.event_name": "TEST_EVENT",
+            "github.ref": "TEST_REF",
+            "needs.plan.result": "TEST_PLAN",
+            "needs.publish-release.result": "TEST_RELEASE",
+            "needs.plan.outputs.release_state": "TEST_STATE",
+        }
+        for context, variable in contexts.items():
+            condition = condition.replace(context, f'"${{{variable}}}"')
+
+        cases = [
+            ("push", "master", "success", "success", "missing", True),
+            ("push", "main", "success", "success", "draft", True),
+            ("workflow_dispatch", "master", "success", "success", "missing", True),
+            ("workflow_dispatch", "master", "success", "skipped", "published", True),
+            ("workflow_dispatch", "main", "success", "skipped", "published", True),
+            ("push", "master", "success", "skipped", "published", False),
+            ("push", "main", "success", "skipped", "published", False),
+            ("workflow_dispatch", "master", "success", "failure", "missing", False),
+            ("workflow_dispatch", "master", "failure", "skipped", "published", False),
+            ("workflow_dispatch", "feature", "success", "skipped", "published", False),
+            ("pull_request", "master", "success", "success", "published", False),
+        ]
+        for event, branch, plan, release, state, expected in cases:
+            with self.subTest(event=event, branch=branch, plan=plan, release=release, state=state):
+                environment = dict(
+                    os.environ, TEST_EVENT=event, TEST_REF=f"refs/heads/{branch}",
+                    TEST_PLAN=plan, TEST_RELEASE=release, TEST_STATE=state,
+                )
+                result = subprocess.run(
+                    ["bash", "-c", f"[[ {condition} ]]"], env=environment,
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0 if expected else 1, result.stderr)
+
     def test_publishing_job_uses_crates_io_environment(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         job = re.split(r"\n  \S", workflow.split("\n  publish-crate:\n", 1)[1], maxsplit=1)[0]
