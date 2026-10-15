@@ -47,6 +47,10 @@ when the GitHub Release succeeds. It checks out the release tag and skips versio
 that already exist in crates.io. A manual Release run on `main` or `master` can retry
 crate publication for an existing GitHub Release.
 
+The `publish-crate` job uses the `crates-io` GitHub environment.
+Manual reviewer approval is optional.
+The crates.io Trusted Publisher must specify `crates-io` as its environment.
+
 ## Local Prerelease Builds
 
 For frequent local debug builds, keep `Cargo.toml` on the plain `X.Y.Z` version

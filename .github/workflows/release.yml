@@ -423,6 +423,7 @@ jobs:
     needs: [plan, publish-release]
     if: ${{ always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && needs.plan.result == 'success' && (needs.publish-release.result == 'success' || needs.plan.outputs.release_state == 'published') }}
     runs-on: ubuntu-22.04
+    environment: crates-io
     permissions:
       contents: read
       id-token: write

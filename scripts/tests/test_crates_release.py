@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -27,6 +28,11 @@ def registry_check_script():
 
 
 class CratesReleaseCheckTests(unittest.TestCase):
+    def test_publishing_job_uses_crates_io_environment(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        job = re.split(r"\n  \S", workflow.split("\n  publish-crate:\n", 1)[1], maxsplit=1)[0]
+        self.assertRegex(job, r"(?m)^    environment: crates-io$")
+
     def run_check(self, *, status="404", body=None, tag="v0.6.0", curl_exit=0):
         self.assertIsNotNone(shutil.which("jq"), "The workflow tests require jq")
         with tempfile.TemporaryDirectory() as temporary:
