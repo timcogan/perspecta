@@ -305,8 +305,11 @@ fn is_perspecta_uri(value: &str) -> bool {
 
 fn strip_perspecta_scheme(uri: &str) -> Option<&str> {
     let prefix = "perspecta://";
-    if uri.len() >= prefix.len() && uri[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&uri[prefix.len()..])
+    if uri
+        .get(..prefix.len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case(prefix))
+    {
+        uri.get(prefix.len()..)
     } else {
         None
     }
@@ -479,6 +482,20 @@ fn decode_hex_digit(value: u8) -> Option<u8> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_local_path_does_not_panic_during_scheme_detection() {
+        let path = format!("{}é.dcm", "x".repeat(11));
+        let request = parse_launch_request_from_args(std::slice::from_ref(&path))
+            .expect("a Unicode filename must remain a local launch path");
+        assert_eq!(request, Some(LaunchRequest::LocalPaths(vec![path.into()])));
+    }
+
+    #[test]
+    fn unicode_invalid_scheme_returns_an_error_without_panicking() {
+        let uri = format!("{}é", "x".repeat(11));
+        assert!(parse_perspecta_uri(&uri).is_err());
+    }
 
     #[test]
     fn parse_single_path_query() {

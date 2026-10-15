@@ -1,0 +1,213 @@
+"""Exercise the release workflow's registry check without network access."""
+
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import textwrap
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def workflow_script(step_name):
+    workflow = (ROOT / ".github/workflows/release.yml").read_text()
+    job = workflow.split("\n  publish-crate:\n", 1)[1]
+    step = job.split(f"      - name: {step_name}\n", 1)[1]
+    block = step.split("        run: |\n", 1)[1]
+    lines = []
+    for line in block.splitlines():
+        if line and not line.startswith("          "):
+            break
+        lines.append(line)
+    return textwrap.dedent("\n".join(lines))
+
+
+class CratesReleaseCheckTests(unittest.TestCase):
+    def test_publishing_job_requires_a_new_release_or_manual_retry(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        job = workflow.split("\n  publish-crate:\n", 1)[1]
+        condition = re.search(r"(?m)^    if: \$\{\{ (.+) \}\}$", job).group(1)
+        condition = condition.replace("always()", "true == true")
+        contexts = {
+            "github.event_name": "TEST_EVENT",
+            "github.ref": "TEST_REF",
+            "needs.plan.result": "TEST_PLAN",
+            "needs.publish-release.result": "TEST_RELEASE",
+            "needs.plan.outputs.release_state": "TEST_STATE",
+        }
+        for context, variable in contexts.items():
+            condition = condition.replace(context, f'"${{{variable}}}"')
+
+        cases = [
+            ("push", "master", "success", "success", "missing", True),
+            ("push", "main", "success", "success", "draft", True),
+            ("workflow_dispatch", "master", "success", "success", "missing", True),
+            ("workflow_dispatch", "master", "success", "skipped", "published", True),
+            ("workflow_dispatch", "main", "success", "skipped", "published", True),
+            ("push", "master", "success", "skipped", "published", False),
+            ("push", "main", "success", "skipped", "published", False),
+            ("workflow_dispatch", "master", "success", "failure", "missing", False),
+            ("workflow_dispatch", "master", "failure", "skipped", "published", False),
+            ("workflow_dispatch", "feature", "success", "skipped", "published", False),
+            ("pull_request", "master", "success", "success", "published", False),
+        ]
+        for event, branch, plan, release, state, expected in cases:
+            with self.subTest(event=event, branch=branch, plan=plan, release=release, state=state):
+                environment = dict(
+                    os.environ, TEST_EVENT=event, TEST_REF=f"refs/heads/{branch}",
+                    TEST_PLAN=plan, TEST_RELEASE=release, TEST_STATE=state,
+                )
+                result = subprocess.run(
+                    ["bash", "-c", f"[[ {condition} ]]"], env=environment,
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0 if expected else 1, result.stderr)
+
+    def test_publishing_job_uses_crates_io_environment(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        job = re.split(r"\n  \S", workflow.split("\n  publish-crate:\n", 1)[1], maxsplit=1)[0]
+        self.assertRegex(job, r"(?m)^    environment: crates-io$")
+
+    def run_source_check(self, source):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            environment = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args], cwd=directory, env=environment,
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip()
+
+            git("init", "--quiet")
+            git("config", "user.name", "Synthetic Maintainer")
+            git("config", "user.email", "maintainer@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            git("commit", "--quiet", "--allow-empty", "-m", "Released source")
+            released = git("rev-parse", "HEAD")
+            git("commit", "--quiet", "--allow-empty", "-m", "Workflow update")
+            workflow_commit = git("rev-parse", "HEAD")
+            if source != "current":
+                git("checkout", "--quiet", "--detach", released)
+            if source == "unmerged":
+                git("commit", "--quiet", "--allow-empty", "-m", "Unmerged source")
+            environment["RELEASE_WORKFLOW_COMMIT"] = workflow_commit
+            return subprocess.run(
+                ["bash", "-c", workflow_script("Verify released source")],
+                cwd=directory, env=environment, capture_output=True, text=True, check=False,
+            )
+
+    def test_new_release_accepts_the_workflow_commit(self):
+        result = self.run_source_check("current")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_release_retry_accepts_an_ancestor_commit(self):
+        result = self.run_source_check("ancestor")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unmerged_tagged_source_is_rejected(self):
+        result = self.run_source_check("unmerged")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside the triggering workflow commit's history", result.stderr)
+
+    def run_check(self, *, status="404", body=None, tag="v0.6.0", curl_exit=0):
+        self.assertIsNotNone(shutil.which("jq"), "The workflow tests require jq")
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            output = directory / "output"
+            curl_called = directory / "curl-called"
+            cargo = directory / "cargo"
+            cargo.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "assert sys.argv[1:] == ['metadata', '--no-deps', '--locked', '--format-version=1']\n"
+                "print(json.dumps({'packages': [{'name': 'perspecta', 'version': '0.6.0'}]}))\n"
+            )
+            curl = directory / "curl"
+            curl.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, pathlib, sys\n"
+                "pathlib.Path(os.environ['TEST_CURL_CALLED']).touch()\n"
+                "assert sys.argv[-1] == 'https://crates.io/api/v1/crates/perspecta/0.6.0'\n"
+                "if int(os.environ['TEST_CURL_EXIT']):\n"
+                "    sys.exit(int(os.environ['TEST_CURL_EXIT']))\n"
+                "destination = sys.argv[sys.argv.index('--output') + 1]\n"
+                "pathlib.Path(destination).write_text(os.environ['TEST_RESPONSE'])\n"
+                "print(os.environ['TEST_STATUS'], end='')\n"
+            )
+            cargo.chmod(0o755)
+            curl.chmod(0o755)
+            environment = dict(
+                os.environ,
+                PATH=str(directory) + os.pathsep + os.environ.get("PATH", ""),
+                GITHUB_OUTPUT=str(output),
+                RELEASE_TAG=tag,
+                TEST_STATUS=status,
+                TEST_RESPONSE=json.dumps(body) if body is not None else "not JSON",
+                TEST_CURL_EXIT=str(curl_exit),
+                TEST_CURL_CALLED=str(curl_called),
+            )
+            result = subprocess.run(
+                ["bash", "-c", workflow_script("Check crates.io version")],
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            outputs = output.read_text() if output.exists() else ""
+            return result, outputs, curl_called.exists()
+
+    def test_missing_version_requests_publication(self):
+        result, outputs, called = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs, "publish=true\n")
+        self.assertTrue(called)
+
+    def test_existing_version_skips_publication(self):
+        body = {"version": {"crate": "perspecta", "num": "0.6.0", "yanked": False}}
+        result, outputs, _ = self.run_check(status="200", body=body)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(outputs, "publish=false\n")
+
+    def test_tag_mismatch_fails_before_registry_request(self):
+        result, outputs, called = self.run_check(tag="v0.7.0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match", result.stderr)
+        self.assertEqual(outputs, "")
+        self.assertFalse(called)
+
+    def test_network_error_does_not_request_publication(self):
+        result, outputs, _ = self.run_check(curl_exit=7)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(outputs, "")
+
+    def test_registry_errors_do_not_request_publication(self):
+        for status in ("401", "403", "429", "500", "503"):
+            with self.subTest(status=status):
+                result, outputs, _ = self.run_check(status=status)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Could not check crates.io", result.stderr)
+                self.assertEqual(outputs, "")
+
+    def test_invalid_existing_version_does_not_request_publication(self):
+        bodies = [
+            None,
+            {},
+            {"version": {"crate": "perspecta", "num": "0.6.0", "yanked": True}},
+            {"version": {"crate": "perspecta", "num": "0.5.3", "yanked": False}},
+            {"version": {"crate": "other-crate", "num": "0.6.0", "yanked": False}},
+        ]
+        for body in bodies:
+            with self.subTest(body=body):
+                result, outputs, _ = self.run_check(status="200", body=body)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(outputs, "")
+
+
+if __name__ == "__main__":
+    unittest.main()

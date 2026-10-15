@@ -42,7 +42,15 @@ GitHub Actions `workflow_dispatch`.
 
 CI runs `cargo publish --dry-run --locked -p perspecta` after the Rust tests.
 This check builds the packaged source without a registry upload.
-Publication to crates.io is currently manual.
+The Release workflow publishes the source package to crates.io through Trusted Publishing
+when the GitHub Release succeeds. It checks out the release tag and skips versions
+that already exist in crates.io. A manual Release run on `main` or `master` can retry
+crate publication for an existing GitHub Release.
+
+The `publish-crate` job uses the `crates-io` GitHub environment.
+It rejects released source outside the triggering workflow commit's Git history.
+Manual reviewer approval is optional.
+The crates.io Trusted Publisher must specify `crates-io` as its environment.
 
 ## Local Prerelease Builds
 

@@ -418,3 +418,106 @@ jobs:
         run: |
           set -euo pipefail
           gh release edit "$RELEASE_TAG" -R "$GH_REPO" --draft=false --latest
+
+  publish-crate:
+    needs: [plan, publish-release]
+    if: ${{ always() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && needs.plan.result == 'success' && (needs.publish-release.result == 'success' || (github.event_name == 'workflow_dispatch' && needs.plan.outputs.release_state == 'published')) }}
+    runs-on: ubuntu-22.04
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - name: Checkout released source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify released source
+        shell: bash
+        env:
+          RELEASE_WORKFLOW_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor HEAD "$RELEASE_WORKFLOW_COMMIT"; then
+            echo "Released source is outside the triggering workflow commit's history" >&2
+            exit 1
+          fi
+
+      - name: Resolve Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
+          [[ -n "$toolchain" ]] || { echo "Rust toolchain is missing" >&2; exit 1; }
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}
+
+      - name: Check crates.io version
+        id: crate
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --locked --format-version=1 | jq -er '.packages[] | select(.name == "perspecta") | .version')"
+          [[ "$RELEASE_TAG" == "v$version" ]] || {
+            echo "Package version does not match the release tag" >&2
+            exit 1
+          }
+          response="$(mktemp)"
+          trap 'rm -f "$response"' EXIT
+          status="$(curl --silent --show-error --location --retry 3 --connect-timeout 15 --max-time 60 \
+            --user-agent "perspecta-release-workflow" --output "$response" --write-out '%{http_code}' \
+            "https://crates.io/api/v1/crates/perspecta/$version")"
+          case "$status" in
+            200)
+              if ! jq -e --arg version "$version" \
+                '.version.crate == "perspecta" and .version.num == $version and .version.yanked == false' \
+                "$response" > /dev/null; then
+                echo "Invalid or yanked version in crates.io response" >&2
+                exit 1
+              fi
+              echo "perspecta $version is already published; skipping upload"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Could not check crates.io version (HTTP $status)" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Install native build dependencies
+        if: steps.crate.outputs.publish == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc libc6-dev
+
+      - name: Cache cargo artifacts
+        if: steps.crate.outputs.publish == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate crates.io package
+        if: steps.crate.outputs.publish == 'true'
+        run: cargo publish --dry-run --locked -p perspecta --registry crates-io
+
+      - name: Authenticate with crates.io
+        if: steps.crate.outputs.publish == 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Publish to crates.io
+        if: steps.crate.outputs.publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked -p perspecta --registry crates-io
