@@ -15,22 +15,34 @@ GitHub Actions `workflow_dispatch`.
 
 ## Steps to Publish a Release
 
-1. Update the version in `Cargo.toml`:
+1. Create a release branch from the current `main` or `master` branch.
+   - Example branch: `release/vX.Y.Z`
+2. Update the version in `Cargo.toml`:
    - `version = "X.Y.Z"`
-2. Sync `Cargo.lock` if the package version entry changed.
-3. Commit the release change:
+3. Sync `Cargo.lock` if the package version entry changed.
+4. Commit the release change:
    - Example message: `chore(release): vX.Y.Z`
-4. Push the commit to `main` or `master`.
-5. GitHub Actions will:
+5. Push the release branch.
+   Open a pull request into `main` or `master`.
+6. Wait for the required checks and approvals.
+   Merge the pull request.
+   Do not push release commits directly to `main` or `master`.
+7. After the merge, GitHub Actions will:
    - detect that the package version changed
    - build every platform artifact before creating a GitHub Release
    - create or reuse exactly one draft `vX.Y.Z` release for that commit
    - let `cargo-dist` upload release artifacts into that draft
    - publish the finished GitHub Release automatically
-6. If a build fails, rerun the existing workflow or start the `Release` workflow
+8. If a build fails, rerun the existing workflow or start the `Release` workflow
    manually from the Actions tab on `main` or `master`; no draft is created until
    every build succeeds. If uploading or publishing fails after draft creation,
    rerun the same commit so the workflow can safely reuse that draft.
+
+## crates.io Package
+
+CI runs `cargo publish --dry-run --locked -p perspecta` after the Rust tests.
+This check builds the packaged source without a registry upload.
+Publication to crates.io is currently manual.
 
 ## Local Prerelease Builds
 
@@ -49,8 +61,8 @@ local build ID, set `LOCAL_BUILD_TIMESTAMP=YYYYMMDDHHMMSS`.
 
 ## Notes
 
-- Automatic publishing only happens when the version changes and the
-  corresponding `vX.Y.Z` release has not already been published.
+- Automatic GitHub Release publishing only happens when the version changes
+  and the corresponding `vX.Y.Z` release has not already been published.
 - A draft is reused only when it is the sole draft for the release tag and its
   target exactly matches the workflow commit. Duplicate drafts or a different
   target commit stop the workflow for manual review.

@@ -98,6 +98,9 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-targets --all-features --locked
 
+      - name: Validate crates.io package
+        run: cargo publish --dry-run --locked -p perspecta
+
   wasm:
     name: WebAssembly Checks
     needs: [version]
