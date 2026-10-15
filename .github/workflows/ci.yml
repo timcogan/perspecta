@@ -89,6 +89,9 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Test crates.io release checks
+        run: python3 -B -m unittest discover -s scripts/tests -p "test_crates_release.py"
+
       - name: Format check
         run: cargo fmt --all -- --check
 
