@@ -4,10 +4,25 @@ resolver = "2"
 
 [package]
 name = "perspecta"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.95"
+description = "Open-source DICOM viewer with a CLI for inspection and PNG export."
+license = "MIT"
+homepage = "https://perspecta.cogan.dev/"
 repository = "https://github.com/timcogan/perspecta"
+readme = "README.md"
+publish = ["crates-io"]
+include = [
+    "/src/**",
+    "/tests/**",
+    "/assets/*.svg",
+    "/build.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+]
 autobins = false
 default-run = "perspecta"
 
