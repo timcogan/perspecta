@@ -14,10 +14,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def registry_check_script():
+def workflow_script(step_name):
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
     job = workflow.split("\n  publish-crate:\n", 1)[1]
-    step = job.split("      - name: Check crates.io version\n", 1)[1]
+    step = job.split(f"      - name: {step_name}\n", 1)[1]
     block = step.split("        run: |\n", 1)[1]
     lines = []
     for line in block.splitlines():
@@ -32,6 +32,48 @@ class CratesReleaseCheckTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         job = re.split(r"\n  \S", workflow.split("\n  publish-crate:\n", 1)[1], maxsplit=1)[0]
         self.assertRegex(job, r"(?m)^    environment: crates-io$")
+
+    def run_source_check(self, source):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            environment = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", *args], cwd=directory, env=environment,
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip()
+
+            git("init", "--quiet")
+            git("config", "user.name", "Synthetic Maintainer")
+            git("config", "user.email", "maintainer@example.invalid")
+            git("config", "commit.gpgsign", "false")
+            git("commit", "--quiet", "--allow-empty", "-m", "Released source")
+            released = git("rev-parse", "HEAD")
+            git("commit", "--quiet", "--allow-empty", "-m", "Workflow update")
+            workflow_commit = git("rev-parse", "HEAD")
+            if source != "current":
+                git("checkout", "--quiet", "--detach", released)
+            if source == "unmerged":
+                git("commit", "--quiet", "--allow-empty", "-m", "Unmerged source")
+            environment["RELEASE_WORKFLOW_COMMIT"] = workflow_commit
+            return subprocess.run(
+                ["bash", "-c", workflow_script("Verify released source")],
+                cwd=directory, env=environment, capture_output=True, text=True, check=False,
+            )
+
+    def test_new_release_accepts_the_workflow_commit(self):
+        result = self.run_source_check("current")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_release_retry_accepts_an_ancestor_commit(self):
+        result = self.run_source_check("ancestor")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unmerged_tagged_source_is_rejected(self):
+        result = self.run_source_check("unmerged")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside the triggering workflow commit's history", result.stderr)
 
     def run_check(self, *, status="404", body=None, tag="v0.6.0", curl_exit=0):
         self.assertIsNotNone(shutil.which("jq"), "The workflow tests require jq")
@@ -71,7 +113,7 @@ class CratesReleaseCheckTests(unittest.TestCase):
                 TEST_CURL_CALLED=str(curl_called),
             )
             result = subprocess.run(
-                ["bash", "-c", registry_check_script()],
+                ["bash", "-c", workflow_script("Check crates.io version")],
                 env=environment,
                 text=True,
                 capture_output=True,
