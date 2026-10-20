@@ -73,7 +73,7 @@ jobs:
           echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}
           targets: wasm32-unknown-unknown
@@ -84,7 +84,7 @@ jobs:
           shared-key: pages-wasm
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@3be4ad2b146f3302f92e5956c54fedbb6ae8cccc # v1.25.3
+        uses: cargo-bins/cargo-binstall@8a2045612414e945291083f820cd50b4d8fc2218 # v1.26.0
         with:
           version: "1.21.1"
 
