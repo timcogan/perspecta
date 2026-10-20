@@ -199,7 +199,7 @@ impl DicomViewerApp {
     ) -> bool {
         let overlay_height = (ctx.content_rect().height() * 0.62).max(180.0);
         let mut open_requested = false;
-        egui::Area::new(egui::Id::new("metadata-overlay-left"))
+        egui::Area::new(egui::Id::unique("metadata-overlay-left"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::LEFT_TOP, egui::vec2(10.0, 36.0))
             .show(ctx, |ui| {
@@ -308,7 +308,7 @@ impl DicomViewerApp {
         popup_open: &mut bool,
         add_contents: impl FnOnce(&mut egui::Ui),
     ) {
-        let popup_id = egui::Id::new("full-metadata-popup");
+        let popup_id = egui::Id::unique("full-metadata-popup");
         let screen_rect = ctx.content_rect();
         let default_size = egui::vec2(
             (screen_rect.width() * 0.74).clamp(520.0, 980.0),

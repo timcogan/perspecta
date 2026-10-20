@@ -1089,7 +1089,7 @@ impl DicomViewerApp {
         Self::with_centered_popup_window(
             ctx,
             &mut window_open,
-            egui::Id::new("settings-popup"),
+            egui::Id::unique("settings-popup"),
             "Settings",
             egui::vec2(420.0, 250.0),
             false,
@@ -1901,12 +1901,12 @@ impl DicomViewerApp {
         let overlay_rect = ctx.content_rect();
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
-            egui::Id::new("file-drop-backdrop"),
+            egui::Id::unique("file-drop-backdrop"),
         ));
         painter.rect_filled(overlay_rect, 0.0, egui::Color32::from_black_alpha(168));
 
         let heading = Self::file_drop_overlay_heading(hovered_files);
-        egui::Area::new(egui::Id::new("file-drop-overlay"))
+        egui::Area::new(egui::Id::unique("file-drop-overlay"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
@@ -2540,9 +2540,7 @@ impl DicomViewerApp {
 
     fn register_icon_button_accessibility(response: &egui::Response, label: &'static str) {
         let enabled = response.enabled();
-        response.widget_info(move || {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
-        });
+        response.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     }
 
     fn paint_close_icon(painter: &egui::Painter, button_rect: egui::Rect, stroke: egui::Stroke) {
@@ -2859,7 +2857,7 @@ impl DicomViewerApp {
         enabled: bool,
         add_contents: impl FnOnce(&mut egui::Ui),
     ) {
-        egui::Area::new(egui::Id::new(id))
+        egui::Area::new(egui::Id::unique(id))
             .movable(false)
             .interactable(enabled)
             .default_width(width)
@@ -3224,7 +3222,7 @@ impl DicomViewerApp {
         const GRIP_SIZE: f32 = 18.0;
         const MARGIN: f32 = 1.0;
 
-        egui::Area::new(egui::Id::new("window-resize-grip"))
+        egui::Area::new(egui::Id::unique("window-resize-grip"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-MARGIN, -MARGIN))
             .show(ctx, |ui| {
@@ -4216,7 +4214,7 @@ impl eframe::App for DicomViewerApp {
 
         if has_history {
             let overlay_height = (ctx.content_rect().height() * 0.62).max(160.0);
-            egui::Area::new(egui::Id::new("history-overlay-right"))
+            egui::Area::new(egui::Id::unique("history-overlay-right"))
                 .order(egui::Order::Foreground)
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 36.0))
                 .show(ctx, |ui| {
@@ -4231,7 +4229,7 @@ impl eframe::App for DicomViewerApp {
 
         if let Some(message) = self.load_error_message.clone() {
             let mut dismiss_error = false;
-            egui::Area::new(egui::Id::new("load-error-overlay"))
+            egui::Area::new(egui::Id::unique("load-error-overlay"))
                 .order(egui::Order::Foreground)
                 .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 36.0))
                 .show(ctx, |ui| {
