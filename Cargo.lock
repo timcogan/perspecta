@@ -937,13 +937,13 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "dicom-core"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cc2f5e27e1395515510d3c71ad3d86f8f3c1597b23659f7df8cc933f94b92a2"
+checksum = "aa143c4f4294379852028025b897d398b0d4735a5694e7c46c92d80c5ad68e85"
 dependencies = [
  "chrono",
  "either",
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "num-traits",
  "safe-transmute",
  "smallvec",
@@ -952,9 +952,9 @@ dependencies = [
 
 [[package]]
 name = "dicom-dictionary-std"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd658dbe4102706148f924227cc5107677a9b0341c2efa2aa041b2c9c7d23d00"
+checksum = "fd7263f5b14fa4149712c0ec01c0a6fdcbe37ad54d55df268a342fe68ef00444"
 dependencies = [
  "dicom-core",
  "once_cell",
@@ -962,9 +962,9 @@ dependencies = [
 
 [[package]]
 name = "dicom-encoding"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31c6ac3cbc66644aa0f4727130b34c548ac470ba8678202dbfc0be11f9169264"
+checksum = "79b2af265310a0cd00114910fe94922a279a56202c8ad16fe927b0f6173614f7"
 dependencies = [
  "byteordered",
  "dicom-core",
@@ -975,9 +975,9 @@ dependencies = [
 
 [[package]]
 name = "dicom-object"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0504b87987f0e7624cf7ee063fe7ffdb438c66c092620817fb9bb0f130686b85"
+checksum = "378b9d8872069f3a900c7ed66f1c3d55a647a2c29ccd3d3697b9e681e38601f8"
 dependencies = [
  "byteordered",
  "dicom-core",
@@ -985,7 +985,7 @@ dependencies = [
  "dicom-encoding",
  "dicom-parser",
  "dicom-transfer-syntax-registry",
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "smallvec",
  "snafu",
  "tracing",
@@ -993,9 +993,9 @@ dependencies = [
 
 [[package]]
 name = "dicom-parser"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b35ad5a068e04a6e1c441982438e41d92b940a7c52998388b31197c7393a6ae"
+checksum = "515e403bfc31a96d639f6763794e9ca39315495f090dbc04ca66543fe6aa756b"
 dependencies = [
  "dicom-core",
  "dicom-dictionary-std",
@@ -1007,9 +1007,9 @@ dependencies = [
 
 [[package]]
 name = "dicom-pixeldata"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6362ed7417c2e431c4cb0f5bb8f45e6eefc8665f70354c8352287a64b176f3e"
+checksum = "4d9507a2e372845943e6bca1e745026a07f34dcf6ca99ecbc5658288b4613106"
 dependencies = [
  "byteorder",
  "dicom-core",
@@ -1026,9 +1026,9 @@ dependencies = [
 
 [[package]]
 name = "dicom-transfer-syntax-registry"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f05c1eb0b59a2c2fdee65fc73105f8a4c346d91f7d74b5d560b1807acf802101"
+checksum = "93fccc295971fd942d8b1b3573229ca2d48746afd51df6650acf353313f1626f"
 dependencies = [
  "byteordered",
  "charls",
@@ -2668,9 +2668,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.34"
+version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "loop9"
@@ -3305,7 +3305,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4402,18 +4402,18 @@ dependencies = [
 
 [[package]]
 name = "snafu"
-version = "0.9.1"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1a012328be2e3f5d5f6f3218147ca02588cea4cb865e876849ab6debcf36522"
+checksum = "e45cb604038abb7b926b679887b3226d8d0f23874b66623625a0454be425a4b7"
 dependencies = [
  "snafu-derive",
 ]
 
 [[package]]
 name = "snafu-derive"
-version = "0.9.1"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f103c50866b8743da9429b8a581d81a27c2d3a9c4ac7df8f8571c1dd7896eda"
+checksum = "287f59010008f0d7cf5e3b03196d666c1acc46c8d3e9cf34c28a1a7157601e72"
 dependencies = [
  "heck",
  "proc-macro2",
